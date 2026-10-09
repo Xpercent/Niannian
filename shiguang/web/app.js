@@ -677,7 +677,7 @@ function eventDetail(event) {
       )
       .join("");
   }
-  if (detail.resolution)
+  if (event.action === "RESOLVE" && detail.resolution)
     return `<div class="event-detail">状态：${e(statuses[detail.resolution] || detail.resolution)}</div>`;
   return detail.reason
     ? `<div class="event-detail">${e(detail.reason === "same_action_and_distinctive_object" ? "相同行动与对象，追加消息来源" : detail.reason)}</div>`

@@ -118,6 +118,12 @@ def human_size(value: int | None) -> str:
 USELESS_NAME = re.compile(r"^(?:@\S+|[\W_]+)$", re.UNICODE)
 # 只剩一个类型标签、没有任何细节的摘要：既不该立成待办，也不值得占模型上下文。
 PLACEHOLDER = re.compile(r"^\[(?:图片|动画表情|视频|语音|文件|链接|卡片|小程序|位置|附件)\]$")
+ATTACHMENT_LINE = re.compile(r"^\[(?:图片|动画表情|视频|语音|文件|链接|卡片|小程序|位置|附件)(?: \d+:\d{2})?\]\s*(.*)$")
+TITLE_REQUEST = re.compile(
+    r"(?:请|麻烦|务必|必须|记得|别忘|需要你|所有人|全体).{0,40}"
+    r"(?:提交|填写|上传|下载|接龙|报名|完成|确认|检查|签字|缴费|反馈|登记|领取|参加)"
+    r"|(?:截止|之前|前|今天|明天|\d+[月日号点:：]).{0,20}(?:提交|填写|上传|接龙|报名|完成|缴费|登记)"
+)
 
 
 def clean_name(value: str | None) -> str:
@@ -130,9 +136,25 @@ def is_placeholder(content: str) -> bool:
 
 
 def attachment_only(content: str) -> bool:
-    """整条消息只有附件摘要、没有任何文字——这种消息不构成可行动请求。"""
+    """附件标题、来源品牌和重复标题不是行动；明确请求或额外说明可提炼。"""
     lines = [line.strip() for line in (content or "").splitlines() if line.strip()]
-    return bool(lines) and all(is_placeholder(line) for line in lines)
+    captions = []
+    labels = set()
+    summaries = 0
+    for line in lines:
+        match = ATTACHMENT_LINE.match(line)
+        if match is None:
+            captions.append(line)
+            continue
+        summaries += 1
+        parts = [part.strip() for part in match[1].split(" · ") if part.strip()]
+        # Source names such as 接龙管家 are brands, not requests from a sender.
+        if parts and TITLE_REQUEST.search(parts[0]):
+            return False
+        labels.update(re.sub(r"\s+", "", part).casefold() for part in parts)
+    if not summaries:
+        return False
+    return all(re.sub(r"\s+", "", caption).casefold() in labels for caption in captions)
 
 
 def summarize(attachment: dict[str, Any]) -> str:

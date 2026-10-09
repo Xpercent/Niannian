@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from shiguang.media import parse_attachment, safe_media_path, summarize
+from shiguang.media import TITLE_REQUEST, attachment_only, parse_attachment, safe_media_path, summarize
 from shiguang.storage import Database
 from shiguang.wechat import WechatWorker, _sender, acquire_instance_lock, infer_self_ids, normalize, session_id
 
@@ -218,6 +218,38 @@ def test_real_media_xml_has_readable_summary(captured, tmp_path):
         assert "aeskey" not in item and "cdnurl" not in item
     assert safe_media_path(tmp_path, "../config.json") is None
     assert safe_media_path(tmp_path, "account/../config.json") is None
+
+
+def test_actual_attachment_labels_cannot_invent_requests(captured):
+    attachments = [normalize(captured["account"], row["session_id"], row["raw"])
+                   for row in captured["messages"]]
+    kinds = set()
+    checked = 0
+    for payload in attachments:
+        description = payload["metadata"].get("attachment", {})
+        if description.get("kind") not in {"miniapp", "link", "file"}:
+            continue
+        title = description.get("name", "")
+        if TITLE_REQUEST.search(title):
+            assert not attachment_only(payload["content"])
+            continue
+        assert attachment_only(payload["content"])
+        # Replay repetition of the captured asset's own title; no new chat prose.
+        if title:
+            assert attachment_only(payload["content"] + "\n" + title)
+        kinds.add(description["kind"])
+        checked += 1
+    assert checked and kinds == {"miniapp", "link", "file"}
+
+
+def test_actual_action_caption_remains_actionable(captured):
+    payloads = [normalize(captured["account"], row["session_id"], row["raw"])
+                for row in captured["messages"]]
+    caption = next(payload["content"] for payload in payloads if
+                   not payload["metadata"].get("attachment") and TITLE_REQUEST.search(payload["content"]))
+    attachment = next(payload["content"] for payload in payloads if
+                      payload["metadata"].get("attachment", {}).get("kind") == "miniapp")
+    assert not attachment_only(attachment + "\n" + caption)
 
 
 def test_lock_covers_complete_project_cache(tmp_path):

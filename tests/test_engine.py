@@ -353,6 +353,21 @@ class EngineTests(unittest.TestCase):
         result = guard_decisions(candidates[0], [Instruction(action="CREATE", title="完成双签表")])
         self.assertEqual([command.action for command in result], ["CREATE"])
 
+    def test_real_optional_household_transfer_requires_review(self):
+        from shiguang.llm import guard_decisions, requires_review
+        raw_path = ROOT / "data" / "raw-wechat.json"
+        if not raw_path.exists():
+            self.skipTest("Raw capture unavailable")
+        capture = json.loads(raw_path.read_text(encoding="utf-8"))
+        row = next((entry for entry in capture["messages"] if "户口" in entry["raw"]["content"] and
+                    "如果还有" in entry["raw"]["content"]), None)
+        if row is None:
+            self.skipTest("No real optional household transfer invitation")
+        item = normalize(capture["account"], row["session_id"], row["raw"], set())
+        self.assertTrue(requires_review(item, ""))
+        commands = guard_decisions(item, [Instruction(action="CREATE", title="确认户口迁移")])
+        self.assertEqual([command.action for command in commands], ["IGNORE"])
+
     def test_time_and_sender_identity_are_stable(self):
         self.assertEqual(parse_time("2026-10-09T00:00:00Z"), parse_time("2026-10-09T08:00:00+08:00"))
         self.assertIsNotNone(parse_time("2026-10-09T08:00:00").tzinfo)
