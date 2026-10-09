@@ -17,7 +17,7 @@ flowchart LR
   E --> G
   G -->|版本约束与审计| D
   D --> A[FastAPI]
-  A --> U[亮色 ES Modules 工作台]
+  A --> U[亮色 React 工作台]
 ```
 
 ## 采集：先可靠接住，再决定行动
@@ -44,6 +44,10 @@ CREATE 精确或保守语义去重；语义合并只接受同动作族、完整�
 
 消息时间在摄入时规范为 UTC，游标使用会话、时间、ID 组合，防止乱序插入导致漏页。每个连接开启外键与 busy_timeout；SQLite WAL 允许读取与短写入并存。任务手动更新使用乐观版本，事件保留 before/after。备份使用 SQLite backup API 并校验完整性，导出在同一读取快照中完成。
 
-API 层只校验与协调，不维护业务全局。前端不导入构建工具或第三方 CDN，静态文件随 Python 包分发；网络错误、409 和无效表单保留输入。媒体路由只返回被真实消息 metadata 引用的已存在附件。
+API 层只校验与协调，不维护业务全局。前端使用 Vite、React、TypeScript、Tailwind CSS、shadcn/ui、shadcn/ui Charts（Recharts）与 lucide-react，构建产物随 Python 包分发；网络错误、409 和无效表单保留输入。该前端框架替换由用户于 2026-10-10 明确要求，后端 API 与数据边界不变。媒体路由只返回被真实消息 metadata 引用的已存在附件。
+
+前端源码在 `shiguang/web/src/`：`app.tsx` 管理导航、真实概览与单轮进度；`pages/` 按业务模块拆分；`components/ui/` 为本地 shadcn/ui 组件源码，`components/task-drawer.tsx` 负责详情、来源和带 version 的更新，`lib/` 放类型与请求/日期/附件路径工具。样式以 Tailwind 为主，`src/styles.css` 只保留亮色主题与基础规则。页面与图表依赖分块加载，修改后运行 `npm run build`，FastAPI 服务 `web/dist`，不服务 TS 源文件。未构建时首页明确返回 503。
+
+依照同次用户要求移除了命令面板和全部应用自定义键盘快捷操作；保留浏览器标准控件与 shadcn/ui 弹层的基本焦点行为。统计图直接来自 overview，未补造趋势或演示数据。开发服务器仅监听 127.0.0.1，API/media 请求代理至原有 8765 服务，不启动第二套采集/提炼通道。
 
 当前 schema 为 v1。未来新增结构应添加顺序迁移，不能修改已有 v1 定义后宣称历史数据库已升级。可在独立适配器中增加 OCR/转写，保持原始消息不可变，并让提炼输入明确区分机器识别文本与真实原文；可替换 LLMExtractor 或仓储，避免把服务商耦合带入业务引擎。

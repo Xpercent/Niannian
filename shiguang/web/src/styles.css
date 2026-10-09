@@ -1,0 +1,69 @@
+@import "tailwindcss" source("./");
+
+@theme inline {
+  --font-sans:
+    "Segoe UI", "Microsoft YaHei UI", "PingFang SC", system-ui, sans-serif;
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--foreground);
+  --color-popover: var(--card);
+  --color-popover-foreground: var(--foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: #fff;
+  --color-secondary: #eff3ef;
+  --color-secondary-foreground: #4e6255;
+  --color-muted: #f1f4f1;
+  --color-muted-foreground: #859188;
+  --color-accent: #eaf3ec;
+  --color-accent-foreground: #24543c;
+  --color-destructive: #b54b44;
+  --color-border: #e5eae5;
+  --color-input: #dce3dc;
+  --color-ring: #629476;
+  --radius-sm: 0.375rem;
+  --radius-md: 0.5rem;
+  --radius-lg: 0.75rem;
+  --radius-xl: 0.875rem;
+}
+
+:root {
+  --background: #f6f8f6;
+  --foreground: #293b30;
+  --card: #fff;
+  --primary: #246448;
+  font-synthesis: none;
+  color-scheme: light;
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+  body {
+    @apply m-0 min-w-80 bg-background font-sans text-foreground antialiased;
+  }
+  button:not(:disabled),
+  a {
+    cursor: pointer;
+  }
+  input[type="checkbox"] {
+    accent-color: var(--primary);
+  }
+  textarea {
+    resize: vertical;
+  }
+  ::selection {
+    background: #d5eadb;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation: none !important;
+    transition: none !important;
+    scroll-behavior: auto !important;
+  }
+}

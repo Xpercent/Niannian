@@ -383,12 +383,13 @@ def create_app(root: Path | str | None = None, *, live_wechat=True) -> FastAPI:
             raise HTTPException(404, "本机附件不存在")
         return FileResponse(path, headers={"X-Content-Type-Options": "nosniff"})
 
-    web = Path(__file__).resolve().parent / "web"
-    web.mkdir(exist_ok=True)
-    app.mount("/assets", StaticFiles(directory=web), name="assets")
+    web = Path(__file__).resolve().parent / "web" / "dist"
+    app.mount("/assets", StaticFiles(directory=web, check_dir=False), name="assets")
 
     @app.get("/", include_in_schema=False)
     def index():
+        if not (web / "index.html").is_file():
+            raise HTTPException(503, "前端尚未构建，请在 shiguang/web 执行 npm ci 与 npm run build")
         return FileResponse(web / "index.html", headers={"Cache-Control": "no-cache"})
 
     return app

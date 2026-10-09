@@ -20,4 +20,4 @@ shiguang = "shiguang.__main__:main"
 include = ["shiguang*"]
 
 [tool.setuptools.package-data]
-shiguang = ["web/*", "web/vendor/*"]
+shiguang = ["web/dist/*", "web/dist/assets/*"]

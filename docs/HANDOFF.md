@@ -1,5 +1,15 @@
 # 拾光项目交接：给下一位维护者
 
+## 2026-10-10：前端框架替换（最新）
+
+用户明确要求重新开发 `shiguang/web`，采用 Vite + React（TypeScript）+ Tailwind CSS + shadcn/ui + shadcn/ui Charts + lucide-react，允许 CDN，并移除键盘操作。该授权替代本文以下历史的“原生 ES Modules / 不引入构建链”前端约定；业务后端、真实微信只读、数据库及模型配置保持原边界。
+
+当前入口为 `web/src/main.tsx` / `app.tsx`，业务页在 `src/pages/`，基础组件在 `src/components/ui/`，来源抽屉单独维护。旧 app.js、helpers.js 和 styles.css 已移除。自定义 CSS 仅为主题和全局基础规则；移除应用快捷键和命令面板，保留标准控件与组件基础可访问行为。
+
+FastAPI 首页和静态资源使用已提交的 `shiguang/web/dist`，不需要额外 Node 服务。修改前端后在 `shiguang/web` 执行 `npm ci`、`npm run build`；开发调试执行 `npm run dev`，在 Vite 输出的 `/assets/` 地址访问，API/media 代理到 8765。setup 有 npm 时使用 lockfile 安装并构建；verify 改为 TS/Vite 构建与关键工具检查。不要再运行旧的 JS 语法验证作为本次前端依据。
+
+验证：TypeScript/Vite 生产构建、API 相关 pytest 7 项、附件路径/上海时区/空截止日期三个纯函数检查。实际浏览器只读检查了真实待办、来源图片、编辑字段、会话搜索及其消息列表，其他页面导航，桌面/窄屏布局；控制台未出现错误。未实际保存用户任务、规则、画像、设置，未触发探测或提炼，写入行为保留在现有 API 测试与代码检查范围，不能称为全部端到端验证。临时只读查看实例已停止，不改变原有停机状态。
+
 ## 交接结论
 
 这是已经完成重构、实际连接微信、可运行的 v1.0.0。没有必须继续开发的遗留任务。接手的默认动作是了解现状，等待/执行用户的新需求，不把上一轮的宏大重构要求当成再次重写项目的授权。

@@ -6,7 +6,7 @@
 
 ## 启动
 
-环境：Windows、已登录的微信 4.x、64 位 Python 3.10+（本机验证为 3.13）；Node.js 用于前端验证，运行应用无需 Node 或前端构建。
+环境：Windows、已登录的微信 4.x、64 位 Python 3.10+（本机验证为 3.13）。修改前端需要 Node.js 22.12+ 和 npm；已随仓库交付构建产物，日常运行无需 npm 进程。
 
 ```powershell
 cd E:\Group\Desktop\Code\wx\project5
@@ -30,7 +30,7 @@ cd E:\Group\Desktop\Code\wx\project5
 
 ## 架构
 
-采用模块化单体：一个本地 FastAPI 服务、SQLite WAL 仓储、一个串行微信读取线程、一个提炼协调器和无需打包的 ES Modules 前端。避免旧版多个监听/HTTP 桥接/全局状态的并行补丁。
+采用模块化单体：一个本地 FastAPI 服务、SQLite WAL 仓储、一个串行微信读取线程、一个提炼协调器和 Vite + React + TypeScript 前端。样式使用 Tailwind CSS，本地组件采用 shadcn/ui，图表采用 shadcn/ui Charts（Recharts），图标来自 lucide-react。构建产物随 Python 包分发，无需 CDN。
 
 | 模块 | 职责 |
 | --- | --- |
@@ -53,7 +53,7 @@ cd E:\Group\Desktop\Code\wx\project5
 .\.venv\Scripts\python.exe -X utf8 scripts\check-wechat.py
 ```
 
-Python 统一通过 pytest 收集 unittest 与 fixture 测试；前端验证包括 JS 语法与纯函数回归。真实消息回放依赖本地 `data/raw-wechat.json`，清洁检出中缺少捕获会明确跳过，不用编造消息替代。实际运行证据与最终结果见 [docs/VERIFICATION.md](docs/VERIFICATION.md)。
+Python 统一通过 pytest 收集 unittest 与 fixture 测试；前端验证采用 TypeScript/Vite 构建与关键工具检查。真实消息回放依赖本地 `data/raw-wechat.json`，清洁检出中缺少捕获会明确跳过，不用编造消息替代。实际运行证据与最终结果见 [docs/VERIFICATION.md](docs/VERIFICATION.md)。
 
 - [重构前审查](docs/AUDIT.md)
 - [Agent 项目维护规范](AGENTS.md)
@@ -68,3 +68,15 @@ Python 统一通过 pytest 收集 unittest 与 fixture 测试；前端验证包�
 ## 已知边界
 
 依赖本机微信登录状态、Windows 和上游微信数据库适配，客户端升级可能需要同步更新适配器。只处理文字及附件说明，不做图片 OCR、语音转写，也不会自动下载未落地媒体。模型结果需要人工判断，缺失画像和角色不清的通知会保守留待复核；历史已过期事项仍按原文保留，用户可忽略。过滤记录每会话保留最近 100 个判定。服务默认只监听本机，定位为个人工作台，未实现多用户协作或移动端服务器。
+
+## 前端维护
+
+```powershell
+cd shiguang/web
+npm ci
+npm run dev    # 开发地址见终端；API/media 代理到 127.0.0.1:8765
+npm run build  # 将源码编译到 dist，FastAPI 刷新后加载
+npm test       # 附件路径与上海时间边界的轻量检查
+```
+
+源码按 `src/pages/`、`src/components/`、`src/lib/` 分工；shadcn/ui 组件源码在 `src/components/ui/`，统一主题在 `src/styles.css`。修改源码后须重新构建并刷新浏览器。`dist/` 随仓库交付并由 Python 包携带。已移除旧命令面板和应用自定义快捷键。
