@@ -222,12 +222,19 @@ def create_app(root: Path | str | None = None, *, live_wechat=True) -> FastAPI:
         session_or_404(session_id)
         try:
             return container().wechat.import_history(session_id, payload.limit)
+        except TimeoutError as exc:
+            raise HTTPException(504, "历史导入尚未完成，请稍后查看消息列表；再次导入会自动去重") from exc
         except (RuntimeError, ValueError) as exc:
             raise HTTPException(409, str(exc)) from exc
 
     @app.get("/api/wechat/catalog")
     def catalog():
-        return container().wechat.catalog()
+        try:
+            return container().wechat.catalog()
+        except TimeoutError as exc:
+            raise HTTPException(504, "读取微信会话超时，请稍后重试") from exc
+        except (RuntimeError, ValueError) as exc:
+            raise HTTPException(409, str(exc)) from exc
 
     @app.get("/api/wechat/status")
     def wechat_status():
@@ -370,6 +377,9 @@ def create_app(root: Path | str | None = None, *, live_wechat=True) -> FastAPI:
         base = (workspace / "data" / "wechat" / "media").resolve()
         path = (base / filename).resolve()
         if not path.is_relative_to(base) or not path.is_file():
+            raise HTTPException(404, "本机附件不存在")
+        # 仅公开被消息实际引用的媒体，账号索引和内部数据库不是附件。
+        if not container().db.one("SELECT 1 FROM messages WHERE json_extract(metadata_json,'$.local_file')=? LIMIT 1", (filename,)):
             raise HTTPException(404, "本机附件不存在")
         return FileResponse(path, headers={"X-Content-Type-Options": "nosniff"})
 

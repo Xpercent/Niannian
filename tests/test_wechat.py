@@ -2,6 +2,7 @@
 
 import json
 import sqlite3
+import threading
 from collections import defaultdict
 from pathlib import Path
 
@@ -76,6 +77,15 @@ def test_nonstandard_self_id_from_real_source(captured):
         assert normalize(captured["account"], row["session_id"], row["raw"])["is_self"]
 
 
+def test_numeric_self_has_no_unverified_default(captured):
+    assert infer_self_ids(captured["account"], []) == set()
+    rows = [row for row in captured["messages"] if row["raw"].get("sender_id") == 2
+            and not _sender(row["raw"].get("content", ""))[0]]
+    for row in rows:
+        payload = normalize(captured["account"], row["session_id"], row["raw"])
+        assert not payload["is_self"] and not payload["metadata"]["identity_confident"]
+
+
 def test_stale_index_cannot_override_actual_group_sender(captured):
     rows = [row for row in captured["messages"] if
             (row["raw"].get("sender_username") == captured["account"] or row["raw"].get("sender_id") == 2)
@@ -86,6 +96,8 @@ def test_stale_index_cannot_override_actual_group_sender(captured):
         assert not payload["is_self"]
         assert payload["metadata"]["identity_conflict"]
         assert payload["metadata"]["identity_confident"]
+        if row["raw"].get("sender_id") == 2:
+            assert 2 not in infer_self_ids(captured["account"], [row["raw"]])
 
 
 def test_account_scopes_and_stable_source_identity(captured):
@@ -115,6 +127,59 @@ def test_real_history_replay_is_idempotent(worker):
     assert second["duplicates"] == count
     assert worker.db.one("SELECT COUNT(*) AS n FROM messages")["n"] == count
     assert worker._watermark(row["id"]) == first["checkpoint"]
+
+
+def test_verified_identity_evidence_survives_restart(worker, captured):
+    authoritative = next(row for row in captured["messages"] if
+                         not row["session_id"].endswith("@chatroom") and
+                         _sender(row["raw"].get("content", ""))[0] == captured["account"])
+    numeric_id = authoritative["raw"]["sender_id"]
+    item = worker.db.one("SELECT * FROM sessions WHERE username=?", (authoritative["session_id"],))
+    no_origin = next(raw for raw in worker._wx.groups[item["username"]] if
+                     raw.get("sender_id") == numeric_id and not _sender(raw.get("content", ""))[0])
+    worker._store(item, [authoritative["raw"]], 0)
+    restarted = WechatWorker(worker.db, {}, worker.root)
+    restarted._wx = worker._wx
+    restarted._state["account"] = captured["account"]
+    restarted._store(item, [no_origin], worker._watermark(item["id"]))
+    message = worker.db.one("SELECT * FROM messages WHERE source_id=?",
+                            (normalize(captured["account"], item["username"], no_origin)["source_id"],))
+    metadata = json.loads(message["metadata_json"])
+    assert message["is_self"] and metadata["identity_confident"]
+    assert metadata["identity_source"] == "verified_sender_id"
+
+
+def test_public_operations_use_one_source_thread(tmp_path, captured, monkeypatch):
+    import shiguang.wechat as integration
+    db = Database(tmp_path / "queue.sqlite3")
+    db.init()
+    thread_ids = []
+
+    class ObservedSource(CapturedSource):
+        def get_self_info(self):
+            thread_ids.append(threading.get_ident())
+            return {"username": captured["account"]}
+
+        def get_sessions(self, limit=1000):
+            thread_ids.append(threading.get_ident())
+            return super().get_sessions(limit)
+
+        def get_messages(self, username, limit=20, offset=0):
+            thread_ids.append(threading.get_ident())
+            return super().get_messages(username, limit, offset)
+
+    monkeypatch.setattr(integration, "open_wechat", lambda *args: ObservedSource(captured))
+    monkeypatch.setattr(integration, "MediaCache", lambda *args: None)
+    reader = WechatWorker(db, {"wechat_poll_seconds": 1}, tmp_path)
+    try:
+        reader.start()
+        catalog = reader.catalog()
+        assert len(catalog) > 0
+        result = reader.import_history(catalog[0]["id"], 10)
+        assert result["read"] >= 0
+        assert len(set(thread_ids)) == 1 and threading.get_ident() not in thread_ids
+    finally:
+        assert reader.stop()["state"] == "stopped"
 
 
 def test_checkpoint_never_commits_when_message_transaction_fails(worker):

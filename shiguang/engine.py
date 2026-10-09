@@ -9,12 +9,14 @@ from datetime import datetime, timedelta, timezone
 from threading import Lock
 from typing import Any
 
-from .llm import Instruction, LLMExtractor
+from .llm import (Instruction, LLMExtractor, NEW_MESSAGE_CHARS, requires_review, guard_decisions,
+                  CONDITIONAL_PROHIBITION, ACTION_VERB)
 from .media import attachment_only
 from .storage import canonical_time, utc_now
 
 SHANGHAI = timezone(timedelta(hours=8))
-BATCH_LIMIT = 8
+BATCH_LIMIT = 4
+BATCH_CHAR_BUDGET = 4200
 ROUND_LIMIT = 240
 PER_SESSION_LIMIT = 80
 IGNORED_KEEP_PER_SESSION = 100
@@ -137,15 +139,19 @@ class Engine:
     @staticmethod
     def related(content, pending):
         ranked = []
-        text = re.sub(r"\s", "", content).lower()
+        generic = re.compile(r"@?所有人|全体(?:同学|成员|人员)?|同学们?|大家|各位|负责人|通知|注意事项|报名方式|申请条件|截止(?:日期|时间)")
+        text = generic.sub("", re.sub(r"\s", "", content).lower())
         for task in pending:
             title = re.sub(r"^(?:请|帮我|麻烦|需要|确认|更新|补齐|完成|提交|整理|提供|发送|检查)+", "", task["title"])
-            title = re.sub(r"\s", "", title).lower()
-            tokens = re.findall(r"[a-z]{3,}|[\u4e00-\u9fff]{2,}", title)
+            title = generic.sub("", re.sub(r"\s", "", title).lower()).strip("@，。:：、")
+            tokens = set(re.findall(r"[a-z][a-z0-9_+-]{2,}", title))
+            for run in re.findall(r"[\u4e00-\u9fff]{4,}", title):
+                tokens.update(run[start:start + size] for size in range(4, min(len(run), 8) + 1)
+                              for start in range(len(run) - size + 1))
             score = max([len(token) for token in tokens if token in text] + [0])
-            if title and title in text:
+            if len(title) >= 4 and title in text:
                 score = max(score, len(title))
-            if score >= 2:
+            if score >= 3:
                 ranked.append((score, task))
         ranked.sort(key=lambda pair: pair[0], reverse=True)
         if ranked and (len(ranked) == 1 or ranked[0][0] > ranked[1][0]):
@@ -155,13 +161,18 @@ class Engine:
     CANCEL = re.compile(r"(?:已)?取消|不用(?:处理|做|提交)|无需(?:处理|做|提交)|撤销")
     COMPLETE = re.compile(r"已完成|完成了|已发送|已发给|已经发|发给你了|处理好了|搞定了")
     CHANGE = re.compile(r"改成|改为|延期|推迟|提前|变更")
-    REQUEST = re.compile(r"请|帮我|麻烦|需要|给我|补齐|确认|提交|整理|记得|务必|别忘|看一下|看下|发一下|发下|能否|能不能|可以.{0,20}[吗么]|截止|之前|作业|报名|填报")
+    REQUEST = re.compile(r"(?:请|帮我|麻烦|务必|记得|别忘|需要你|能否|能不能|可以).{0,25}(?:提交|发送|发给|填写|完成|确认|修改|更新|补齐|检查|整理|提供|反馈|转发|看一下|看下)")
+    CONDITIONAL = re.compile(r"感兴趣|有意愿|有意向|自愿|符合.{0,12}条件|有需要的|有需求的|欢迎.{0,12}(?:报名|参加)|可自行|如需|如有|如果|若有|申请条件|报名条件")
+    SECTION = re.compile(r"^(?:[一二三四五六七八九十\d]+[、.．)）]\s*)?(?:报名方式|报名条件|申请条件|截止(?:日期|时间)|活动(?:时间|地点|介绍)|联系方式|参赛对象|参与对象|目录|附件|注意事项)\s*[:：]?")
     ACKNOWLEDGEMENT = re.compile(r"(?:收到|收到啦|好的|好|嗯|明白|谢谢|了解)[！!。 .\s]*")
+    ACTION_OBJECT = re.compile(r"(?:提交|发送|发给|填写|完成|确认|修改|更新|补齐|检查|整理|提供|反馈|转发|注册|接龙|签字|缴纳|上传|下载|领取|观看|核对).{2,}")
 
-    def _gate(self, item, rules):
+    def _gate(self, item, rules, profile=""):
         content = item["content"].strip()
         if not content or attachment_only(content):
             return [Instruction(action="IGNORE", context_summary="附件没有文字行动要求")]
+        if requires_review(item, profile):
+            return [Instruction(action="IGNORE", context_summary="需复核：群条件邀请，画像尚未确认本人角色与参与意愿")]
         for rule in rules:
             try:
                 if rule["action"] == "ignore" and re.fullmatch(rule["pattern"], content, re.I):
@@ -172,7 +183,7 @@ class Engine:
             return [Instruction(action="IGNORE", context_summary="本人承诺不是完成凭证")]
         return None
 
-    def _fallback(self, item, pending, rules):
+    def _fallback(self, item, pending, rules, profile=""):
         content = item["content"]
         related = self.related(content, pending)
         if self.CANCEL.search(content):
@@ -191,21 +202,68 @@ class Engine:
                 fields = {}
             return [Instruction(action="UPDATE", related_task_id=related["id"], description=content,
                                 context_summary=content, **fields)]
-        clauses = re.split(r"[。；;\n]+", content)
+        if self.CONDITIONAL.search(content) or requires_review(item, profile):
+            return [Instruction(action="IGNORE", context_summary="需复核：条件邀请或群公告，尚未确认本人角色与参与意愿")]
+        # Rules without a model may only create from an explicit imperative with
+        # its object. Dates, application labels and isolated headings never count.
+        clauses = re.split(r"[。；;！？]+", re.sub(r"\s*\n\s*", " ", content))
         instructions = []
         for clause in clauses:
             clause = clause.strip()
-            matched = bool(self.REQUEST.search(clause))
+            if CONDITIONAL_PROHIBITION.search(clause) or re.search(r"(?:如|如果).{0,15}(?:填错|错误|重签|重填)", clause):
+                continue
+            request = self.REQUEST.search(clause)
+            rule_match = False
             for rule in rules:
                 try:
-                    matched |= rule["action"] == "extract_task" and bool(re.search(rule["pattern"], clause, re.I))
+                    rule_match |= rule["action"] == "extract_task" and bool(re.search(rule["pattern"], clause, re.I))
                 except re.error:
                     continue
-            if matched and clause:
-                instructions.append(Instruction(action="CREATE", title=clause[:120], description=clause[:4000],
+            explicit_rule_action = rule_match and self.ACTION_OBJECT.search(clause)
+            if self.SECTION.match(clause) or len(clause) > 220 or not (request or explicit_rule_action):
+                continue
+            action = clause[request.start():].strip() if request else clause
+            if len(action) < 8:
+                continue
+            title = re.sub(r"^(?:请|帮我|麻烦|务必|记得|别忘|需要你|能否|能不能|可以)\s*", "", action)
+            title = re.split(r"[，,（(]", title, maxsplit=1)[0].strip()
+            if len(title) > 40 or not ACTION_VERB.search(title):
+                continue
+            if clause:
+                instructions.append(Instruction(action="CREATE", title=title, description=action[:4000],
                                                 owner="我", priority="high" if re.search(r"紧急|尽快|今天|下班前", clause) else "medium",
                                                 due_at=self.due_at(clause, item["created_at"]), context_summary=clause[:4000]))
-        return instructions[:12] or [Instruction(action="IGNORE", context_summary="本地回退未识别明确行动，可在来源中复核")]
+        return guard_decisions(item, instructions[:3], profile) if instructions else [
+            Instruction(action="IGNORE", context_summary="需复核：模型不可用且本地未识别明确完整行动")]
+
+    @staticmethod
+    def _duplicate(title, candidates):
+        """Merge only a unique distinctive object within the same action family."""
+        families = (("register", r"注册"), ("rename", r"改(?:群)?备注|修改.*备注|备注.*修改"),
+                    ("submit", r"提交|交付|上交"), ("fill", r"填写|填报"), ("sign", r"签字|签署"))
+        def fingerprint(value):
+            family = next((name for name, pattern in families if re.search(pattern, value)), None)
+            text = re.sub(r"^(?:请|帮我|麻烦|务必|完成|尽快)+", "", value.lower())
+            text = re.sub(r"注册|修改|改备注|群备注|提交|上交|交付|填写|填报|签字|签署|完成|流程|并|截图|登录|为|一下", "", text)
+            text = re.sub(r"@?所有人|同学们?|大家|各位|负责人|通知", "", text)
+            text = re.sub(r"[\s，。:：、@]", "", text)
+            tokens = set()
+            for run in re.findall(r"[a-z0-9\u4e00-\u9fff]+", text):
+                if len(run) >= 3 and re.search(r"[a-z]", run) and re.search(r"[\u4e00-\u9fff]", run):
+                    tokens.add(run)
+                if len(run) >= 4:
+                    tokens.update(run[start:start+4] for start in range(len(run)-3))
+            return family, text, tokens
+        family, object_text, tokens = fingerprint(title)
+        if not family or not tokens:
+            return None
+        matches = []
+        for candidate in candidates:
+            other_family, other_object, other_tokens = fingerprint(candidate["title"])
+            common = tokens & other_tokens
+            if family == other_family and object_text == other_object and common:
+                matches.append((candidate, {object_text}))
+        return matches[0] if len(matches) == 1 else None
 
     def _history(self, item):
         return self.db.rows("SELECT * FROM messages WHERE session_id=? AND account=? AND id<? AND created_at<=? "
@@ -227,10 +285,26 @@ class Engine:
         ids, now = item["message_ids"], utc_now()
         if action == "CREATE":
             title = instruction.title.strip()
-            existing = conn.execute("SELECT id FROM tasks WHERE session_id=? AND status='pending' AND title=?",
-                                    (item["session_id"], title)).fetchone()
-            if existing:
-                return None, None
+            candidates = [dict(row) for row in conn.execute("SELECT * FROM tasks WHERE session_id=? AND status='pending'",
+                                                           (item["session_id"],))]
+            exact = next((row for row in candidates if row["title"] == title), None)
+            duplicate = self._duplicate(title, candidates)
+            if exact or duplicate:
+                existing = exact or duplicate[0]
+                anchors = duplicate[1] if duplicate else {re.sub(r"\s", "", title.lower())}
+                current_content = re.sub(r"\s", "", item["content"].lower())
+                if not any(anchor in current_content for anchor in anchors):
+                    return None, None  # A history-only duplicate is not a new source.
+                merged = sorted(set(json.loads(existing["source_message_ids"])) | set(ids))
+                description = existing["description"]
+                if instruction.description and instruction.description not in description:
+                    description = (description + "\n补充要求：" + instruction.description)[-4000:]
+                conn.execute("UPDATE tasks SET source_message_ids=?,description=?,updated_at=?,version=version+1 WHERE id=?",
+                             (json.dumps(merged), description, now, existing["id"]))
+                conn.execute("INSERT INTO task_events(task_id,action,source,message_ids,detail_json,created_at) VALUES(?,?,?,?,?,?)",
+                             (existing["id"], "MERGE", source, json.dumps(ids),
+                              json.dumps({"reason": "same_action_and_distinctive_object", "proposed": instruction.model_dump()}, ensure_ascii=False), now))
+                return "merged", existing["id"]
             cur = conn.execute("INSERT INTO tasks(session_id,title,description,owner,priority,due_at,status,"
                                "source_message_ids,context_summary,created_at,updated_at) VALUES(?,?,?,?,?,?,'pending',?,?,?,?)",
                                (item["session_id"], title, instruction.description or title, instruction.owner or "我",
@@ -277,7 +351,7 @@ class Engine:
             for item in items:
                 scopes[(item.get("account", ""), item["session_id"])].append(item)
             counts = dict(processed=0, created=0, updated=0, resolved=0, ignored=0, skipped=0, cancelled=0,
-                          items=len(items), pre_filtered=0, llm_decided=0, rule_decided=0, batches=0, batched_items=0)
+                          merged=0, items=len(items), pre_filtered=0, llm_decided=0, rule_decided=0, batches=0, batched_items=0)
             done = 0
             if progress:
                 progress(0, len(items), None)
@@ -287,13 +361,19 @@ class Engine:
                     counts["cancelled"] = len(items) - done
                     break
                 scope, queue = chunks.popleft()
-                chunk = [queue.popleft() for _ in range(min(BATCH_LIMIT, len(queue)))]
+                chunk, characters = [], 0
+                while queue and len(chunk) < BATCH_LIMIT:
+                    size = min(len(queue[0]["content"]), NEW_MESSAGE_CHARS)
+                    if chunk and characters + size > BATCH_CHAR_BUDGET:
+                        break
+                    chunk.append(queue.popleft())
+                    characters += size
                 if queue:
                     chunks.append((scope, queue))
                 session = self.db.one("SELECT * FROM sessions WHERE id=?", (scope[1],))
                 pending = self.db.rows("SELECT * FROM tasks WHERE session_id=? AND status='pending' ORDER BY id", (scope[1],))
                 expected_versions = {task["id"]: task["version"] for task in pending}
-                gates = {index: self._gate(item, rules) for index, item in enumerate(chunk)}
+                gates = {index: self._gate(item, rules, profile) for index, item in enumerate(chunk)}
                 eligible = [index for index in range(len(chunk)) if gates[index] is None]
                 counts["pre_filtered"] += len(chunk) - len(eligible)
                 answers = {}
@@ -324,9 +404,9 @@ class Engine:
                                                  for command in answer)
                     if answer is None or invalid_ref:
                         pending_now = self.db.rows("SELECT * FROM tasks WHERE session_id=? AND status='pending' ORDER BY id", (scope[1],))
-                        answer = self._fallback(item, pending_now, rules)
+                        answer = self._fallback(item, pending_now, rules, profile)
                         source = "rule"
-                        expected_versions.update({task["id"]: task["version"] for task in pending_now})
+                    answer = guard_decisions(item, answer, profile)
                     item_counts = defaultdict(int)
                     with self.db.connect() as conn:
                         conn.execute("BEGIN IMMEDIATE")
@@ -352,7 +432,7 @@ class Engine:
                                     item_counts[outcome] += 1
                                     version = conn.execute("SELECT version FROM tasks WHERE id=?", (task_id,)).fetchone()[0]
                                     expected_versions[task_id] = version
-                                    if outcome == "created":
+                                    if outcome in {"created", "merged"}:
                                         references[f"{index}:{command_index}"] = task_id
                                 else:
                                     item_counts["ignored"] += 1

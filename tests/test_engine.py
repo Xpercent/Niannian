@@ -63,19 +63,22 @@ class EngineTests(unittest.TestCase):
                    "sender_key": original["metadata"].get("sender_username") or original["sender_name"]}
         return self.db.ingest(payload)["id"]
 
-    def task(self, title="Task A", session=None):
+    def task(self, title="确认交付对象A", session=None):
         now = utc_now()
         return self.db.execute("INSERT INTO tasks(session_id,title,description,created_at,updated_at) VALUES(?,?,?,?,?)",
                                (session or self.sid, title, "domain fixture", now, now))
 
     def run_model(self, answers, **kwargs):
         fake = FakeModel(answers)
-        with patch("shiguang.engine.LLMExtractor", return_value=fake), patch.object(self.engine, "_gate", return_value=None):
+        # These domain fixtures test state transitions independently of model
+        # language quality. Separate capture tests exercise the semantic guard.
+        with patch("shiguang.engine.LLMExtractor", return_value=fake), patch.object(self.engine, "_gate", return_value=None), \
+                patch("shiguang.engine.guard_decisions", side_effect=lambda message, commands, profile: commands):
             return self.engine.process(force=True, **kwargs)
 
     def test_multiple_tasks_from_one_real_message(self):
         message_id = self.ingest()
-        result = self.run_model({0: [Instruction(action="CREATE", title="Task A"), Instruction(action="CREATE", title="Task B")]})
+        result = self.run_model({0: [Instruction(action="CREATE", title="确认交付对象A"), Instruction(action="CREATE", title="提交独立对象B")]})
         self.assertEqual(result["created"], 2)
         self.assertEqual(result["processed"], 1)
         tasks = self.db.rows("SELECT * FROM tasks")
@@ -85,7 +88,7 @@ class EngineTests(unittest.TestCase):
     def test_in_batch_create_then_update_reference(self):
         self.ingest(0, 700)
         self.ingest(1, 500)
-        result = self.run_model({0: [Instruction(action="CREATE", title="Task A")],
+        result = self.run_model({0: [Instruction(action="CREATE", title="确认交付对象A")],
                                  1: [Instruction(action="UPDATE", related_task_ref="0:0", priority="high")]})
         self.assertEqual((result["created"], result["updated"]), (1, 1))
         task = self.db.one("SELECT * FROM tasks")
@@ -116,7 +119,7 @@ class EngineTests(unittest.TestCase):
 
         with patch.object(self.engine, "_apply", side_effect=fail_second):
             with self.assertRaises(RuntimeError):
-                self.run_model({0: [Instruction(action="CREATE", title="Task A"), Instruction(action="CREATE", title="Task B")]})
+                self.run_model({0: [Instruction(action="CREATE", title="确认交付对象A"), Instruction(action="CREATE", title="提交独立对象B")]})
         self.assertEqual(self.db.one("SELECT COUNT(*) n FROM tasks")["n"], 0)
         self.assertEqual(self.db.one("SELECT COUNT(*) n FROM task_events")["n"], 0)
         self.assertEqual(self.db.one("SELECT processed FROM messages WHERE id=?", (message_id,))["processed"], 0)
@@ -135,7 +138,7 @@ class EngineTests(unittest.TestCase):
 
         def answer(*args):
             self.db.execute("UPDATE sessions SET monitored=0 WHERE id=?", (self.sid,))
-            return [Instruction(action="CREATE", title="Task A")]
+            return [Instruction(action="CREATE", title="确认交付对象A")]
 
         fake.extract = answer
         with patch("shiguang.engine.LLMExtractor", return_value=fake), patch.object(self.engine, "_gate", return_value=None):
@@ -157,6 +160,23 @@ class EngineTests(unittest.TestCase):
         self.assertEqual(result["updated"], 0)
         self.assertEqual(self.db.one("SELECT priority,version FROM tasks WHERE id=?", (task_id,)), {"priority": "low", "version": 2})
 
+    def test_partial_batch_fallback_does_not_refresh_other_model_versions(self):
+        task_id = self.task()
+        self.ingest(0, 700)
+        self.ingest(1, 500)
+        fake = FakeModel()
+
+        def answer(*args):
+            self.db.update_task(task_id, {"priority": "low"}, 1)
+            return {1: [Instruction(action="UPDATE", related_task_id=task_id, priority="high")]}
+
+        fake.extract_batch = answer
+        with patch("shiguang.engine.LLMExtractor", return_value=fake), patch.object(self.engine, "_gate", return_value=None), \
+                patch.object(self.engine, "_fallback", return_value=[Instruction(action="IGNORE")]):
+            result = self.engine.process(force=True)
+        self.assertEqual(result["updated"], 0)
+        self.assertEqual(self.db.one("SELECT priority,version FROM tasks WHERE id=?", (task_id,)), {"priority": "low", "version": 2})
+
     def test_cross_session_reference_is_rejected(self):
         other = next(row["id"] for row in self.fixture["catalog"] if row["id"] != self.sid)
         task_id = self.task(session=other)
@@ -169,7 +189,7 @@ class EngineTests(unittest.TestCase):
         self.ingest(0, 700)
         self.ingest(1, 500)
         finished = []
-        result = self.run_model({0: [Instruction(action="CREATE", title="Task A")], 1: [Instruction(action="CREATE", title="Task B")]},
+        result = self.run_model({0: [Instruction(action="CREATE", title="确认交付对象A")], 1: [Instruction(action="CREATE", title="提交独立对象B")]},
                                 progress=lambda done, total, session: finished.append(done),
                                 should_stop=lambda: 1 in finished)
         self.assertEqual((result["processed"], result["cancelled"], result["created"]), (1, 1, 1))
@@ -202,7 +222,136 @@ class EngineTests(unittest.TestCase):
         for row in candidates[:10]:
             gated = self.engine._gate(row, rules)
             if gated is not None:
-                self.assertTrue(any(command.context_summary == "命中完整忽略规则" for command in gated))
+                self.assertTrue(any(command.context_summary == "命中完整忽略规则" or
+                                    command.context_summary.startswith("需复核：") for command in gated))
+
+    def test_real_conditional_group_notices_do_not_fragment_into_tasks(self):
+        candidates = [row for row in self.fixture["messages"] if row["session_id"].endswith("@chatroom") and
+                      self.engine.CONDITIONAL.search(row["content"])]
+        if not candidates:
+            self.skipTest("No captured conditional group notice")
+        for original in candidates:
+            item = {**original, "message_ids": [1]}
+            decisions = self.engine._fallback(item, [], [], profile="")
+            self.assertTrue(all(command.action == "IGNORE" for command in decisions))
+            self.assertTrue(any("需复核" in command.context_summary for command in decisions))
+
+    def test_generic_group_words_cannot_associate_unrelated_tasks(self):
+        candidates = [row for row in self.fixture["messages"] if "所有人" in row["content"]]
+        if not candidates:
+            self.skipTest("No captured all-member group notice")
+        pending = [{"id": 1, "title": "@所有人 unrelated_object"}]
+        for row in candidates:
+            self.assertIsNone(self.engine.related(row["content"], pending))
+
+    def test_matching_requires_distinctive_object_and_unique_target(self):
+        # Pure task and object contracts contain no invented chat messages.
+        self.assertIsNone(self.engine.related("所有人", [{"id": 1, "title": "通知所有人"}]))
+        self.assertIsNone(self.engine.related("项目", [{"id": 1, "title": "确认项目"}]))
+        pending = [{"id": 1, "title": "提交独特交付对象"}, {"id": 2, "title": "检查另一交付对象"}]
+        self.assertEqual(self.engine.related("独特交付对象", pending)["id"], 1)
+        self.assertIsNone(self.engine.related("交付对象", pending))
+
+    def test_semantic_reminder_merges_source_and_audit(self):
+        real = next((row for row in self.fixture["messages"] if "i志愿" in row["content"] and
+                     "注册" in row["content"]), None)
+        if real is None:
+            raw_path = ROOT / "data" / "raw-wechat.json"
+            if raw_path.exists():
+                raw_fixture = json.loads(raw_path.read_text(encoding="utf-8"))
+                found = next((row for row in raw_fixture["messages"] if "i志愿" in row["raw"]["content"] and
+                              "注册" in row["raw"]["content"]), None)
+                if found:
+                    real = normalize(raw_fixture["account"], found["session_id"], found["raw"], set())
+                    real["session_id"] = found["session_id"]
+            if real is None:
+                self.skipTest("No captured registration reminder")
+        self.sid = real["session_id"]
+        task_id = self.task("i志愿注册流程")
+        payload = {**real, "account": self.fixture["account"]}
+        message_id = self.db.ingest(payload)["id"]
+        item = self.engine.aggregate(self.db.rows("SELECT * FROM messages WHERE id=?", (message_id,)), 0)[0]
+        with self.db.connect() as conn:
+            outcome, landed = self.engine._apply(conn, item, Instruction(action="CREATE", title="完成i志愿注册并提交截图"), "llm")
+        self.assertEqual((outcome, landed), ("merged", task_id))
+        self.assertEqual(self.db.one("SELECT COUNT(*) n FROM tasks")["n"], 1)
+        task = self.db.one("SELECT source_message_ids,version FROM tasks WHERE id=?", (task_id,))
+        self.assertIn(message_id, json.loads(task["source_message_ids"]))
+        self.assertEqual(task["version"], 2)
+        self.assertEqual(self.db.one("SELECT action FROM task_events WHERE task_id=?", (task_id,))["action"], "MERGE")
+
+    def test_semantic_merge_keeps_different_objects_and_actions_separate(self):
+        candidates = [{"id": 1, "title": "填写课程确认表"}, {"id": 2, "title": "提交课程确认表"}]
+        match = self.engine._duplicate("完成填写课程确认表", candidates)
+        self.assertEqual(match[0]["id"], 1)
+        self.assertIsNone(self.engine._duplicate("填写另一资料表", candidates))
+        self.assertIsNone(self.engine._duplicate("填写另一课程确认表", candidates))
+        self.assertIsNone(self.engine._duplicate("提交通知所有人", [{"id": 1, "title": "提交所有人通知"}]))
+
+    def test_user_extract_rule_enables_real_special_action_candidate(self):
+        from shiguang.llm import requires_review
+        candidates = [row for row in self.fixture["messages"] if not self.engine.REQUEST.search(row["content"]) and
+                      self.engine.ACTION_OBJECT.search(row["content"]) and not self.engine.CONDITIONAL.search(row["content"]) and
+                      not requires_review(row, "") and 8 <= len(row["content"]) <= 120 and not row["is_self"]]
+        if not candidates:
+            self.skipTest("No captured explicit special action outside builtin request pattern")
+        import re
+        real = candidates[0]
+        custom = {"action": "extract_task", "pattern": re.escape(real["content"][:4])}
+        decisions = self.engine._fallback(real, [], [custom])
+        self.assertTrue(any(command.action == "CREATE" for command in decisions))
+
+    def test_specific_unknown_roles_are_reviewed_in_real_capture(self):
+        from shiguang.llm import ROLE_ASSIGNMENT, UNIVERSAL_REQUEST
+        candidates = [row for row in self.fixture["messages"] if row["session_id"].endswith("@chatroom") and
+                      ROLE_ASSIGNMENT.search(row["content"]) and not UNIVERSAL_REQUEST.search(row["content"])]
+        if not candidates:
+            self.skipTest("No captured role-directed group instruction")
+        for row in candidates:
+            gate = self.engine._gate(row, [])
+            self.assertIsNotNone(gate)
+            self.assertTrue(all(command.action == "IGNORE" for command in gate))
+
+    def test_final_engine_guard_rejects_information_title(self):
+        self.ingest()
+        fake = FakeModel({0: [Instruction(action="CREATE", title="返校确认操作流程")]})
+        with patch("shiguang.engine.LLMExtractor", return_value=fake), patch.object(self.engine, "_gate", return_value=None):
+            result = self.engine.process(force=True)
+        self.assertEqual(result["created"], 0)
+        self.assertEqual(result["ignored"], 1)
+
+    def test_mixed_all_member_notice_does_not_assign_special_role_to_self(self):
+        from shiguang.llm import guard_decisions, ROLE_ASSIGNMENT, UNIVERSAL_REQUEST
+        candidates = [row for row in self.fixture["messages"] if ROLE_ASSIGNMENT.search(row["content"]) and
+                      UNIVERSAL_REQUEST.search(row["content"])]
+        if not candidates and (ROOT / "data" / "raw-wechat.json").exists():
+            raw_fixture = json.loads((ROOT / "data" / "raw-wechat.json").read_text(encoding="utf-8"))
+            for original in raw_fixture["messages"]:
+                item = normalize(raw_fixture["account"], original["session_id"], original["raw"], set())
+                if ROLE_ASSIGNMENT.search(item["content"]) and UNIVERSAL_REQUEST.search(item["content"]):
+                    candidates.append(item)
+        if not candidates:
+            self.skipTest("No captured mixed role and universal instruction")
+        row = candidates[0]
+        role_excerpt = ROLE_ASSIGNMENT.search(row["content"])[0]
+        decisions = guard_decisions(row, [Instruction(action="CREATE", title=role_excerpt[:40], description=role_excerpt)])
+        self.assertTrue(all(command.action == "IGNORE" for command in decisions))
+
+    def test_universal_signing_request_survives_negative_exception(self):
+        from shiguang.llm import guard_decisions, UNIVERSAL_REQUEST, CONDITIONAL_PROHIBITION
+        raw_path = ROOT / "data" / "raw-wechat.json"
+        if not raw_path.exists():
+            self.skipTest("Raw capture unavailable")
+        raw_fixture = json.loads(raw_path.read_text(encoding="utf-8"))
+        candidates = []
+        for original in raw_fixture["messages"]:
+            item = normalize(raw_fixture["account"], original["session_id"], original["raw"], set())
+            if "双签" in item["content"] and UNIVERSAL_REQUEST.search(item["content"]) and CONDITIONAL_PROHIBITION.search(item["content"]):
+                candidates.append(item)
+        if not candidates:
+            self.skipTest("No real universal signing request with negative exception")
+        result = guard_decisions(candidates[0], [Instruction(action="CREATE", title="完成双签表")])
+        self.assertEqual([command.action for command in result], ["CREATE"])
 
     def test_time_and_sender_identity_are_stable(self):
         self.assertEqual(parse_time("2026-10-09T00:00:00Z"), parse_time("2026-10-09T08:00:00+08:00"))
@@ -219,7 +368,7 @@ class EngineTests(unittest.TestCase):
         payload = self.captured_own_message()
         task_id = self.task()
         self.db.ingest(payload)
-        result = self.run_model({0: [Instruction(action="CREATE", title="Task B"),
+        result = self.run_model({0: [Instruction(action="CREATE", title="提交独立对象B"),
                                      Instruction(action="UPDATE", related_task_id=task_id, priority="high"),
                                      Instruction(action="RESOLVE", related_task_id=task_id)]})
         self.assertEqual((result["created"], result["updated"], result["resolved"]), (0, 0, 1))

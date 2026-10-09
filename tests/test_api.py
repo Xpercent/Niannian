@@ -2,6 +2,7 @@
 
 import tempfile
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 from fastapi.testclient import TestClient
@@ -92,3 +93,13 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(self.client.put("/api/profile", json={"markdown": "# 用户画像\n"}).status_code, 200)
         self.assertEqual(self.client.get("/api/profile").json()["markdown"], "# 用户画像\n")
         self.assertEqual(self.client.put("/api/profile", json={"markdown": "x" * 30001}).status_code, 422)
+
+    def test_catalog_failures_are_actionable_and_offline_cache_works(self):
+        self.assertEqual(self.client.get("/api/wechat/catalog").json(), [])
+        worker = self.app.state.container.wechat
+        with patch.object(worker, "catalog", side_effect=TimeoutError):
+            result = self.client.get("/api/wechat/catalog")
+            self.assertEqual(result.status_code, 504)
+            self.assertIn("微信", result.json()["detail"])
+        with patch.object(worker, "catalog", side_effect=RuntimeError("微信采集器已停止")):
+            self.assertEqual(self.client.get("/api/wechat/catalog").status_code, 409)

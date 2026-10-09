@@ -50,7 +50,7 @@ def _sender(content: str) -> tuple[str, str]:
 
 def infer_self_ids(account: str, messages: list[dict]) -> set[int]:
     """Resolve per-session numeric IDs using actual embedded origins, not stale indexes."""
-    ids = {2}
+    ids: set[int] = set()
     origins: dict[int, set[str]] = {}
     for message in messages:
         origin, _ = _sender(str(message.get("content") or ""))
@@ -77,7 +77,7 @@ def normalize(account: str, username: str, message: dict,
         sender_id_value = int(message.get("sender_id"))
     except (ValueError, TypeError):
         sender_id_value = None
-    self_ids = self_sender_ids if self_sender_ids is not None else {2}
+    self_ids = self_sender_ids if self_sender_ids is not None else set()
     is_self = origin == account if origin else sender_id_value in self_ids
     confident = bool(origin or sender_id_value in self_ids)
     source_sender = str(message.get("sender_username") or "")
@@ -390,8 +390,6 @@ class WechatWorker:
                 if origin not in values:
                     values.append(origin)
         self_ids = {int(key) for key, origins in observations.items() if origins == [account]}
-        if "2" not in observations:
-            self_ids.add(2)
         names = self._wx.nickname_map()
         payloads = []
         for raw in sorted(messages, key=lambda value: (int(value["sort_seq"]), int(value["local_id"]))):

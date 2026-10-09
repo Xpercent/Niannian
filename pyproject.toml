@@ -11,7 +11,7 @@ requires-python = ">=3.10"
 dependencies = ["fastapi>=0.115,<0.143", "uvicorn>=0.30,<0.55", "pydantic>=2.7,<3"]
 
 [project.optional-dependencies]
-dev = ["httpx2>=2.13,<3"]
+dev = ["httpx2>=2.13,<3", "pytest>=8,<10"]
 
 [project.scripts]
 shiguang = "shiguang.__main__:main"

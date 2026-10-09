@@ -8,3 +8,4 @@ config.json
 .pytest_cache/
 .coverage
 node_modules/
+wechatauto_logs/

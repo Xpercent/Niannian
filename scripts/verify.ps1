@@ -5,7 +5,7 @@ Set-Location -LiteralPath $ProjectRoot
 $env:PYTHONUTF8 = '1'
 for ($Round = 1; $Round -le $Rounds; $Round++) {
     Write-Host "验证轮次 $Round/$Rounds"
-    & .\.venv\Scripts\python.exe -X utf8 -m unittest discover -s tests -v
+    & .\.venv\Scripts\python.exe -X utf8 -m pytest tests -q
     if ($LASTEXITCODE -ne 0) { throw "第 $Round 轮 Python 回归失败" }
     foreach ($Script in (Get-ChildItem shiguang/web -Filter '*.js')) {
         & node --check $Script.FullName

@@ -1,14 +1,8 @@
-"""微信非文本消息：把原始 XML 拆成可读摘要 + 结构化附件描述，并按需解出本地文件。
-
-上游 ``WeChatDB.get_messages()`` 对图片/表情/文件/卡片一律原样返回 ``message_content``
-里的那坨 XML。本模块只负责**解析**（纯函数、可离线测试）与**分派抽取**（鸭子类型
-接收一个 ``MediaDownloader``，不 import 上游，保证没装上游依赖时也能导入本模块）。
-"""
+"""附件 XML 摘要和按账号缓存的本机媒体；上游仅在初始化提取器时导入。"""
 
 from __future__ import annotations
 
 import hashlib
-import json
 import re
 import sqlite3
 from contextlib import contextmanager
@@ -17,12 +11,7 @@ from typing import Any
 from xml.etree import ElementTree
 
 
-# 附件描述里**不保留** cdnurl / encrypturl / aeskey：那些是带时效的下载凭证，
-# 既会过期又把密钥写进本地库，而模型提炼和溯源上下文都不需要它们。
-#
-# 同理不拿 XML 的 md5 去定位本地文件：图片本地 .dat 的真实名字来自
-# ``packed_info_data``，与 XML 里那个 ``md5`` 是两个值（实测同一张图
-# XML=49e5bcf4… 本地=97a8d050…）。这里记的是 CDN 资产 id，只做溯源用。
+# 模型只使用附件描述。实际本机文件由上游读取 packed_info_data 定位。
 def parse_attachment(content: str) -> dict[str, Any] | None:
     """把消息正文的原始 XML 解析成附件描述；不是附件（纯文本/解析失败）返回 None。"""
     text = (content or "").strip()
@@ -170,12 +159,7 @@ EXTRACT_KINDS = {"image": "download_image", "video": "download_video",
 
 
 class MediaIndex:
-    """(会话, local_id) -> 已抽出的文件名，持久化在 media.db。
-
-    桥接每次重启都会重放 `--history`，没有这份索引就要对已知消息重新走一遍
-    微信附件目录扫描。文件被外部删掉时 `known()` 仍返回旧名字，调用方按存在性
-    判断后重新抽取即可，所以它只是「先试这条路」的提示，不是事实来源。
-    """
+    """持久化文件索引；调用方检查存在性，外部删除文件后可重新提取。"""
 
     def __init__(self, path: Path):
         self.path = Path(path)
@@ -205,18 +189,6 @@ class MediaIndex:
         with self._connect() as conn:
             conn.execute("INSERT INTO extracted VALUES(?,?,?) ON CONFLICT(session_id,local_id)"
                          " DO UPDATE SET file=excluded.file", (session_id, int(local_id), filename))
-
-    def forget_session(self, session_id: str) -> list[str]:
-        with self._connect() as conn:
-            files = [row[0] for row in conn.execute(
-                "SELECT file FROM extracted WHERE session_id=?", (session_id,)).fetchall()]
-            conn.execute("DELETE FROM extracted WHERE session_id=?", (session_id,))
-        return files
-
-    def entries(self) -> list[tuple[str, int, str]]:
-        with self._connect() as conn:
-            return conn.execute("SELECT session_id, local_id, file FROM extracted ORDER BY rowid").fetchall()
-
 
 def media_tier(filename: str | None) -> str | None:
     """从上游落盘文件名后缀判断本机拿到的是哪一档。
@@ -262,31 +234,13 @@ def extract(media: Any, user: str, local_id: int, kind: str) -> str | None:
     return Path(str(path)).name
 
 
-def metadata_of(text: str | None) -> dict[str, Any]:
-    """单行 metadata 坏了不能让删除会话或媒体回收整个崩掉。"""
-    try:
-        value = json.loads(text or "{}")
-    except ValueError:
-        return {}
-    return value if isinstance(value, dict) else {}
-
-
 def account_media_dir(media_root: Path, account: str) -> Path:
-    """账号自己的媒体目录：``<root>/<账号哈希前 16 位>``。
-
-    本机文件名是 ``<会话>_<local_id>``，换一个微信账号后同名会话与 local_id 都可能重演，
-    所以按账号分目录，文件名不再跨账号互相覆盖。哈希算法与桥接的水位目录保持一致。
-    """
+    """账号媒体目录，防止不同账号相同会话和 local_id 覆盖文件。"""
     return Path(media_root) / hashlib.sha256(str(account).encode()).hexdigest()[:16]
 
 
 def safe_media_path(media_root: Path, stored: Any) -> Path | None:
-    """把 metadata 里记的路径解析到媒体根目录**内部**的安全路径。
-
-    ``local_file`` 是别人能影响到的字符串（桥接摘要、甚至手工录入），
-    以前只靠 ``Path(name).name`` 削掉目录，现在允许一层账号子目录，
-    所以必须逐段校验并确认结果仍在根目录里。
-    """
+    """只解析媒体根目录内的一层账号目录与文件名。"""
     text = str(stored or "").strip().replace("\\", "/")
     if not text or text.startswith("/"):
         return None
