@@ -1,0 +1,15 @@
+{
+  "db_path": "data/shiguang.db",
+  "profile_path": "data/PROFILE.md",
+  "ai_enabled": true,
+  "ai_base_url": "https://api.siliconflow.cn/v1",
+  "ai_api_key": "",
+  "ai_model": "Qwen/Qwen3-8B",
+  "ai_timeout_seconds": 40,
+  "merge_window_seconds": 60,
+  "settle_window_seconds": 60,
+  "batch_interval_seconds": 300,
+  "wechat_enabled": true,
+  "wechat_poll_seconds": 2,
+  "history_limit": 100
+}
