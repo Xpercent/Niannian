@@ -56,6 +56,8 @@ cd E:\Group\Desktop\Code\wx\project5
 Python 统一通过 pytest 收集 unittest 与 fixture 测试；前端验证包括 JS 语法与纯函数回归。真实消息回放依赖本地 `data/raw-wechat.json`，清洁检出中缺少捕获会明确跳过，不用编造消息替代。实际运行证据与最终结果见 [docs/VERIFICATION.md](docs/VERIFICATION.md)。
 
 - [重构前审查](docs/AUDIT.md)
+- [Agent 项目维护规范](AGENTS.md)
+- [新会话交接文档](docs/HANDOFF.md)
 - [架构与数据一致性](docs/ARCHITECTURE.md)
 - [微信采集与身份判定](docs/WECHAT.md)
 - [设计方向与交互](docs/DESIGN.md)
