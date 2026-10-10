@@ -75,7 +75,9 @@ class ModelTests(unittest.TestCase):
         data = json.loads(request["messages"][1]["content"])
         self.assertEqual((request["temperature"], request["max_tokens"]), (0.6, 1500))
         self.assertIs(request["enable_thinking"], False)
-        self.assertLessEqual(len(data["new_message"]["content"]), 300)
+        self.assertEqual(data["new_message"]["content"], largest["content"])
+        for row in data["history"]:
+            self.assertIn(row["content"], [message["content"] for message in self.messages])
         self.assertLessEqual(sum(len(row["content"]) for row in data["history"]), 200)
         self.assertLessEqual(len(data["history"]), 2)
         self.assertLessEqual(sum(len(json.dumps(task, ensure_ascii=False)) for task in data["pending_tasks"]), 120)

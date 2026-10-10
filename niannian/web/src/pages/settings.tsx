@@ -73,14 +73,14 @@ const groups: Array<{ title: string; note: string; items: Option[] }> = [
     items: [
       {
         key: "ai_timeout_seconds",
-        label: "接口超时（秒）",
-        hint: "单次请求等待上限，超时该段回退本地判定",
+        label: "模型最长等待（秒）",
+        hint: "提炼超时使用本地规则；长消息压缩超时则留待下轮",
         min: 5,
         max: 180,
       },
       {
         key: "ai_temperature",
-        label: "采样温度",
+        label: "回答变化程度（temperature）",
         hint: "0 最稳定；调高后同一条消息可能给出不同判定",
         min: 0,
         max: 2,
@@ -89,7 +89,7 @@ const groups: Array<{ title: string; note: string; items: Option[] }> = [
       },
       {
         key: "ai_max_tokens_single",
-        label: "单条输出上限（token）",
+        label: "单段提炼回答长度（token）",
         hint: "太小会截断 JSON 导致整段回退",
         min: 64,
         max: 8000,
@@ -97,8 +97,8 @@ const groups: Array<{ title: string; note: string; items: Option[] }> = [
       },
       {
         key: "ai_max_tokens_batch",
-        label: "批量输出上限（token）",
-        hint: "一批多段时的输出上限",
+        label: "多段提炼回答长度（token）",
+        hint: "一次多段提炼共用；token 是模型计量单位，不等于汉字数",
         min: 64,
         max: 16000,
         verified: 1200,
@@ -118,14 +118,14 @@ const groups: Array<{ title: string; note: string; items: Option[] }> = [
       },
       {
         key: "settle_window_seconds",
-        label: "稳定窗口（秒）",
+        label: "等待补充消息（秒）",
         hint: "会话静默这么久才发送；等待中有新消息则本轮暂缓",
         min: 0,
         max: 600,
       },
       {
         key: "merge_window_seconds",
-        label: "合并窗口（秒）",
+        label: "连续消息拼接间隔（秒）",
         hint: "同一人相邻消息隔多久内合成一段",
         min: 0,
         max: 600,
@@ -139,38 +139,38 @@ const groups: Array<{ title: string; note: string; items: Option[] }> = [
       {
         key: "batch_limit",
         label: "每次请求段数",
-        hint: "一次模型请求带几段",
+        hint: "同一会话一次最多带几段；更多内容在本轮继续发送",
         min: 1,
         max: 20,
         verified: 4,
       },
       {
         key: "batch_char_budget",
-        label: "每次请求字数预算",
-        hint: "一批段落的正文字数上限",
+        label: "每批正文字数预算（字）",
+        hint: "用于分批，只计算当前正文；不含历史、画像和模型指令",
         min: 400,
         max: 60000,
         verified: 4200,
       },
       {
         key: "new_message_chars",
-        label: "每段保留字数",
-        hint: "单段正文超出即截断",
+        label: "长消息压缩目标（字）",
+        hint: "超过此长度先总结压缩，成功后发送完整总结；原文保留",
         min: 200,
         max: 12000,
         verified: 2600,
       },
       {
         key: "history_chars",
-        label: "历史上下文字数",
-        hint: "本轮之前的会话内容预算",
+        label: "历史参考总长度（字）",
+        hint: "按完整消息选入；放不下则不带入，不截断正文",
         min: 0,
         max: 12000,
         verified: 1200,
       },
       {
         key: "history_rows",
-        label: "历史上下文条数",
+        label: "历史参考最多条数（条）",
         hint: "最多回看几条历史消息，0 为不带历史",
         min: 0,
         max: 20,
@@ -178,16 +178,16 @@ const groups: Array<{ title: string; note: string; items: Option[] }> = [
       },
       {
         key: "task_chars",
-        label: "待办上下文字数",
-        hint: "相关未完成任务的注入预算",
+        label: "已有待办参考长度（字）",
+        hint: "帮助关联已有待办；调小会减少可供参考的任务",
         min: 0,
         max: 12000,
         verified: 1600,
       },
       {
         key: "profile_chars",
-        label: "画像上下文字数",
-        hint: "我的画像注入预算",
+        label: "个人背景参考长度（字）",
+        hint: "使用你填写的画像；调小会减少可供参考的个人背景",
         min: 0,
         max: 12000,
         verified: 1200,
@@ -200,7 +200,7 @@ const groups: Array<{ title: string; note: string; items: Option[] }> = [
     items: [
       {
         key: "wechat_poll_seconds",
-        label: "微信轮询（秒）",
+        label: "检查微信新消息（秒）",
         hint: "采集线程扫描新消息的间隔",
         min: 1,
         max: 60,
@@ -214,8 +214,8 @@ const groups: Array<{ title: string; note: string; items: Option[] }> = [
       },
       {
         key: "ignored_keep_per_session",
-        label: "每会话保留过滤记录",
-        hint: "“无需行动”的判定记录保留条数",
+        label: "无需行动记录保留量（条/会话）",
+        hint: "只限制判定记录数量，不删除原始聊天",
         min: 10,
         max: 2000,
         verified: 100,
@@ -225,6 +225,11 @@ const groups: Array<{ title: string; note: string; items: Option[] }> = [
 ];
 
 const options = groups.flatMap((group) => group.items);
+const commonKeys = new Set<NumericKey>([
+  "batch_interval_seconds",
+  "settle_window_seconds",
+]);
+
 const isFloat = (option: Option) => Boolean(option.step && option.step < 1);
 const invalidText = (option: Option) =>
   isFloat(option)
@@ -397,13 +402,50 @@ export default function SettingsPage({
         onRetry={() => void load()}
       />
     );
+  const renderGroup = (group: (typeof groups)[number]) => (
+    <Card key={group.title}>
+      <CardHeader className="flex-col items-start gap-2 md:flex-row md:items-center">
+        <CardTitle>{group.title}</CardTitle>
+        <span className="text-sm text-stone-500">{group.note}</span>
+      </CardHeader>
+      <CardContent className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+        {group.items.map((item) => (
+          <Field
+            key={item.key}
+            label={item.label}
+            hint={`${item.hint} · ${item.min}–${item.max}${
+              defaults[item.key] !== undefined
+                ? ` · 默认 ${defaults[item.key]}`
+                : ""
+            }`}
+          >
+            <Input
+              type="number"
+              min={item.min}
+              max={item.max}
+              step={item.step ?? 1}
+              value={draft[item.key]}
+              onChange={(e) => set(item.key, Number(e.target.value))}
+            />
+          </Field>
+        ))}
+      </CardContent>
+    </Card>
+  );
+  const commonItems = options.filter((item) => commonKeys.has(item.key));
+  const advancedGroups = groups
+    .map((group) => ({
+      ...group,
+      items: group.items.filter((item) => !commonKeys.has(item.key)),
+    }))
+    .filter((group) => group.items.length > 0);
   return (
     <fieldset disabled={saving || wechatBusy} className="space-y-5 min-w-0">
       <div className="flex flex-wrap items-end justify-between gap-4">
         <div>
           <h1 className="text-xl font-semibold text-stone-900">设置</h1>
           <p className="mt-1 text-sm text-stone-500">
-            调整提炼、采集和数据维护选项。
+            先配置模型和提炼时间，其余选项可在高级设置中调整。
           </p>
         </div>
         <Button variant="secondary" size="sm" onClick={restoreDefaults}>
@@ -485,36 +527,22 @@ export default function SettingsPage({
           </div>
         </CardContent>
       </Card>
-      {groups.map((group) => (
-        <Card key={group.title}>
-          <CardHeader>
-            <CardTitle>{group.title}</CardTitle>
-            <span className="text-[10px] text-stone-400">{group.note}</span>
-          </CardHeader>
-          <CardContent className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
-            {group.items.map((item) => (
-              <Field
-                key={item.key}
-                label={item.label}
-                hint={`${item.hint} · ${item.min}–${item.max}${
-                  defaults[item.key] !== undefined
-                    ? ` · 默认 ${defaults[item.key]}`
-                    : ""
-                }`}
-              >
-                <Input
-                  type="number"
-                  min={item.min}
-                  max={item.max}
-                  step={item.step ?? 1}
-                  value={draft[item.key]}
-                  onChange={(e) => set(item.key, Number(e.target.value))}
-                />
-              </Field>
-            ))}
-          </CardContent>
-        </Card>
-      ))}
+      {renderGroup({
+        title: "常用设置",
+        note: "决定什么时候提炼。整轮完成后，才开始等待下一轮。",
+        items: commonItems,
+      })}
+      <details className="rounded-xl border border-stone-200 bg-white">
+        <summary className="cursor-pointer rounded-xl px-5 py-4 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-600">
+          <span className="font-medium text-stone-900">高级设置</span>
+          <span className="mt-1 block text-sm text-stone-500">
+            模型回答、长消息压缩、历史参考与采集记录。通常保留默认值即可。
+          </span>
+        </summary>
+        <div className="space-y-4 border-t border-stone-200 p-4">
+          {advancedGroups.map(renderGroup)}
+        </div>
+      </details>
       <Card>
         <CardHeader>
           <CardTitle>微信与数据</CardTitle>

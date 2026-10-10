@@ -175,7 +175,7 @@ def guard_decisions(message, instructions, profile=""):
     return guarded
 
 
-def _brief(message: dict[str, Any], budget=NEW_MESSAGE_CHARS) -> dict[str, Any]:
+def _brief(message: dict[str, Any]) -> dict[str, Any]:
     metadata = message.get("metadata", {})
     if "metadata_json" in message and not metadata:
         try:
@@ -184,7 +184,7 @@ def _brief(message: dict[str, Any], budget=NEW_MESSAGE_CHARS) -> dict[str, Any]:
             metadata = {}
     if not isinstance(metadata, dict):
         metadata = {}
-    return {"sender_name": message["sender_name"], "content": clip_text(message.get("model_content", message["content"]), budget),
+    return {"sender_name": message["sender_name"], "content": message.get("model_content", message["content"]),
             "content_is_summary": "model_content" in message,
             "is_self": bool(message["is_self"]), "created_at": message["created_at"],
             "identity_confident": message.get("identity_confident", metadata.get("identity_confident", False)) is True}
@@ -319,7 +319,7 @@ class LLMExtractor:
         history, history_size = [], 0
         rows = self.budgets["rows"]
         for row in reversed(context[-rows:] if rows else []):
-            brief = _brief(row, 400)
+            brief = _brief(row)
             size = len(brief["content"])
             if history_size + size > self.budgets["history"]:
                 continue
@@ -350,7 +350,7 @@ class LLMExtractor:
         if not self.enabled:
             return None
         data = self._data(message, context, tasks, profile, session_name)
-        result = self._complete({**data, "new_message": _brief(message, self.budgets["new_message"])}, False)
+        result = self._complete({**data, "new_message": _brief(message)}, False)
         if result is None:
             return None
         # Also accept the previous one-instruction contract for provider compatibility.
@@ -361,7 +361,7 @@ class LLMExtractor:
         if not self.enabled or not items:
             return {}
         data = self._data(items[-1], context, tasks, profile, session_name, "\n".join(item["content"] for item in items))
-        result = self._complete({**data, "new_messages": [_brief(item, self.budgets["new_message"]) for item in items]}, True)
+        result = self._complete({**data, "new_messages": [_brief(item) for item in items]}, True)
         if result is None:
             return {}
         entries = result.get("items", result.get("instructions", []))
