@@ -1,6 +1,16 @@
 # 拾光项目交接：给下一位维护者
 
-## 2026-10-10：前端框架替换（最新）
+## 2026-10-10：处理状态页与附件补挂（最新）
+
+用户要求新增一个状态分析页统计大模型消息处理的各项指标（耗时等），具体口径由实现方决定；同轮修复了“图片已在本机却显示尚未下载”。
+
+- `storage.attach_media` + `wechat._store`：微信落盘晚于采集时，重复扫描按 source_id 把 `local_file`/`media_tier` 补挂到已入库消息，只写 `metadata_json`，不改内容、processed、水位，也不覆盖已有档位。
+- `storage.processing_metrics(days)` + `GET /api/metrics`：汇总 `runs` 快照、`task_events`、`ignored_messages` 的真实记录，给出轮次耗时（平均/中位/P95/最快最慢）、模型耗时占比、单段耗时、请求与失败、模型/本地判定占比、提炼前拦截、批量与每日汇总。缺样本的比率返回 `null`，界面显示“—”。
+- `web/src/pages/metrics.tsx`：新导航“处理状态”，含时间范围切换、耗时构成图、决策去向、无需行动原因、每日汇总与轮次明细（默认只列有工作量轮次）。
+
+验证：`pytest tests` 88 passed、1 skipped（`test_engine.py` 缺真实混合角色样本，与本次无关）；`tests/test_metrics.py` 用真实捕获跑完整轮次后核对口径；`npm run build` 通过；离线实例（`--no-wechat`，未触发模型请求）用可访问性快照核对了 KPI 数字与 `/api/metrics` 返回一致、筛选与范围切换生效、控制台无错误。限制：临时浏览器无法截图（视口不可见），布局只做了窄屏溢出检查；耗时取轮次首尾时间戳，空转轮次不计入耗时统计。
+
+## 2026-10-10：前端框架替换
 
 用户明确要求重新开发 `shiguang/web`，采用 Vite + React（TypeScript）+ Tailwind CSS + shadcn/ui + shadcn/ui Charts + lucide-react，允许 CDN，并移除键盘操作。该授权替代本文以下历史的“原生 ES Modules / 不引入构建链”前端约定；业务后端、真实微信只读、数据库及模型配置保持原边界。
 
@@ -84,9 +94,10 @@ SQLite / Config / Profile → FastAPI → 亮色工作台
 | 重复任务/错误关联 | `engine.py` 的 `related/_duplicate/_apply`，不能泛词模糊合并 |
 | 人工编辑被覆盖 | Engine 的 expected_versions，仓储 update_task，HTTP version/409 |
 | 附件问题 | `media.py` 的 parse/summarize/attachment_only/enrich，真实metadata.local_file；微信落盘晚于采集时由 `storage.attach_media` 在重复扫描补挂 |
+| 耗时、决策与回退统计 | `storage.processing_metrics` 的口径与 `/api/metrics`，页面在 `web/src/pages/metrics.tsx`；数据只来自 `runs`/`task_events`/`ignored_messages` |
 | 轮次卡住/取消 | `jobs.py` 的 start/_execute/recover/stop，runs快照 |
 | 保存未持久化 | `config.py` 的 atomic_text/ConfigStore/ProfileStore，再查前端实际响应 |
-| 页面和交互 | `web/app.js`、`helpers.js`、`styles.css`、`index.html` |
+| 页面和交互 | `web/src/app.tsx` 导航、`src/pages/`、`src/components/ui`、`src/lib/` |
 
 ### 执行顺序必须保留
 

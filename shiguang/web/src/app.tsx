@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
+  Activity,
   CheckCircle2,
   ChevronRight,
   Filter,
@@ -22,12 +23,14 @@ import { SessionsPage } from "./pages/sessions";
 import RulesPage from "./pages/rules";
 import ProfilePage from "./pages/profile";
 import SettingsPage from "./pages/settings";
+import MetricsPage from "./pages/metrics";
 import { api, cn, json } from "./lib/utils";
 import type { Overview, Notify } from "./lib/types";
 
 const navigation = [
   { id: "tasks", label: "待办事项", icon: CheckCircle2 },
   { id: "sessions", label: "微信会话", icon: MessageCircle },
+  { id: "metrics", label: "处理状态", icon: Activity },
   { id: "rules", label: "过滤规则", icon: Filter },
   { id: "profile", label: "我的画像", icon: UserRound },
   { id: "settings", label: "设置与数据", icon: Settings },
@@ -351,6 +354,7 @@ export function App() {
             />
           )}
           {view === "rules" && <RulesPage notify={notify} />}
+          {view === "metrics" && <MetricsPage revision={revision} />}
           {view === "profile" && <ProfilePage notify={notify} />}
           {view === "settings" && (
             <SettingsPage

@@ -158,6 +158,20 @@ def create_app(root: Path | str | None = None, *, live_wechat=True) -> FastAPI:
         ctx = container()
         return {"stats": ctx.db.stats(), "sessions": ctx.db.sessions(), "wechat": ctx.wechat.status(), "run": ctx.jobs.latest()}
 
+    @app.get("/api/metrics")
+    def metrics(days: int = Query(default=30, ge=0, le=365)):
+        ctx = container()
+        from .engine import BATCH_CHAR_BUDGET, BATCH_LIMIT, PER_SESSION_LIMIT, ROUND_LIMIT
+        values = ctx.config.read()
+        return {"metrics": ctx.db.processing_metrics(days), "stats": ctx.db.stats(),
+                "model": {"name": values["ai_model"], "enabled": values["ai_enabled"],
+                          "timeout_seconds": values["ai_timeout_seconds"],
+                          "batch_interval_seconds": values["batch_interval_seconds"],
+                          "settle_window_seconds": values["settle_window_seconds"],
+                          "merge_window_seconds": values["merge_window_seconds"],
+                          "batch_limit": BATCH_LIMIT, "batch_char_budget": BATCH_CHAR_BUDGET,
+                          "round_limit": ROUND_LIMIT, "per_session_limit": PER_SESSION_LIMIT}}
+
     @app.get("/api/tasks")
     def tasks(status: Literal["pending", "completed", "cancelled", "all"] = "pending", q: str = Query(default="", max_length=500),
               priority: Literal["high", "medium", "low", ""] = "", session_id: str = "", due: Literal["all", "today", "overdue", "upcoming"] = "all"):

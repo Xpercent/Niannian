@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import sqlite3
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
@@ -10,6 +11,30 @@ from pathlib import Path
 from typing import Iterator
 
 SHANGHAI = timezone(timedelta(hours=8))
+
+# 轮次快照按时间倒序取最近这些；调度间隔下足够覆盖数周，再多也不至于拖慢页面。
+RUN_SCAN_LIMIT = 1000
+# Engine.process 的返回值就是指标来源，字段缺失按 0 计（旧快照没有 merged 等键）。
+ROUND_RESULT_FIELDS = ("items", "processed", "created", "updated", "resolved", "merged", "ignored",
+                       "skipped", "cancelled", "pre_filtered", "llm_decided", "rule_decided",
+                       "batches", "batched_items", "model_requests", "model_failures")
+ROUND_DAILY_FIELDS = ("items", "processed", "created", "ignored", "model_requests", "model_failures")
+
+
+def _moment(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=SHANGHAI)
+
+
+def _seconds_between(start: datetime | None, end: datetime | None) -> float | None:
+    if start is None or end is None or end < start:
+        return None
+    return round((end - start).total_seconds(), 2)
 
 
 def canonical_time(value: str | datetime | None = None) -> str:
@@ -310,6 +335,114 @@ class Database:
 
     def queued_count(self) -> int:
         return self.one("SELECT COUNT(*) n FROM messages m JOIN sessions s ON s.id=m.session_id WHERE m.processed=0 AND s.monitored=1")["n"]
+
+    def processing_metrics(self, days: int = 30) -> dict:
+        """汇总真实轮次快照、任务事件与过滤记录里的模型处理指标。
+
+        只统计已经落库的记录；缺样本的比率返回 None，由界面显示为“—”，
+        不拿估算值冒充实测。
+        """
+        cutoff = datetime.now(timezone.utc) - timedelta(days=days) if days else None
+        rows = self.rows("SELECT id,status,snapshot,updated_at FROM runs ORDER BY updated_at DESC LIMIT ?",
+                         (RUN_SCAN_LIMIT,))
+        rounds = []
+        for row in rows:
+            try:
+                snapshot = json.loads(row["snapshot"])
+            except (TypeError, ValueError):
+                continue
+            started = _moment(snapshot.get("started_at")) or _moment(row["updated_at"])
+            finished = _moment(snapshot.get("finished_at"))
+            ended = finished or started
+            if ended is None or (cutoff and ended < cutoff):
+                continue
+            result = snapshot.get("result") or {}
+            round_ = {"id": snapshot.get("id") or row["id"],
+                      "status": snapshot.get("status") or row["status"],
+                      "trigger": snapshot.get("trigger"),
+                      "at": ended.isoformat(timespec="microseconds"),
+                      "duration_seconds": _seconds_between(started, finished),
+                      "model_seconds": round(float(result.get("model_seconds") or 0), 2),
+                      "last_model_error": result.get("last_model_error"),
+                      "error": snapshot.get("error"),
+                      "queued_after": result.get("queued"),
+                      "progress_done": int(snapshot.get("done") or 0),
+                      "progress_total": int(snapshot.get("total") or 0)}
+            for field in ROUND_RESULT_FIELDS:
+                round_[field] = int(result.get(field) or 0)
+            round_["active"] = round_["items"] > 0
+            rounds.append(round_)
+        rounds.sort(key=lambda item: item["at"])
+        since = cutoff.isoformat(timespec="microseconds") if cutoff else ""
+        where = " WHERE created_at>=?" if since else ""
+        params = (since,) if since else ()
+        return {"summary": self._round_summary(rounds), "rounds": rounds, "daily": self._round_daily(rounds),
+                "events": self.rows("SELECT action,source,COUNT(*) count,MAX(created_at) last_at FROM task_events"
+                                    + where + " GROUP BY action,source ORDER BY count DESC", params),
+                "ignored_reasons": self.rows("SELECT substr(reason,1,140) reason,source,COUNT(*) count,"
+                                             "MAX(created_at) last_at FROM ignored_messages" + where +
+                                             " GROUP BY reason,source ORDER BY count DESC LIMIT 10", params),
+                "queued": self.queued_count(), "window_days": days,
+                "scanned": len(rows), "scanned_limit": RUN_SCAN_LIMIT}
+
+    @staticmethod
+    def _round_summary(rounds: list[dict]) -> dict:
+        totals = {field: sum(row[field] for row in rounds) for field in ROUND_RESULT_FIELDS}
+        timed = [row for row in rounds if row["active"] and row["duration_seconds"] is not None]
+        durations = [row["duration_seconds"] for row in timed]
+        wall_seconds = round(sum(durations), 2)
+        model_seconds = round(sum(row["model_seconds"] for row in rounds), 2)
+        timed_items = sum(row["items"] for row in timed)
+        decided = totals["llm_decided"] + totals["rule_decided"]
+        return {
+            "rounds": len(rounds), "active_rounds": sum(1 for row in rounds if row["active"]),
+            "rounds_completed": sum(1 for row in rounds if row["status"] == "completed"),
+            "rounds_failed": sum(1 for row in rounds if row["status"] == "failed"),
+            "rounds_cancelled": sum(1 for row in rounds if row["status"] == "cancelled"),
+            "rounds_running": sum(1 for row in rounds if row["status"] == "running"),
+            "rounds_with_model_error": sum(1 for row in rounds if row["last_model_error"]),
+            "rounds_with_failure": sum(1 for row in rounds if row["error"]),
+            **totals, "wall_seconds": wall_seconds, "model_seconds": model_seconds,
+            "model_share": round(model_seconds / wall_seconds, 3) if wall_seconds else None,
+            "average_seconds": round(wall_seconds / len(durations), 2) if durations else None,
+            "median_seconds": Database._percentile(durations, 0.5),
+            "p95_seconds": Database._percentile(durations, 0.95),
+            "slowest_seconds": max(durations) if durations else None,
+            "fastest_seconds": min(durations) if durations else None,
+            "seconds_per_item": round(wall_seconds / timed_items, 3) if timed_items else None,
+            "model_failure_rate": round(totals["model_failures"] / totals["model_requests"], 3)
+            if totals["model_requests"] else None,
+            "local_fallback_rate": round(totals["rule_decided"] / decided, 3) if decided else None,
+            "pre_filter_rate": round(totals["pre_filtered"] / totals["items"], 3) if totals["items"] else None,
+            "batch_share": round(totals["batched_items"] / totals["items"], 3) if totals["items"] else None,
+            "items_per_batch": round(totals["batched_items"] / totals["batches"], 2) if totals["batches"] else None,
+            "last_round_at": rounds[-1]["at"] if rounds else None,
+            "last_active_round_at": next((row["at"] for row in reversed(rounds) if row["active"]), None)}
+
+    @staticmethod
+    def _round_daily(rounds: list[dict]) -> list[dict]:
+        buckets: dict[str, dict] = {}
+        for row in rounds:
+            day = _moment(row["at"]).astimezone(SHANGHAI).strftime("%Y-%m-%d")
+            bucket = buckets.setdefault(day, {"date": day, "rounds": 0, "active_rounds": 0, "wall_seconds": 0.0,
+                                              "model_seconds": 0.0,
+                                              **{field: 0 for field in ROUND_DAILY_FIELDS}})
+            bucket["rounds"] += 1
+            bucket["active_rounds"] += int(row["active"])
+            for field in ROUND_DAILY_FIELDS:
+                bucket[field] += row[field]
+            if row["active"]:
+                bucket["wall_seconds"] = round(bucket["wall_seconds"] + (row["duration_seconds"] or 0), 2)
+                bucket["model_seconds"] = round(bucket["model_seconds"] + row["model_seconds"], 2)
+        return [buckets[key] for key in sorted(buckets)]
+
+    @staticmethod
+    def _percentile(values: list[float], fraction: float) -> float | None:
+        if not values:
+            return None
+        ordered = sorted(values)
+        index = max(0, min(len(ordered) - 1, math.ceil(fraction * len(ordered)) - 1))
+        return ordered[index]
 
     def backup(self, label: str = "manual") -> dict:
         directory = self.path.parent / "backups"
