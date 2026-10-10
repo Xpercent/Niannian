@@ -71,6 +71,8 @@ export function SessionsPage({ sessions, onRefresh, notify }: Props) {
   const [catalogError, setCatalogError] = useState("");
   const requestSeq = useRef(0);
   const catalogSeq = useRef(0);
+  const conversationRef = useRef<HTMLDivElement>(null);
+  const jumpToBottom = useRef(false);
   const controller = useRef<AbortController | null>(null);
   const current = useRef({ id: selectedId, tab });
   current.current = { id: selectedId, tab };
@@ -104,6 +106,7 @@ export function SessionsPage({ sessions, onRefresh, notify }: Props) {
       setMessages([]);
       setIgnored([]);
       setHasMore(false);
+      jumpToBottom.current = mode === "messages";
     }
     try {
       const path = `/api/sessions/${encodeURIComponent(id)}`;
@@ -160,6 +163,14 @@ export function SessionsPage({ sessions, onRefresh, notify }: Props) {
   useEffect(() => {
     if (selectedId && !selected) setSelectedId(null);
   }, [selected, selectedId]);
+
+  // A fresh conversation opens at the newest message; loading older history keeps the position.
+  useEffect(() => {
+    const panel = conversationRef.current;
+    if (!panel || loading || !jumpToBottom.current) return;
+    jumpToBottom.current = false;
+    panel.scrollTop = panel.scrollHeight;
+  }, [loading, messages]);
 
   useEffect(() => {
     let active = true;
@@ -459,7 +470,10 @@ export function SessionsPage({ sessions, onRefresh, notify }: Props) {
                   </Button>
                 </div>
               </div>
-              <CardContent className="max-h-[65vh] space-y-4 overflow-y-auto">
+              <CardContent
+                ref={conversationRef}
+                className="max-h-[65vh] space-y-4 overflow-y-auto"
+              >
                 {loadError && (
                   <div
                     role="alert"
