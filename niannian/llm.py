@@ -17,7 +17,6 @@ NEW_MESSAGE_CHARS = 2600
 HISTORY_CHARS = 1200
 HISTORY_ROWS = 6
 TASK_CHARS = 1600
-PROFILE_CHARS = 1200
 MAX_TOKENS_SINGLE = 700
 MAX_TOKENS_BATCH = 1200
 TEMPERATURE = 0.0
@@ -195,8 +194,7 @@ class LLMExtractor:
                  temperature: float = TEMPERATURE, max_tokens_single: int = MAX_TOKENS_SINGLE,
                  max_tokens_batch: int = MAX_TOKENS_BATCH,
                  new_message_chars: int = NEW_MESSAGE_CHARS, history_chars: int = HISTORY_CHARS,
-                 history_rows: int = HISTORY_ROWS, task_chars: int = TASK_CHARS,
-                 profile_chars: int = PROFILE_CHARS):
+                 history_rows: int = HISTORY_ROWS, task_chars: int = TASK_CHARS):
         self.timeout = timeout
         self.enabled = bool(enabled and base_url and api_key)
         self.last_error: str | None = None
@@ -205,7 +203,7 @@ class LLMExtractor:
         # 请求参数由设置页可调；enable_thinking 始终固定为关闭。
         self.temperature, self.max_tokens_single, self.max_tokens_batch = temperature, max_tokens_single, max_tokens_batch
         self.budgets = {"new_message": new_message_chars, "history": history_chars, "rows": history_rows,
-                        "tasks": task_chars, "profile": profile_chars}
+                        "tasks": task_chars}
         self.configure(base_url, api_key, model)
 
     def configure(self, base_url: str, api_key: str, model: str) -> None:
@@ -343,7 +341,7 @@ class LLMExtractor:
             task_size += size
         return {"now": message["created_at"], "timezone": "Asia/Shanghai",
                 "session": {"name": session_name, "is_group": message["session_id"].endswith("@chatroom")},
-                "user_profile": clip_text(profile, self.budgets["profile"]), "history": history[::-1],
+                "user_profile": profile, "history": history[::-1],
                 "pending_tasks": pending}
 
     def extract(self, message, context, tasks, profile="", session_name="") -> list[Instruction] | None:

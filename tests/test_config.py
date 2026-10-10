@@ -35,7 +35,6 @@ class ConfigTests(unittest.TestCase):
         defaults = store.public()["defaults"]
         for key, value in (("batch_limit", 4), ("batch_char_budget", 4200), ("new_message_chars", 2600),
                            ("history_chars", 1200), ("history_rows", 6), ("task_chars", 1600),
-                           ("profile_chars", 1200),
                            ("ai_max_tokens_single", 700), ("ai_max_tokens_batch", 1200),
                            ("ignored_keep_per_session", 100)):
             self.assertEqual(defaults[key], value, key)

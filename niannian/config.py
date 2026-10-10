@@ -38,7 +38,6 @@ class Settings(BaseModel):
     new_message_chars: int = Field(default=2600, ge=200, le=12000)
     history_chars: int = Field(default=1200, ge=0, le=12000)
     task_chars: int = Field(default=1600, ge=0, le=12000)
-    profile_chars: int = Field(default=1200, ge=0, le=12000)
     history_rows: int = Field(default=6, ge=0, le=20)
     # 每个会话保留多少条“无需行动”判定记录。
     ignored_keep_per_session: int = Field(default=100, ge=10, le=2000)

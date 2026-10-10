@@ -11,7 +11,7 @@ from threading import Lock
 from typing import Any
 
 from .llm import (Instruction, LLMExtractor, HISTORY_CHARS, HISTORY_ROWS, MAX_TOKENS_BATCH,
-                  MAX_TOKENS_SINGLE, NEW_MESSAGE_CHARS, PROFILE_CHARS, TASK_CHARS, TEMPERATURE,
+                  MAX_TOKENS_SINGLE, NEW_MESSAGE_CHARS, TASK_CHARS, TEMPERATURE,
                   requires_review, guard_decisions, CONDITIONAL_PROHIBITION, ACTION_VERB, COMPRESSION_VERSION)
 from .media import attachment_only
 from .storage import canonical_time, utc_now
@@ -345,8 +345,7 @@ class Engine:
                                      new_message_chars=values.get("new_message_chars", NEW_MESSAGE_CHARS),
                                      history_chars=values.get("history_chars", HISTORY_CHARS),
                                      history_rows=values.get("history_rows", HISTORY_ROWS),
-                                     task_chars=values.get("task_chars", TASK_CHARS),
-                                     profile_chars=values.get("profile_chars", PROFILE_CHARS))
+                                     task_chars=values.get("task_chars", TASK_CHARS))
             self.llm = extractor
             profile = self.profile.read() if self.profile else ""
             rules = self.db.rows("SELECT * FROM rules WHERE enabled=1 ORDER BY id")

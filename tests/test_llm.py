@@ -66,7 +66,7 @@ class ModelTests(unittest.TestCase):
     def test_configured_budgets_and_sampling_reach_the_request(self):
         tuned = LLMExtractor("https://example.invalid/v1", "unused", "provider/model", temperature=0.6,
                              max_tokens_single=1500, max_tokens_batch=3000, new_message_chars=300,
-                             history_chars=200, history_rows=2, task_chars=120, profile_chars=60)
+                             history_chars=200, history_rows=2, task_chars=120)
         largest = max(self.messages, key=lambda row: len(row["content"]))
         tasks = [{**self.tasks[0], "id": index + 1} for index in range(100)]
         with patch("niannian.llm.urlopen", return_value=self.response({"instructions": [{"action": "IGNORE"}]})) as mocked:
@@ -81,7 +81,7 @@ class ModelTests(unittest.TestCase):
         self.assertLessEqual(sum(len(row["content"]) for row in data["history"]), 200)
         self.assertLessEqual(len(data["history"]), 2)
         self.assertLessEqual(sum(len(json.dumps(task, ensure_ascii=False)) for task in data["pending_tasks"]), 120)
-        self.assertLessEqual(len(data["user_profile"]), 60)
+        self.assertEqual(data["user_profile"], "画像" * 500)
         with patch("niannian.llm.urlopen", return_value=self.response({"items": []})) as mocked:
             tuned.extract_batch([self.message, self.second], [], tasks)
         self.assertEqual(json.loads(mocked.call_args.args[0].data)["max_tokens"], 3000)

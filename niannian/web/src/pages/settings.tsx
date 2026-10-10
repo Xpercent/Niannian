@@ -34,7 +34,6 @@ type NumericKey =
   | "history_chars"
   | "history_rows"
   | "task_chars"
-  | "profile_chars"
   | "wechat_poll_seconds"
   | "history_limit"
   | "ignored_keep_per_session";
@@ -183,14 +182,6 @@ const groups: Array<{ title: string; note: string; items: Option[] }> = [
         min: 0,
         max: 12000,
         verified: 1600,
-      },
-      {
-        key: "profile_chars",
-        label: "个人背景参考长度（字）",
-        hint: "使用你填写的画像；调小会减少可供参考的个人背景",
-        min: 0,
-        max: 12000,
-        verified: 1200,
       },
     ],
   },
