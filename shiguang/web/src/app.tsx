@@ -1,11 +1,4 @@
-import {
-  lazy,
-  Suspense,
-  useCallback,
-  useEffect,
-  useRef,
-  useState,
-} from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   CheckCircle2,
   ChevronRight,
@@ -22,22 +15,16 @@ import {
   AlertCircle,
 } from "lucide-react";
 import { Button } from "./components/ui";
-import { ErrorNotice, Loading } from "./components/common";
+import { ErrorNotice } from "./components/common";
 import { TaskDrawer } from "./components/task-drawer";
+import { TasksPage } from "./pages/tasks";
+import { SessionsPage } from "./pages/sessions";
+import RulesPage from "./pages/rules";
+import ProfilePage from "./pages/profile";
+import SettingsPage from "./pages/settings";
 import { api, cn, json } from "./lib/utils";
 import type { Overview, Notify } from "./lib/types";
 
-const TasksPage = lazy(() =>
-  import("./pages/tasks").then((module) => ({ default: module.TasksPage })),
-);
-const SessionsPage = lazy(() =>
-  import("./pages/sessions").then((module) => ({
-    default: module.SessionsPage,
-  })),
-);
-const RulesPage = lazy(() => import("./pages/rules"));
-const ProfilePage = lazy(() => import("./pages/profile"));
-const SettingsPage = lazy(() => import("./pages/settings"));
 const navigation = [
   { id: "tasks", label: "待办事项", icon: CheckCircle2 },
   { id: "sessions", label: "微信会话", icon: MessageCircle },
@@ -346,34 +333,32 @@ export function App() {
               )}
             </div>
           )}
-          <Suspense fallback={<Loading />}>
-            {view === "tasks" && (
-              <TasksPage
-                stats={overview?.stats}
-                sessions={overview?.sessions || []}
-                revision={revision}
-                onOpen={setTaskId}
-                onProcess={() => void process()}
-                processDisabled={busy || running}
-              />
-            )}
-            {view === "sessions" && (
-              <SessionsPage
-                sessions={overview?.sessions || []}
-                onRefresh={refresh}
-                notify={notify}
-              />
-            )}
-            {view === "rules" && <RulesPage notify={notify} />}
-            {view === "profile" && <ProfilePage notify={notify} />}
-            {view === "settings" && (
-              <SettingsPage
-                connected={connected}
-                onRefresh={refresh}
-                notify={notify}
-              />
-            )}
-          </Suspense>
+          {view === "tasks" && (
+            <TasksPage
+              stats={overview?.stats}
+              sessions={overview?.sessions || []}
+              revision={revision}
+              onOpen={setTaskId}
+              onProcess={() => void process()}
+              processDisabled={busy || running}
+            />
+          )}
+          {view === "sessions" && (
+            <SessionsPage
+              sessions={overview?.sessions || []}
+              onRefresh={refresh}
+              notify={notify}
+            />
+          )}
+          {view === "rules" && <RulesPage notify={notify} />}
+          {view === "profile" && <ProfilePage notify={notify} />}
+          {view === "settings" && (
+            <SettingsPage
+              connected={connected}
+              onRefresh={refresh}
+              notify={notify}
+            />
+          )}
         </div>
         <footer className="flex flex-wrap justify-between gap-2 px-5 pb-6 text-[10px] text-stone-400 lg:px-10">
           <span className="flex items-center gap-1.5">
