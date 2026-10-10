@@ -1,4 +1,4 @@
-param([int]$Rounds = 1)
+﻿param([int]$Rounds = 1)
 $ErrorActionPreference = 'Stop'
 $ProjectRoot = Split-Path -Parent $PSScriptRoot
 Set-Location -LiteralPath $ProjectRoot

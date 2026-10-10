@@ -1,6 +1,17 @@
 # 拾光项目交接：给下一位维护者
 
-## 2026-10-10：设置页参数扩展（最新）
+## 2026-10-10：启动脚本瘦身（最新）
+
+用户要求 `start.ps1` 不再做依赖检查，直接一条干净命令启动，依赖安装改为 README 手动步骤。
+
+- `scripts/start.ps1` 现在只做三件事：定位工程根、拼 `-X utf8 -m shiguang --port N`、按需加 `--no-wechat`；去掉了 venv 存在性检查、`$ErrorActionPreference` 与提示输出。改为纯 ASCII 内容，因此不再依赖 BOM，Windows PowerShell 5.1 与 7 都能直接解析。
+- 保留 `Set-Location` 到工程根不是习惯问题：上游 `wechatauto-replica/wechatauto/logger.py` 用相对路径 `wechatauto_logs` 建文件日志，从别处调用会在调用目录留下日志目录；已实测从其他目录启动时数据与缓存路径仍解析到工程根。
+- `setup.ps1`、`verify.ps1` 逻辑未改，只保留工作区已有的 UTF-8 BOM。原因：两者含中文提示，5.1 对无 BOM 的 UTF-8 脚本按 ANSI 解码，实测无 BOM 时 `setup.ps1` 报 2 个解析错误、`verify.ps1` 报 5 个，加 BOM 后为 0。若将来把提示改成英文，就可以去掉 BOM。
+- README「启动」段改为显式列出 venv、pip、submodule、npm 的手动命令，并给出 `.\.venv\Scripts\python.exe -X utf8 -m shiguang --port 8765` 这条等价启动命令；脚本标注为可选包装。
+
+验证：三个脚本经 PowerShell 5.1 `Parser::ParseFile` 均为 0 错误；`start.ps1 -NoWeChat -Port 8765` 实际启动并通过 `/api/health`；从工程外目录以 `-Port 8766` 启动，健康检查返回的采集缓存路径仍指向工程根、调用目录未产生 `wechatauto_logs`；两个临时实例已停止、端口释放、测试目录已清理。
+
+## 2026-10-10：设置页参数扩展
 
 用户要求“丰富设置界面，需要更多参数可以调”，并明确选择：预算类参数**基本放开、只留粗边界**；`max_tokens` 与 `temperature` **都可调**。该授权替代本文与此前“改预算需要真实依据”的固定边界说法，但只放开取值范围，不改变任何领域规则。
 

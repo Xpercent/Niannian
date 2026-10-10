@@ -8,15 +8,30 @@
 
 环境：Windows、已登录的微信 4.x、64 位 Python 3.10+（本机验证为 3.13）。修改前端需要 Node.js 22.12+ 和 npm；已随仓库交付构建产物，日常运行无需 npm 进程。
 
+当前工作区已有实际连接配置、真实消息数据库和初始化后的微信依赖，可以直接执行下面的启动命令。
+
+一次性安装依赖（在工程根目录手动执行，`scripts/setup.ps1` 是同样步骤的自动化版本，可选）：
+
 ```powershell
 cd E:\Group\Desktop\Code\wx\project5
-.\scripts\setup.ps1
-.\scripts\start.ps1
+python -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -r requirements-dev.txt
+.\.venv\Scripts\python.exe -m pip install -e .
+git submodule update --init
+.\.venv\Scripts\python.exe -m pip install -e .\wechatauto-replica
 ```
 
-打开 http://127.0.0.1:8765/ 。当前工作区已有实际连接配置、真实消息数据库和初始化后的微信依赖，可以直接运行启动命令。
+只有需要改前端时才再执行：`cd shiguang\web`、`npm ci`、`npm run build`。
 
-全新检出先执行 `git submodule update --init`（setup 会执行），模型配置可从 `config.json.example` 复制到 `config.json`，或在界面「设置与数据」中填写。API Key 按要求以明文保存在本地配置。模型请求始终发送 `enable_thinking: false`。存储路径修改需要重启；一般设置下一轮生效。`start.ps1 -NoWeChat` 仅供离线查看已保存数据。
+启动服务就一条命令：
+
+```powershell
+.\.venv\Scripts\python.exe -X utf8 -m shiguang --port 8765
+```
+
+`-X utf8` 让日志与报错在中文 Windows 控制台上保持 UTF-8 输出。`.\scripts\start.ps1` 只是这条命令的包装，额外支持 `-Port` 与 `-NoWeChat`（`start.ps1 -NoWeChat` 仅供离线查看已保存数据）；它会先切到工程根目录，因为上游微信适配器用相对路径 `wechatauto_logs` 写日志。
+
+打开 http://127.0.0.1:8765/ 。模型配置可从 `config.json.example` 复制到 `config.json`，或在界面「设置与数据」中填写。API Key 按要求以明文保存在本地配置。模型请求始终发送 `enable_thinking: false`。存储路径修改需要重启；一般设置下一轮生效。
 
 ## 使用流程
 
