@@ -392,6 +392,7 @@ class WechatWorker:
         self_ids = {int(key) for key, origins in observations.items() if origins == [account]}
         names = self._wx.nickname_map()
         payloads = []
+        media_found = []
         for raw in sorted(messages, key=lambda value: (int(value["sort_seq"]), int(value["local_id"]))):
             origin, _ = _sender(str(raw.get("content") or ""))
             sender = origin or raw.get("sender_username")
@@ -402,10 +403,21 @@ class WechatWorker:
                     self._media.enrich(item["username"], payload)
                 except Exception:
                     log.warning("Media index temporarily unavailable")
+            if payload["metadata"].get("local_file"):
+                media_found.append({
+                    "source_id": payload["source_id"],
+                    "filename": payload["metadata"]["local_file"],
+                    "tier": payload["metadata"].get("media_tier"),
+                })
             payloads.append(payload)
         checkpoint = {"account": account, "session_id": item["id"],
                       "sort_seq": max([watermark] + [int(m["sort_seq"]) for m in messages])}
         result = self.db.ingest_batch(payloads, checkpoint=checkpoint)
+        if media_found:
+            try:
+                self.db.attach_media(media_found)
+            except Exception:
+                log.warning("Media backfill temporarily unavailable")
         self.db.set_runtime(identity_key, observations)
         self._update(imported=self._state["imported"] + int(result.get("inserted", 0)))
         return {**result, "read": len(messages), "checkpoint": checkpoint["sort_seq"]}

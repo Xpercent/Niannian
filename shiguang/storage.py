@@ -183,6 +183,36 @@ class Database:
             inserted = sum(not r["duplicate"] for r in results)
             return {"imported": inserted, "inserted": inserted, "duplicates": sum(r["duplicate"] for r in results), "items": results}
 
+    def attach_media(self, items: list[dict]) -> int:
+        """按 source_id 给已入库消息补记本机附件文件名；只动 metadata_json。
+
+        不改水位、内容、processed；已有 local_file 的消息一律跳过，绝不覆盖
+        第一次成功提取的档位。微信落盘晚于采集时，重复扫描靠这里补挂。
+        """
+        targets = [item for item in items if item.get("source_id") and item.get("filename")]
+        if not targets:
+            return 0
+        by_source = {item["source_id"]: item for item in targets}
+        placeholders = ",".join("?" * len(by_source))
+        updated = 0
+        with self.connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            rows = conn.execute(
+                "SELECT id,source_id,metadata_json FROM messages "
+                f"WHERE source_id IN ({placeholders}) "
+                "AND json_extract(metadata_json,'$.local_file') IS NULL",
+                tuple(by_source)).fetchall()
+            for row in rows:
+                item = by_source[row["source_id"]]
+                metadata = json.loads(row["metadata_json"] or "{}")
+                metadata["local_file"] = item["filename"]
+                if item.get("tier"):
+                    metadata["media_tier"] = item["tier"]
+                conn.execute("UPDATE messages SET metadata_json=? WHERE id=?",
+                             (json.dumps(metadata, ensure_ascii=False), row["id"]))
+                updated += 1
+        return updated
+
     def sessions(self) -> list[dict]:
         return self.rows("SELECT s.*,(SELECT COUNT(*) FROM messages m WHERE m.session_id=s.id) message_count, "
                          "(SELECT COUNT(*) FROM tasks t WHERE t.session_id=s.id AND t.status='pending') task_count "

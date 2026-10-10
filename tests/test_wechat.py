@@ -263,3 +263,57 @@ def test_lock_covers_complete_project_cache(tmp_path):
     second = acquire_instance_lock(path)
     assert second is not None
     second.close()
+
+
+class DelayedMedia:
+    """真实回放里不产文件，指定轮次起才返回档名，模拟微信比采集更晚落盘。"""
+
+    def __init__(self, filename):
+        self.filename = filename
+        self.attached = False
+
+    def enrich(self, username, payload):
+        if payload["metadata"].get("attachment", {}).get("kind") != "image":
+            return
+        if self.attached:
+            payload["metadata"]["local_file"] = self.filename
+            payload["metadata"]["media_tier"] = "thumb"
+
+
+def test_later_media_extraction_backfills_existing_message(worker):
+    row = next(item for item in worker.db.rows("SELECT * FROM sessions")
+               if any(m["type"] == "图片" for m in worker._wx.groups[item["username"]]))
+    messages = [m for m in worker._wx.groups[row["username"]] if m["type"] == "图片"]
+    assert messages
+    filename = "e0017f7b0f827004/media_backfill_thumb.jpg"
+    worker.db.execute("DELETE FROM ingestion_keys")
+    worker.db.execute("DELETE FROM messages")
+    worker.db.execute("DELETE FROM wechat_checkpoints")
+    media = DelayedMedia(filename)
+    worker._media = media
+    watermark = max(int(m["sort_seq"]) for m in messages)
+
+    # 第一轮：微信还没写出预览档，采集只能先入库不带文件的消息。
+    worker._store(row, messages, 0)
+    first = worker.db.rows("SELECT id,metadata_json,processed FROM messages WHERE session_id=? ORDER BY id",
+                           (row["id"],))
+    assert first and not any("local_file" in r["metadata_json"] for r in first)
+
+    # 第二轮：文件落盘，重复扫描必须把档位补挂到已存在的消息行上。
+    media.attached = True
+    worker._store(row, messages, watermark)
+    second = worker.db.rows("SELECT id,metadata_json,processed FROM messages WHERE session_id=? ORDER BY id",
+                            (row["id"],))
+    assert [r["id"] for r in second] == [r["id"] for r in first]
+    assert [r["processed"] for r in second] == [r["processed"] for r in first]
+    attached = [r for r in second if '"local_file"' in r["metadata_json"]]
+    assert len(attached) == len(messages)
+    assert all(filename in r["metadata_json"] for r in attached)
+
+    # 第三轮：已挂档的行不再被覆盖，也不重复产出消息或动水位。
+    media.filename = "override.jpg"
+    worker._store(row, messages, watermark)
+    final = worker.db.rows("SELECT metadata_json FROM messages WHERE session_id=?", (row["id"],))
+    assert len(final) == len(second)
+    assert not any("override.jpg" in r["metadata_json"] for r in final)
+    assert worker._watermark(row["id"]) == watermark

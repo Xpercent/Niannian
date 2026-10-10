@@ -83,7 +83,7 @@ SQLite / Config / Profile → FastAPI → 亮色工作台
 | 误建、漏提、历史复活 | `llm.py` 的 `requires_review/guard_decisions/_data`、`engine.py` 的 `_gate/_fallback/process` |
 | 重复任务/错误关联 | `engine.py` 的 `related/_duplicate/_apply`，不能泛词模糊合并 |
 | 人工编辑被覆盖 | Engine 的 expected_versions，仓储 update_task，HTTP version/409 |
-| 附件问题 | `media.py` 的 parse/summarize/attachment_only/enrich，真实metadata.local_file |
+| 附件问题 | `media.py` 的 parse/summarize/attachment_only/enrich，真实metadata.local_file；微信落盘晚于采集时由 `storage.attach_media` 在重复扫描补挂 |
 | 轮次卡住/取消 | `jobs.py` 的 start/_execute/recover/stop，runs快照 |
 | 保存未持久化 | `config.py` 的 atomic_text/ConfigStore/ProfileStore，再查前端实际响应 |
 | 页面和交互 | `web/app.js`、`helpers.js`、`styles.css`、`index.html` |
@@ -98,6 +98,8 @@ SQLite / Config / Profile → FastAPI → 亮色工作台
 6. 同段指令、任务来源/事件与消息processed一起提交。取消留下未处理消息。
 
 不能把这条链改成“拿到模型JSON就直接插入任务”。
+
+本机附件提取可能晚于消息入库（微信先下发引用、后写出预览档）。重复扫描提取到文件后，`_store` 会调用 `storage.attach_media` 按 source_id 把 `local_file`/`media_tier` 补挂到已存在的消息行；该写入只动 `metadata_json`，已有档位的行不覆盖，也不改内容、processed 与水位。
 
 ### 当前限制参数
 
