@@ -40,6 +40,20 @@ class ApiTests(unittest.TestCase):
         with TestClient(create_app(self.root, live_wechat=False)) as fresh:
             self.assertEqual(fresh.get("/api/settings").json()["batch_interval_seconds"], 120)
 
+    def test_tunables_persist_and_validate(self):
+        result = self.client.patch("/api/settings", json={"batch_limit": 6, "ai_temperature": 0.3,
+                                                          "ignored_keep_per_session": 50, "history_rows": 0})
+        self.assertEqual(result.status_code, 200)
+        body = result.json()
+        self.assertEqual((body["batch_limit"], body["ai_temperature"], body["ignored_keep_per_session"],
+                          body["history_rows"]), (6, 0.3, 50, 0))
+        self.assertEqual(body["defaults"]["batch_limit"], 4)
+        self.assertEqual(body["defaults"]["batch_char_budget"], 4200)
+        self.assertNotIn("ai_api_key", body["defaults"])
+        self.assertEqual(self.client.patch("/api/settings", json={"batch_limit": 99}).status_code, 422)
+        self.assertEqual(self.client.patch("/api/settings", json={"ai_temperature": "hot"}).status_code, 422)
+        self.assertEqual(self.client.patch("/api/settings", json={"new_message_chars": 199}).status_code, 422)
+
     def test_task_edit_conflict_refresh_and_clear_due(self):
         task_id = self.make_task()
         url = f"/api/tasks/{task_id}"

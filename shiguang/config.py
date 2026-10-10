@@ -27,6 +27,23 @@ class Settings(BaseModel):
     wechat_enabled: bool = True
     wechat_poll_seconds: int = Field(default=2, ge=1, le=60)
     history_limit: int = Field(default=100, ge=10, le=1000)
+    # 模型请求参数；enable_thinking 不在这里，它始终固定为关闭。
+    ai_temperature: float = Field(default=0.0, ge=0, le=2)
+    ai_max_tokens_single: int = Field(default=700, ge=64, le=8000)
+    ai_max_tokens_batch: int = Field(default=1200, ge=64, le=16000)
+    # 每轮的吞吐边界：段数、字数与单轮/单会话取多少条。
+    batch_limit: int = Field(default=4, ge=1, le=20)
+    batch_char_budget: int = Field(default=4200, ge=400, le=60000)
+    round_limit: int = Field(default=240, ge=1, le=2000)
+    per_session_limit: int = Field(default=80, ge=1, le=500)
+    # 送进模型的上下文预算。
+    new_message_chars: int = Field(default=2600, ge=200, le=12000)
+    history_chars: int = Field(default=1200, ge=0, le=12000)
+    task_chars: int = Field(default=1600, ge=0, le=12000)
+    profile_chars: int = Field(default=1200, ge=0, le=12000)
+    history_rows: int = Field(default=6, ge=0, le=20)
+    # 每个会话保留多少条“无需行动”判定记录。
+    ignored_keep_per_session: int = Field(default=100, ge=10, le=2000)
 
     @field_validator("ai_base_url")
     @classmethod
@@ -48,6 +65,13 @@ class Settings(BaseModel):
         if not value:
             raise ValueError("此项不能为空")
         return value
+
+    @classmethod
+    def defaults(cls) -> dict:
+        """界面用来显示“默认值”和一键恢复；存储路径与密钥不在其中。"""
+        values = Settings().model_dump()
+        return {key: value for key, value in values.items()
+                if key not in {"db_path", "profile_path", "ai_api_key"}}
 
 
 def atomic_text(path: Path, text: str) -> None:
@@ -108,7 +132,8 @@ class ConfigStore:
     def public(self) -> dict:
         values = self.read()
         key = values.pop("ai_api_key")
-        return {**values, "ai_key_configured": bool(key), "thinking_enabled": False, "warning": self.warning}
+        return {**values, "ai_key_configured": bool(key), "thinking_enabled": False,
+                "defaults": Settings.defaults(), "warning": self.warning}
 
 
 class ProfileStore:

@@ -15,8 +15,12 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 log = logging.getLogger(__name__)
 NEW_MESSAGE_CHARS = 2600
 HISTORY_CHARS = 1200
+HISTORY_ROWS = 6
 TASK_CHARS = 1600
 PROFILE_CHARS = 1200
+MAX_TOKENS_SINGLE = 700
+MAX_TOKENS_BATCH = 1200
+TEMPERATURE = 0.0
 CONDITIONAL_INVITATION = re.compile(r"感兴趣|有意愿|有意向|自愿|符合.{0,12}条件|有需要的|有需求(?:的)?|欢迎.{0,12}(?:报名|参加)|可自行|如需|申请条件|报名条件|如果还有.{0,8}想|(?:还)?想(?:迁移|迁入|迁出)(?:户口)?")
 FRAGMENT_TITLE = re.compile(r"^(?:报名方式|报名条件|申请条件|截止(?:日期|时间)|活动(?:时间|地点|介绍)|联系方式|参赛对象|参与对象|目录|附件|注意事项)(?:\s*[:：]|\s*$)")
 ROLE_ASSIGNMENT = re.compile(r"(?:生活兼心理委员|生活委员|心理委员|学习委员|文体委员|宣传委员|组织委员|团支书|班长|生委|学委|体委|文委|负责人).{0,40}(?:发布|收取|发到|发给|转发|统计|负责|汇总|收集|通知|组织|注册|让|发起|填写|提交|领取|签字)")
@@ -91,13 +95,21 @@ UPDATE 明确修改当前待办；RESOLVE 明确完成或取消；IGNORE 闲聊�
 不输出无关字段、null、空字段、完整原文、推理或Markdown。"""
 
 
+TRUNCATION_MARKER = "\n[…原文过长，完整来源保存在本地…]\n"
+
+
 def clip_text(text: str, budget: int) -> str:
     text = str(text)
     if len(text) <= budget:
         return text
+    if budget <= 0:
+        return ""
+    if budget <= len(TRUNCATION_MARKER):
+        return text[:budget]
     # Preserve both the request opening and its later instructions/deadline.
-    head = budget * 2 // 3
-    return text[:head] + "\n[…原文过长，完整来源保存在本地…]\n" + text[-(budget - head - 32):]
+    head = min(budget * 2 // 3, budget - len(TRUNCATION_MARKER))
+    tail = budget - head - len(TRUNCATION_MARKER)
+    return text[:head] + TRUNCATION_MARKER + (text[-tail:] if tail > 0 else "")
 
 
 def requires_review(message, profile="") -> bool:
@@ -160,12 +172,21 @@ def _brief(message: dict[str, Any], budget=NEW_MESSAGE_CHARS) -> dict[str, Any]:
 
 
 class LLMExtractor:
-    def __init__(self, base_url: str, api_key: str, model: str, timeout: float = 25, enabled: bool = True):
+    def __init__(self, base_url: str, api_key: str, model: str, timeout: float = 25, enabled: bool = True,
+                 temperature: float = TEMPERATURE, max_tokens_single: int = MAX_TOKENS_SINGLE,
+                 max_tokens_batch: int = MAX_TOKENS_BATCH,
+                 new_message_chars: int = NEW_MESSAGE_CHARS, history_chars: int = HISTORY_CHARS,
+                 history_rows: int = HISTORY_ROWS, task_chars: int = TASK_CHARS,
+                 profile_chars: int = PROFILE_CHARS):
         self.timeout = timeout
         self.enabled = bool(enabled and base_url and api_key)
         self.last_error: str | None = None
         self.stats = {"requests": 0, "failures": 0, "seconds": 0.0}
         self.last_diagnostics = {}
+        # 请求参数由设置页可调；enable_thinking 始终固定为关闭。
+        self.temperature, self.max_tokens_single, self.max_tokens_batch = temperature, max_tokens_single, max_tokens_batch
+        self.budgets = {"new_message": new_message_chars, "history": history_chars, "rows": history_rows,
+                        "tasks": task_chars, "profile": profile_chars}
         self.configure(base_url, api_key, model)
 
     def configure(self, base_url: str, api_key: str, model: str) -> None:
@@ -196,7 +217,8 @@ class LLMExtractor:
                  '{"index":1,"instructions":[{"action":"CREATE","title":"动作+具体对象","description":"简短要求"}]}]}。'
                  f'必须覆盖索引0到{len(data.get("new_messages", []))-1}，不省略任何消息。'
                  if batch else '输出 {"instructions":[{"action":"IGNORE"}]} 或 {"instructions":[{"action":"CREATE","title":"动作+具体对象","description":"简短要求"}]}。')
-        payload = {"model": self.model, "temperature": 0, "max_tokens": 1200 if batch else 700,
+        payload = {"model": self.model, "temperature": self.temperature,
+                   "max_tokens": self.max_tokens_batch if batch else self.max_tokens_single,
                    "response_format": {"type": "json_object"},
                    "messages": [{"role": "system", "content": POLICY + "\n" + shape},
                                 {"role": "user", "content": json.dumps(data, ensure_ascii=False)}]}
@@ -253,13 +275,13 @@ class LLMExtractor:
                 return None
         return instructions
 
-    @staticmethod
-    def _data(message, context, tasks, profile, session_name, relevance_text=None):
+    def _data(self, message, context, tasks, profile, session_name, relevance_text=None):
         history, history_size = [], 0
-        for row in reversed(context[-6:]):
+        rows = self.budgets["rows"]
+        for row in reversed(context[-rows:] if rows else []):
             brief = _brief(row, 400)
             size = len(brief["content"])
-            if history_size + size > HISTORY_CHARS:
+            if history_size + size > self.budgets["history"]:
                 continue
             history.append(brief)
             history_size += size
@@ -275,19 +297,20 @@ class LLMExtractor:
             brief = {key: task.get(key) for key in ("id", "title", "priority", "due_at")}
             brief["title"] = clip_text(brief["title"] or "", 120)
             size = len(json.dumps(brief, ensure_ascii=False))
-            if task_size + size > TASK_CHARS:
+            if task_size + size > self.budgets["tasks"]:
                 break
             pending.append(brief)
             task_size += size
         return {"now": message["created_at"], "timezone": "Asia/Shanghai",
                 "session": {"name": session_name, "is_group": message["session_id"].endswith("@chatroom")},
-                "user_profile": clip_text(profile, PROFILE_CHARS), "history": history[::-1], "pending_tasks": pending}
+                "user_profile": clip_text(profile, self.budgets["profile"]), "history": history[::-1],
+                "pending_tasks": pending}
 
     def extract(self, message, context, tasks, profile="", session_name="") -> list[Instruction] | None:
         if not self.enabled:
             return None
         data = self._data(message, context, tasks, profile, session_name)
-        result = self._complete({**data, "new_message": _brief(message)}, False)
+        result = self._complete({**data, "new_message": _brief(message, self.budgets["new_message"])}, False)
         if result is None:
             return None
         # Also accept the previous one-instruction contract for provider compatibility.
@@ -298,7 +321,7 @@ class LLMExtractor:
         if not self.enabled or not items:
             return {}
         data = self._data(items[-1], context, tasks, profile, session_name, "\n".join(item["content"] for item in items))
-        result = self._complete({**data, "new_messages": [_brief(item) for item in items]}, True)
+        result = self._complete({**data, "new_messages": [_brief(item, self.budgets["new_message"]) for item in items]}, True)
         if result is None:
             return {}
         entries = result.get("items", result.get("instructions", []))

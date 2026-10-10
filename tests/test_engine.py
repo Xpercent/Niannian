@@ -40,6 +40,24 @@ class FakeModel:
         return self.answers
 
 
+class Recorder(FakeModel):
+    """记录引擎把段落切成几次请求，用来验证批次参数。"""
+
+    def __init__(self, shapes):
+        super().__init__()
+        self.shapes = shapes
+
+    def extract(self, message, *args):
+        self.stats["requests"] += 1
+        self.shapes.append("single")
+        return [Instruction(action="IGNORE")]
+
+    def extract_batch(self, items, *args):
+        self.stats["requests"] += 1
+        self.shapes.append("batch")
+        return {index: [Instruction(action="IGNORE")] for index in range(len(items))}
+
+
 class EngineTests(unittest.TestCase):
     def setUp(self):
         self.fixture = captured()
@@ -75,6 +93,66 @@ class EngineTests(unittest.TestCase):
         with patch("shiguang.engine.LLMExtractor", return_value=fake), patch.object(self.engine, "_gate", return_value=None), \
                 patch("shiguang.engine.guard_decisions", side_effect=lambda message, commands, profile: commands):
             return self.engine.process(force=True, **kwargs)
+
+    def test_round_and_session_limits_come_from_settings(self):
+        for index in range(6):
+            self.ingest(index, 900 - index * 30)
+        capped = self.engine.pending_messages(force=True, values={"per_session_limit": 3, "round_limit": 100})
+        self.assertTrue(capped)
+        self.assertLessEqual(max(Counter(row["session_id"] for row in capped).values()), 3)
+        tight = self.engine.pending_messages(force=True, values={"per_session_limit": 80, "round_limit": 4})
+        self.assertEqual(len(tight), 4)
+        default = self.engine.pending_messages(force=True, values={})
+        self.assertGreater(len(default), len(capped))
+
+    def test_model_request_parameters_come_from_settings(self):
+        self.ingest(0)
+        seen = {}
+
+        def spy(*args, **kwargs):
+            seen.update(kwargs)
+            return FakeModel({0: [Instruction(action="IGNORE")]})
+
+        with patch("shiguang.engine.LLMExtractor", side_effect=spy), \
+                patch.object(self.engine, "_gate", return_value=None), \
+                patch("shiguang.engine.guard_decisions", side_effect=lambda message, commands, profile: commands):
+            self.engine.process(force=True)
+        self.assertEqual(seen["max_tokens_single"], 700)
+        self.assertEqual(seen["temperature"], 0.0)
+        self.assertEqual(seen["history_rows"], 6)
+        self.assertNotIn("ai_api_key", seen)
+
+        self.values.update({"ai_temperature": 0.5, "ai_max_tokens_batch": 4000, "new_message_chars": 900,
+                            "history_rows": 2, "batch_limit": 1, "batch_char_budget": 5000})
+        seen.clear()
+        with patch("shiguang.engine.LLMExtractor", side_effect=spy), \
+                patch.object(self.engine, "_gate", return_value=None), \
+                patch("shiguang.engine.guard_decisions", side_effect=lambda message, commands, profile: commands):
+            self.engine.process(force=True)
+        self.assertEqual((seen["temperature"], seen["max_tokens_batch"], seen["new_message_chars"],
+                          seen["history_rows"]), (0.5, 4000, 900, 2))
+
+    def test_batch_limit_splits_requests(self):
+        self.ingest(0, 900)
+        self.ingest(1, 800)
+        self.ingest(2, 700)
+        shapes = []
+        self.values["batch_limit"] = 1
+        with patch("shiguang.engine.LLMExtractor", side_effect=lambda *args, **kwargs: Recorder(shapes)), \
+                patch.object(self.engine, "_gate", return_value=None), \
+                patch("shiguang.engine.guard_decisions", side_effect=lambda message, commands, profile: commands):
+            wide = self.engine.process(force=True)
+        self.db.execute("UPDATE messages SET processed=0")
+        self.values["batch_limit"] = 4
+        with patch("shiguang.engine.LLMExtractor", side_effect=lambda *args, **kwargs: Recorder(shapes)), \
+                patch.object(self.engine, "_gate", return_value=None), \
+                patch("shiguang.engine.guard_decisions", side_effect=lambda message, commands, profile: commands):
+            narrow = self.engine.process(force=True)
+        # batch_limit=1 时每段单独请求；放宽后一次带走多段，请求次数随之减少。
+        self.assertEqual((wide["batches"], wide["items"]), (0, 3))
+        self.assertEqual(shapes.count("single"), 3)
+        self.assertEqual((narrow["batches"], narrow["batched_items"]), (1, 3))
+        self.assertEqual(shapes.count("batch"), 1)
 
     def test_multiple_tasks_from_one_real_message(self):
         message_id = self.ingest()

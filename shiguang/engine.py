@@ -9,8 +9,9 @@ from datetime import datetime, timedelta, timezone
 from threading import Lock
 from typing import Any
 
-from .llm import (Instruction, LLMExtractor, NEW_MESSAGE_CHARS, requires_review, guard_decisions,
-                  CONDITIONAL_PROHIBITION, ACTION_VERB)
+from .llm import (Instruction, LLMExtractor, HISTORY_CHARS, HISTORY_ROWS, MAX_TOKENS_BATCH,
+                  MAX_TOKENS_SINGLE, NEW_MESSAGE_CHARS, PROFILE_CHARS, TASK_CHARS, TEMPERATURE,
+                  requires_review, guard_decisions, CONDITIONAL_PROHIBITION, ACTION_VERB)
 from .media import attachment_only
 from .storage import canonical_time, utc_now
 
@@ -52,6 +53,8 @@ class Engine:
     def pending_messages(self, force=False, session_id=None, values=None):
         """A bounded round gives each active session a turn before consuming a backlog."""
         values = values or self._settings()
+        per_session = values.get("per_session_limit", PER_SESSION_LIMIT)
+        round_limit = values.get("round_limit", ROUND_LIMIT)
         where = " AND s.id=?" if session_id else ""
         params = (session_id,) if session_id else ()
         sessions = self.db.rows(
@@ -63,33 +66,33 @@ class Engine:
         window = values.get("settle_window_seconds", 45)
         for session in sessions:
             rows = self.db.rows("SELECT * FROM messages WHERE session_id=? AND processed=0 "
-                                "ORDER BY created_at,id LIMIT ?", (session["id"], PER_SESSION_LIMIT + 1))
+                                "ORDER BY created_at,id LIMIT ?", (session["id"], per_session + 1))
             released = []
             if force:
-                released = rows[:PER_SESSION_LIMIT]
+                released = rows[:per_session]
             else:
                 cutoff = 0
-                for index, row in enumerate(rows[:PER_SESSION_LIMIT]):
+                for index, row in enumerate(rows[:per_session]):
                     created = parse_time(row["created_at"])
                     if (now - created).total_seconds() < window:
                         break
                     # Only cut before a recent tail if there was a real quiet gap.
-                    # Old oversized bursts are bounded at PER_SESSION_LIMIT so they
+                    # Old oversized bursts are bounded at per_session so they
                     # cannot permanently block their own session.
                     following = rows[index + 1] if index + 1 < len(rows) else None
                     if following is None or (parse_time(following["created_at"]) - created).total_seconds() >= window:
                         cutoff = index + 1
                         break
-                    if index + 1 == PER_SESSION_LIMIT and (now - parse_time(following["created_at"])).total_seconds() >= window:
-                        cutoff = PER_SESSION_LIMIT
+                    if index + 1 == per_session and (now - parse_time(following["created_at"])).total_seconds() >= window:
+                        cutoff = per_session
                 released = rows[:cutoff]
             if released:
                 queues.append(deque(released))
         selected = []
-        while queues and len(selected) < ROUND_LIMIT:
+        while queues and len(selected) < round_limit:
             remaining = []
             for queue in queues:
-                if len(selected) >= ROUND_LIMIT:
+                if len(selected) >= round_limit:
                     break
                 selected.append(queue.popleft())
                 if queue:
@@ -271,12 +274,12 @@ class Engine:
                             (item["session_id"], item.get("account", ""), min(item["message_ids"]),
                              canonical_time(item.get("first_created_at", item["created_at"]))))[::-1]
 
-    def _ignored(self, conn, item, source, reason):
+    def _ignored(self, conn, item, source, reason, keep=IGNORED_KEEP_PER_SESSION):
         conn.execute("INSERT INTO ignored_messages(session_id,message_ids,source,reason,created_at) VALUES(?,?,?,?,?)",
                      (item["session_id"], json.dumps(item["message_ids"]), source, reason[:4000], utc_now()))
         conn.execute("DELETE FROM ignored_messages WHERE session_id=? AND id NOT IN "
                      "(SELECT id FROM ignored_messages WHERE session_id=? ORDER BY id DESC LIMIT ?)",
-                     (item["session_id"], item["session_id"], IGNORED_KEEP_PER_SESSION))
+                     (item["session_id"], item["session_id"], keep))
 
     def _apply(self, conn, item, instruction, source, expected_version=None):
         action = instruction.action
@@ -340,9 +343,21 @@ class Engine:
     def process(self, force=False, progress=None, should_stop=None, session_id=None):
         with self.lock:
             values = self._settings()
+            batch_limit = values.get("batch_limit", BATCH_LIMIT)
+            batch_budget = values.get("batch_char_budget", BATCH_CHAR_BUDGET)
+            new_chars = values.get("new_message_chars", NEW_MESSAGE_CHARS)
+            ignored_keep = values.get("ignored_keep_per_session", IGNORED_KEEP_PER_SESSION)
             extractor = LLMExtractor(values.get("ai_base_url", ""), values.get("ai_api_key", ""),
                                      values.get("ai_model", ""), timeout=values.get("ai_timeout_seconds", 25),
-                                     enabled=values.get("ai_enabled", False))
+                                     enabled=values.get("ai_enabled", False),
+                                     temperature=values.get("ai_temperature", TEMPERATURE),
+                                     max_tokens_single=values.get("ai_max_tokens_single", MAX_TOKENS_SINGLE),
+                                     max_tokens_batch=values.get("ai_max_tokens_batch", MAX_TOKENS_BATCH),
+                                     new_message_chars=values.get("new_message_chars", NEW_MESSAGE_CHARS),
+                                     history_chars=values.get("history_chars", HISTORY_CHARS),
+                                     history_rows=values.get("history_rows", HISTORY_ROWS),
+                                     task_chars=values.get("task_chars", TASK_CHARS),
+                                     profile_chars=values.get("profile_chars", PROFILE_CHARS))
             self.llm = extractor
             profile = self.profile.read() if self.profile else ""
             rules = self.db.rows("SELECT * FROM rules WHERE enabled=1 ORDER BY id")
@@ -362,9 +377,9 @@ class Engine:
                     break
                 scope, queue = chunks.popleft()
                 chunk, characters = [], 0
-                while queue and len(chunk) < BATCH_LIMIT:
-                    size = min(len(queue[0]["content"]), NEW_MESSAGE_CHARS)
-                    if chunk and characters + size > BATCH_CHAR_BUDGET:
+                while queue and len(chunk) < batch_limit:
+                    size = min(len(queue[0]["content"]), new_chars)
+                    if chunk and characters + size > batch_budget:
                         break
                     chunk.append(queue.popleft())
                     characters += size
@@ -437,7 +452,7 @@ class Engine:
                                 else:
                                     item_counts["ignored"] += 1
                                     reason = instruction.context_summary if instruction.action == "IGNORE" else "指令未落地：重复待办、目标失效或版本已变化"
-                                    self._ignored(conn, item, source, reason or "无需行动")
+                                    self._ignored(conn, item, source, reason or "无需行动", ignored_keep)
                             conn.execute(f"UPDATE messages SET processed=1 WHERE id IN ({marks})", ids)
                             item_counts["processed"] += len(ids)
                             item_counts[f"{source}_decided"] += 1

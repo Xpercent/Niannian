@@ -204,6 +204,8 @@ export interface MetricsPayload {
     name: string;
     enabled: boolean;
     timeout_seconds: number;
+    temperature: number;
+    max_tokens_batch: number;
     batch_interval_seconds: number;
     settle_window_seconds: number;
     merge_window_seconds: number;

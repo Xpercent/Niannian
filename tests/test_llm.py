@@ -6,7 +6,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from shiguang.llm import Instruction, LLMExtractor, NEW_MESSAGE_CHARS, HISTORY_CHARS, TASK_CHARS, requires_review
+from shiguang.llm import (Instruction, LLMExtractor, NEW_MESSAGE_CHARS, HISTORY_CHARS, TASK_CHARS,
+                       clip_text, requires_review)
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -52,6 +53,43 @@ class ModelTests(unittest.TestCase):
         context = json.loads(request["messages"][1]["content"])
         self.assertIsInstance(context["new_message"]["is_self"], bool)
         self.assertEqual(context["new_message"]["content"], self.message["content"])
+
+    def test_clip_text_honours_tiny_and_zero_budgets(self):
+        long_text = "通知" * 500
+        self.assertEqual(clip_text(long_text, 0), "")
+        for budget in (1, 10, 21, 22, 60, 120, 2600):
+            self.assertLessEqual(len(clip_text(long_text, budget)), budget, budget)
+        self.assertEqual(clip_text("短文本", 100), "短文本")
+        kept = clip_text(long_text, 2600)
+        self.assertTrue(kept.startswith(long_text[:100]) and kept.endswith(long_text[-100:]))
+
+    def test_configured_budgets_and_sampling_reach_the_request(self):
+        tuned = LLMExtractor("https://example.invalid/v1", "unused", "provider/model", temperature=0.6,
+                             max_tokens_single=1500, max_tokens_batch=3000, new_message_chars=300,
+                             history_chars=200, history_rows=2, task_chars=120, profile_chars=60)
+        largest = max(self.messages, key=lambda row: len(row["content"]))
+        tasks = [{**self.tasks[0], "id": index + 1} for index in range(100)]
+        with patch("shiguang.llm.urlopen", return_value=self.response({"instructions": [{"action": "IGNORE"}]})) as mocked:
+            tuned.extract(largest, self.messages, tasks, "画像" * 500, "session")
+        request = json.loads(mocked.call_args.args[0].data)
+        data = json.loads(request["messages"][1]["content"])
+        self.assertEqual((request["temperature"], request["max_tokens"]), (0.6, 1500))
+        self.assertIs(request["enable_thinking"], False)
+        self.assertLessEqual(len(data["new_message"]["content"]), 300)
+        self.assertLessEqual(sum(len(row["content"]) for row in data["history"]), 200)
+        self.assertLessEqual(len(data["history"]), 2)
+        self.assertLessEqual(sum(len(json.dumps(task, ensure_ascii=False)) for task in data["pending_tasks"]), 120)
+        self.assertLessEqual(len(data["user_profile"]), 60)
+        with patch("shiguang.llm.urlopen", return_value=self.response({"items": []})) as mocked:
+            tuned.extract_batch([self.message, self.second], [], tasks)
+        self.assertEqual(json.loads(mocked.call_args.args[0].data)["max_tokens"], 3000)
+
+    def test_history_rows_zero_sends_no_context(self):
+        bare = LLMExtractor("https://example.invalid/v1", "unused", "model", history_rows=0)
+        with patch("shiguang.llm.urlopen", return_value=self.response({"instructions": [{"action": "IGNORE"}]})) as mocked:
+            bare.extract(self.message, self.messages, [], "", "session")
+        data = json.loads(json.loads(mocked.call_args.args[0].data)["messages"][1]["content"])
+        self.assertEqual(data["history"], [])
 
     def test_malformed_item_does_not_discard_valid_batch_siblings(self):
         payload = {"items": [{"index": 0, "instructions": [{"action": "CREATE", "title": "确认交付对象A"}]},

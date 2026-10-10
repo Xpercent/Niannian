@@ -161,16 +161,17 @@ def create_app(root: Path | str | None = None, *, live_wechat=True) -> FastAPI:
     @app.get("/api/metrics")
     def metrics(days: int = Query(default=30, ge=0, le=365)):
         ctx = container()
-        from .engine import BATCH_CHAR_BUDGET, BATCH_LIMIT, PER_SESSION_LIMIT, ROUND_LIMIT
         values = ctx.config.read()
         return {"metrics": ctx.db.processing_metrics(days), "stats": ctx.db.stats(),
                 "model": {"name": values["ai_model"], "enabled": values["ai_enabled"],
                           "timeout_seconds": values["ai_timeout_seconds"],
+                          "temperature": values["ai_temperature"],
+                          "max_tokens_batch": values["ai_max_tokens_batch"],
                           "batch_interval_seconds": values["batch_interval_seconds"],
                           "settle_window_seconds": values["settle_window_seconds"],
                           "merge_window_seconds": values["merge_window_seconds"],
-                          "batch_limit": BATCH_LIMIT, "batch_char_budget": BATCH_CHAR_BUDGET,
-                          "round_limit": ROUND_LIMIT, "per_session_limit": PER_SESSION_LIMIT}}
+                          "batch_limit": values["batch_limit"], "batch_char_budget": values["batch_char_budget"],
+                          "round_limit": values["round_limit"], "per_session_limit": values["per_session_limit"]}}
 
     @app.get("/api/tasks")
     def tasks(status: Literal["pending", "completed", "cancelled", "all"] = "pending", q: str = Query(default="", max_length=500),

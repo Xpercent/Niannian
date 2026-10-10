@@ -434,11 +434,23 @@ export default function MetricsPage({ revision }: Props) {
                 </span>
               </span>
               <span>思考模式：关闭</span>
+              <span
+                className={cn(
+                  "rounded px-1.5 py-0.5",
+                  model.temperature > 0
+                    ? "bg-amber-50 text-amber-700"
+                    : "bg-stone-100 text-stone-500",
+                )}
+              >
+                采样温度 {model.temperature}
+                {model.temperature > 0 ? "（判定可能不稳定）" : ""}
+              </span>
               <span>自动间隔 {model.batch_interval_seconds} 秒</span>
               <span>静默窗口 {model.settle_window_seconds} 秒</span>
               <span>请求超时 {model.timeout_seconds} 秒</span>
               <span>
-                每批最多 {model.batch_limit} 段 / {model.batch_char_budget} 字
+                每批最多 {model.batch_limit} 段 / {model.batch_char_budget} 字 ·
+                输出上限 {model.max_tokens_batch}
               </span>
               <span>
                 单轮上限 {model.round_limit} 条 · 单会话{" "}
@@ -448,6 +460,7 @@ export default function MetricsPage({ revision }: Props) {
                 <Database className="size-3.5 text-stone-400" />
                 统计基于最近 {metrics.scanned} 轮记录
                 {metrics.scanned >= metrics.scanned_limit ? "（已达上限）" : ""}
+                ；上方为当前设置，历史轮次可能用了不同参数
               </span>
             </CardContent>
           </Card>
