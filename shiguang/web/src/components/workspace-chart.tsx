@@ -1,16 +1,5 @@
-import { Bar, BarChart, CartesianGrid, XAxis } from "recharts";
 import { Card, CardHeader, CardTitle, CardContent } from "./ui";
-import {
-  ChartContainer,
-  ChartTooltip,
-  ChartTooltipContent,
-  type ChartConfig,
-} from "./ui/chart";
 import type { Stats } from "../lib/types";
-
-const config = {
-  count: { label: "待办数量", color: "#2c7150" },
-} satisfies ChartConfig;
 
 export function WorkspaceChart({ stats }: { stats?: Stats }) {
   const data = stats
@@ -31,35 +20,7 @@ export function WorkspaceChart({ stats }: { stats?: Stats }) {
       <CardContent>
         {stats ? (
           <>
-            <ChartContainer
-              config={config}
-              className="h-44 w-full"
-              aria-label={`进行中 ${stats.pending} 项，已完成 ${stats.completed} 项，已忽略 ${stats.cancelled} 项`}
-            >
-              <BarChart
-                data={data}
-                accessibilityLayer={false}
-                margin={{ top: 12, bottom: 0, left: 0, right: 0 }}
-              >
-                <CartesianGrid vertical={false} strokeDasharray="3 3" />
-                <XAxis
-                  dataKey="name"
-                  tickLine={false}
-                  axisLine={false}
-                  tickMargin={10}
-                  fontSize={10}
-                />
-                <ChartTooltip content={<ChartTooltipContent />} />
-                <Bar
-                  dataKey="count"
-                  fill="var(--color-count)"
-                  radius={[4, 4, 0, 0]}
-                  maxBarSize={28}
-                  isAnimationActive={false}
-                />
-              </BarChart>
-            </ChartContainer>
-            <div className="mt-5 flex items-baseline justify-between">
+            <div className="flex items-baseline justify-between">
               <span className="text-xs text-stone-400">累计完成比例</span>
               <strong className="text-xl tabular-nums">{ratio}%</strong>
             </div>
