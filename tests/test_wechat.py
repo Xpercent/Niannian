@@ -285,7 +285,7 @@ def test_later_media_extraction_backfills_existing_message(worker):
                if any(m["type"] == "图片" for m in worker._wx.groups[item["username"]]))
     messages = [m for m in worker._wx.groups[row["username"]] if m["type"] == "图片"]
     assert messages
-    filename = "e0017f7b0f827004/media_backfill_thumb.jpg"
+    filename = "0123456789abcdef/media_backfill_thumb.jpg"
     worker.db.execute("DELETE FROM ingestion_keys")
     worker.db.execute("DELETE FROM messages")
     worker.db.execute("DELETE FROM wechat_checkpoints")
