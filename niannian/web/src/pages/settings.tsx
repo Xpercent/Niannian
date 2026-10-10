@@ -74,7 +74,7 @@ const groups: Array<{ title: string; note: string; items: Option[] }> = [
       {
         key: "ai_timeout_seconds",
         label: "模型最长等待（秒）",
-        hint: "提炼超时使用本地规则；长消息压缩超时则留待下轮",
+        hint: "请求超时后保留消息，下一轮再请求云端",
         min: 5,
         max: 180,
       },
@@ -90,7 +90,7 @@ const groups: Array<{ title: string; note: string; items: Option[] }> = [
       {
         key: "ai_max_tokens_single",
         label: "单段提炼回答长度（token）",
-        hint: "太小会截断 JSON 导致整段回退",
+        hint: "太小可能使结果不完整，消息将留待下轮重试",
         min: 64,
         max: 8000,
         verified: 700,

@@ -160,6 +160,34 @@ class EngineTests(unittest.TestCase):
         self.assertEqual(self.db.one("SELECT processed FROM messages WHERE id=?", (message_id,))["processed"], 0)
         self.assertEqual(self.db.one("SELECT COUNT(*) AS n FROM task_events")["n"], 0)
 
+    def test_cloud_failure_keeps_source_pending_until_next_success(self):
+        message_id = self.ingest()
+        fake = FakeModel()
+        with patch("niannian.engine.LLMExtractor", return_value=fake), \
+                patch.object(self.engine, "_gate", return_value=None), \
+                patch.object(self.engine, "_fallback", side_effect=AssertionError("No local fallback")):
+            failed = self.engine.process(force=True)
+            self.assertEqual(failed["processed"], 0)
+            self.assertEqual(failed["skipped"], 1)
+            self.assertEqual(self.db.one("SELECT processed FROM messages WHERE id=?", (message_id,))["processed"], 0)
+            self.assertEqual(self.db.one("SELECT COUNT(*) AS n FROM ignored_messages")["n"], 0)
+            fake.answers = {0: [Instruction(action="IGNORE")]}
+            retried = self.engine.process(force=True)
+        self.assertEqual(retried["processed"], 1)
+        self.assertEqual(fake.stats["requests"], 2)
+
+    def test_partial_cloud_response_only_processes_valid_sibling(self):
+        first = self.ingest(0, 700)
+        second = self.ingest(1, 500)
+        fake = FakeModel({1: [Instruction(action="IGNORE")]})
+        with patch("niannian.engine.LLMExtractor", return_value=fake), \
+                patch.object(self.engine, "_gate", return_value=None), \
+                patch.object(self.engine, "_fallback", side_effect=AssertionError("No local fallback")):
+            result = self.engine.process(force=True)
+        self.assertEqual(result["processed"], 1)
+        self.assertEqual(self.db.one("SELECT processed FROM messages WHERE id=?", (first,))["processed"], 0)
+        self.assertEqual(self.db.one("SELECT processed FROM messages WHERE id=?", (second,))["processed"], 1)
+
     def test_model_request_parameters_come_from_settings(self):
         self.ingest(0)
         seen = {}
@@ -293,7 +321,7 @@ class EngineTests(unittest.TestCase):
         self.assertEqual(result["updated"], 0)
         self.assertEqual(self.db.one("SELECT priority,version FROM tasks WHERE id=?", (task_id,)), {"priority": "low", "version": 2})
 
-    def test_partial_batch_fallback_does_not_refresh_other_model_versions(self):
+    def test_partial_batch_retry_does_not_refresh_other_model_versions(self):
         task_id = self.task()
         self.ingest(0, 700)
         self.ingest(1, 500)
@@ -305,7 +333,7 @@ class EngineTests(unittest.TestCase):
 
         fake.extract_batch = answer
         with patch("niannian.engine.LLMExtractor", return_value=fake), patch.object(self.engine, "_gate", return_value=None), \
-                patch.object(self.engine, "_fallback", return_value=[Instruction(action="IGNORE")]):
+                patch.object(self.engine, "_fallback", side_effect=AssertionError("Cloud failures must not fall back")):
             result = self.engine.process(force=True)
         self.assertEqual(result["updated"], 0)
         self.assertEqual(self.db.one("SELECT priority,version FROM tasks WHERE id=?", (task_id,)), {"priority": "low", "version": 2})
@@ -556,7 +584,7 @@ class EngineTests(unittest.TestCase):
         rows = self.engine.pending_messages(force=True)
         expected = self.db.one("SELECT COUNT(*) AS n FROM messages WHERE processed=0")["n"]
         self.assertEqual(len(rows), expected)
-        fake = FakeModel()
+        fake = Recorder([])
         sessions = []
         with patch("niannian.engine.LLMExtractor", return_value=fake), patch.object(self.engine, "_gate", return_value=None):
             result = self.engine.process(force=True, progress=lambda done, total, session: sessions.append(session) if session else None)

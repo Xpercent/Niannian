@@ -434,11 +434,16 @@ class Engine:
                         break
                     answer = gates[index] if gates[index] is not None else answers.get(index)
                     source = "llm" if gates[index] is None and answer is not None else "rule"
-                    # A preceding create may have been rejected or changed while the
-                    # model was running. Re-extract locally against committed state.
+                    # Failed requests and references to rejected creates remain pending.
                     invalid_ref = answer and any(command.related_task_ref and command.related_task_ref not in references
                                                  for command in answer)
                     if answer is None or invalid_ref:
+                        if extractor.enabled:
+                            counts["skipped"] += 1
+                            done += 1
+                            if progress:
+                                progress(done, len(items), session["name"] if session else scope[1])
+                            continue
                         pending_now = self.db.rows("SELECT * FROM tasks WHERE session_id=? AND status='pending' ORDER BY id", (scope[1],))
                         answer = self._fallback(item, pending_now, rules, profile)
                         source = "rule"
