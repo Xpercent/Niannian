@@ -8,7 +8,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from shiguang.storage import ConflictError, Database, canonical_time
+from niannian.storage import ConflictError, Database, canonical_time
 from support import ingest_capture, task_record
 
 

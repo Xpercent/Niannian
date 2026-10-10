@@ -6,7 +6,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from shiguang.config import ConfigStore, ProfileStore
+from niannian.config import ConfigStore, ProfileStore
 
 
 class ConfigTests(unittest.TestCase):
@@ -67,7 +67,7 @@ class ConfigTests(unittest.TestCase):
         original = store.read()
         profile = ProfileStore(self.root / "PROFILE.md")
         profile.save("# 用户画像\n")
-        with patch("shiguang.config.os.replace", side_effect=OSError("disk unavailable")):
+        with patch("niannian.config.os.replace", side_effect=OSError("disk unavailable")):
             with self.assertRaises(OSError):
                 store.update({"batch_interval_seconds": 90})
             with self.assertRaises(OSError):

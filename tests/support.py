@@ -15,7 +15,7 @@ def capture():
 
 
 def ingest_capture(db, limit=20):
-    from shiguang.wechat import normalize, session_id
+    from niannian.wechat import normalize, session_id
     data = capture()
     account = data["account"]
     items = data["messages"][:limit]
@@ -27,5 +27,5 @@ def ingest_capture(db, limit=20):
 
 
 def task_record(db, sid, title="仓储状态验证"):
-    from shiguang.storage import utc_now
+    from niannian.storage import utc_now
     return db.execute("INSERT INTO tasks(session_id,title,description,created_at,updated_at) VALUES(?,?,?,?,?)", (sid, title, "直接验证任务记录，不构造聊天", utc_now(), utc_now()))

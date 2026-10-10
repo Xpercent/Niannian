@@ -1,4 +1,4 @@
-# Agent 工作规范：拾光 project5
+# Agent 工作规范：念念 project5
 
 本文件适用于整个 project5。开始工作前必须读取本文件与 `docs/HANDOFF.md`。这是已交付并连接真实微信的个人工作台，应在现有架构上小步维护，不重新搭建工程。
 

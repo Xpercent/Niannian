@@ -400,7 +400,7 @@ export default function SettingsPage({
       const url = URL.createObjectURL(await response.blob());
       const link = document.createElement("a");
       link.href = url;
-      link.download = `shiguang-export.${format}`;
+      link.download = `workspace-export.${format}`;
       link.click();
       setTimeout(() => URL.revokeObjectURL(url), 1000);
     } catch (e) {

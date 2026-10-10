@@ -5,8 +5,8 @@ import unittest
 from pathlib import Path
 from threading import Event
 
-from shiguang.jobs import ExtractionJobs
-from shiguang.storage import Database
+from niannian.jobs import ExtractionJobs
+from niannian.storage import Database
 
 
 class Config:

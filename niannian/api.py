@@ -135,7 +135,7 @@ def create_app(root: Path | str | None = None, *, live_wechat=True) -> FastAPI:
         finally:
             await asyncio.to_thread(container.stop)
 
-    app = FastAPI(title="拾光 · 真实微信与智能待办", version=__version__, lifespan=lifespan)
+    app = FastAPI(title="念念 · 真实微信与智能待办", version=__version__, lifespan=lifespan)
 
     def container() -> Application:
         return app.state.container
@@ -377,7 +377,7 @@ def create_app(root: Path | str | None = None, *, live_wechat=True) -> FastAPI:
             media_type = "application/json"
         else:
             names = {s["id"]: s["name"] for s in data["sessions"]}
-            lines = ["# 拾光待办与消息", "", "导出时间：" + data["exported_at"], ""]
+            lines = ["# 待办与消息", "", "导出时间：" + data["exported_at"], ""]
             for task in data["tasks"]:
                 lines.extend(["## " + task["title"].replace("\n", " "), "", f"会话：{names.get(task['session_id'], task['session_id'])} · 状态：{task['status']} · 优先级：{task['priority']}", "", task["description"], "", task["context_summary"], ""])
             lines.append("## 原始消息")
@@ -385,7 +385,7 @@ def create_app(root: Path | str | None = None, *, live_wechat=True) -> FastAPI:
                 lines.extend(["", f"{message['created_at']} · {names.get(message['session_id'], '')} · {message['sender_name']}", "", "> " + message["content"].replace("\n", "\n> ")])
             body = "\n".join(lines)
             media_type = "text/markdown"
-        return Response(body, media_type=media_type, headers={"Content-Disposition": f'attachment; filename="shiguang-{data["exported_at"][:10]}.{format}"'})
+        return Response(body, media_type=media_type, headers={"Content-Disposition": f'attachment; filename="workspace-{data["exported_at"][:10]}.{format}"'})
 
     @app.get("/media/{filename:path}")
     def media(filename: str):
@@ -404,7 +404,7 @@ def create_app(root: Path | str | None = None, *, live_wechat=True) -> FastAPI:
     @app.get("/", include_in_schema=False)
     def index():
         if not (web / "index.html").is_file():
-            raise HTTPException(503, "前端尚未构建，请在 shiguang/web 执行 npm ci 与 npm run build")
+            raise HTTPException(503, "前端尚未构建，请在 niannian/web 执行 npm ci 与 npm run build")
         return FileResponse(web / "index.html", headers={"Cache-Control": "no-cache"})
 
     return app

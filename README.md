@@ -1,4 +1,4 @@
-# 拾光 · 微信消息与智能待办
+# 念念 · 微信消息与智能待办
 
 把真实微信消息整理成可追溯的行动清单。基于 Windows 本机微信 4.x，只读采集消息与已下载附件；使用关闭思考模式的云端模型提炼，保留原文、过滤依据和每次变更。
 
@@ -21,12 +21,12 @@ git submodule update --init
 .\.venv\Scripts\python.exe -m pip install -e .\wechatauto-replica
 ```
 
-只有需要改前端时才再执行：`cd shiguang\web`、`npm ci`、`npm run build`。
+只有需要改前端时才再执行：`cd niannian\web`、`npm ci`、`npm run build`。
 
 启动服务就一条命令：
 
 ```powershell
-.\.venv\Scripts\python.exe -X utf8 -m shiguang --port 8765
+.\.venv\Scripts\python.exe -X utf8 -m niannian --port 8765
 ```
 
 `-X utf8` 让日志与报错在中文 Windows 控制台上保持 UTF-8 输出。`.\scripts\start.ps1` 只是这条命令的包装，额外支持 `-Port` 与 `-NoWeChat`（`start.ps1 -NoWeChat` 仅供离线查看已保存数据）；它会先切到工程根目录，因为上游微信适配器用相对路径 `wechatauto_logs` 写日志。
@@ -49,15 +49,15 @@ git submodule update --init
 
 | 模块 | 职责 |
 | --- | --- |
-| `shiguang/wechat.py` | 上游只读适配、账号隔离、串行命令、可靠采集水位及身份证据 |
-| `shiguang/media.py` | 解析真实附件并定位已下载本机文件 |
-| `shiguang/storage.py` | 消息与水位原子持久化、来源幂等、UTC 索引、任务版本与审计、一致性快照 |
-| `shiguang/engine.py` | 聚合、公平有界队列、指令执行、保守回退、本人身份约束 |
-| `shiguang/llm.py` | OpenAI 兼容请求、紧凑上下文、结构验证与业务闸门 |
-| `shiguang/jobs.py` | 定时/手动单轮提炼、持久化进度、取消和退出恢复 |
-| `shiguang/config.py` | 类型化配置、文件原子保存、单轮快照 |
-| `shiguang/api.py` | 应用工厂、显式生命周期、薄 HTTP 接口 |
-| `shiguang/web/` | 全新亮色工作台、来源抽屉、会话/规则/画像/设置 |
+| `niannian/wechat.py` | 上游只读适配、账号隔离、串行命令、可靠采集水位及身份证据 |
+| `niannian/media.py` | 解析真实附件并定位已下载本机文件 |
+| `niannian/storage.py` | 消息与水位原子持久化、来源幂等、UTC 索引、任务版本与审计、一致性快照 |
+| `niannian/engine.py` | 聚合、公平有界队列、指令执行、保守回退、本人身份约束 |
+| `niannian/llm.py` | OpenAI 兼容请求、紧凑上下文、结构验证与业务闸门 |
+| `niannian/jobs.py` | 定时/手动单轮提炼、持久化进度、取消和退出恢复 |
+| `niannian/config.py` | 类型化配置、文件原子保存、单轮快照 |
+| `niannian/api.py` | 应用工厂、显式生命周期、薄 HTTP 接口 |
+| `niannian/web/` | 全新亮色工作台、来源抽屉、会话/规则/画像/设置 |
 
 微信采集先提交原始消息与水位，再交给提炼。任务编辑带版本号，冲突返回 409，避免模型覆盖用户编辑。每轮最多 240 条、每会话最多 80 条；余下内容继续排队。模型每批最多 4 个聚合段并限制上下文预算，失败时仅从完整明确动作保守降级，复核原因可回查。完整 API 见 `/docs`。
 
@@ -87,7 +87,7 @@ Python 统一通过 pytest 收集 unittest 与 fixture 测试；前端验证采�
 ## 前端维护
 
 ```powershell
-cd shiguang/web
+cd niannian/web
 npm ci
 npm run dev    # 开发地址见终端；API/media 代理到 127.0.0.1:8765
 npm run build  # 将源码编译到 dist，FastAPI 刷新后加载

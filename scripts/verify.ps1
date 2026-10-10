@@ -7,7 +7,7 @@ for ($Round = 1; $Round -le $Rounds; $Round++) {
     Write-Host "验证轮次 $Round/$Rounds"
     & .\.venv\Scripts\python.exe -X utf8 -m pytest tests -q
     if ($LASTEXITCODE -ne 0) { throw "第 $Round 轮 Python 回归失败" }
-    Push-Location (Join-Path $ProjectRoot 'shiguang\web')
+    Push-Location (Join-Path $ProjectRoot 'niannian\web')
     try {
         npm run build
         if ($LASTEXITCODE -ne 0) { throw '前端类型检查或构建失败' }

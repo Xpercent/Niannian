@@ -7,7 +7,7 @@ from pathlib import Path
 
 from fastapi.testclient import TestClient
 
-from shiguang.api import create_app
+from niannian.api import create_app
 from support import ingest_capture, task_record
 
 

@@ -1,2 +1,2 @@
 # Vite output is delivered with Python; review the corresponding TypeScript/CSS.
-shiguang/web/dist/assets/* -diff linguist-generated=true
+niannian/web/dist/assets/* -diff linguist-generated=true

@@ -448,7 +448,7 @@ class Database:
         directory = self.path.parent / "backups"
         directory.mkdir(parents=True, exist_ok=True)
         stamp = datetime.now(SHANGHAI).strftime("%Y%m%d-%H%M%S-%f")
-        target = directory / f"shiguang-{label}-{stamp}.db"
+        target = directory / f"backup-{label}-{stamp}.db"
         with self.connect() as source:
             dest = sqlite3.connect(target)
             try:
@@ -457,7 +457,7 @@ class Database:
                     raise sqlite3.DatabaseError("备份完整性检查未通过")
             finally:
                 dest.close()
-        for stale in sorted(directory.glob(f"shiguang-{label}-*.db"), reverse=True)[10:]:
+        for stale in sorted(directory.glob(f"backup-{label}-*.db"), reverse=True)[10:]:
             stale.unlink()
         return {"file": target.name, "bytes": target.stat().st_size, "created_at": utc_now()}
 

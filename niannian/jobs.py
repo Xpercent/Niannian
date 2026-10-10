@@ -45,7 +45,7 @@ class ExtractionJobs:
                             "result": None, "error": None, "cancel_requested": False,
                             "trigger": "manual" if force else "scheduled"}
             self._persist(self.current)
-            self.worker = Thread(target=self._execute, args=(force, session_id), name="shiguang-extraction", daemon=True)
+            self.worker = Thread(target=self._execute, args=(force, session_id), name="extraction-worker", daemon=True)
             self.worker.start()
             return dict(self.current)
 
@@ -92,7 +92,7 @@ class ExtractionJobs:
 
     def start_scheduler(self) -> None:
         self.recover()
-        self.scheduler = Thread(target=self._schedule, name="shiguang-scheduler", daemon=True)
+        self.scheduler = Thread(target=self._schedule, name="extraction-scheduler", daemon=True)
         self.scheduler.start()
 
     def _schedule(self):

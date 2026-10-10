@@ -14,7 +14,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 class Settings(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
-    db_path: str = "data/shiguang.db"
+    db_path: str = "data/workspace.db"
     profile_path: str = "data/PROFILE.md"
     ai_enabled: bool = True
     ai_base_url: str = "https://api.siliconflow.cn/v1"

@@ -1,6 +1,6 @@
 // Critical presentation boundaries only; no message fixtures or database writes.
 import assert from 'node:assert/strict';
-import { safeMedia, dateText, localInputTime } from '../shiguang/web/src/lib/utils.ts';
+import { safeMedia, dateText, localInputTime } from '../niannian/web/src/lib/utils.ts';
 
 assert.equal(safeMedia('account/附件 name.png'), '/media/account/%E9%99%84%E4%BB%B6%20name.png');
 assert.equal(safeMedia('account\\photo.png'), '/media/account/photo.png');

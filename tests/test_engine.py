@@ -8,10 +8,10 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
 
-from shiguang.engine import Engine, parse_time
-from shiguang.llm import Instruction
-from shiguang.storage import Database, utc_now
-from shiguang.wechat import _sender, normalize
+from niannian.engine import Engine, parse_time
+from niannian.llm import Instruction
+from niannian.storage import Database, utc_now
+from niannian.wechat import _sender, normalize
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -90,8 +90,8 @@ class EngineTests(unittest.TestCase):
         fake = FakeModel(answers)
         # These domain fixtures test state transitions independently of model
         # language quality. Separate capture tests exercise the semantic guard.
-        with patch("shiguang.engine.LLMExtractor", return_value=fake), patch.object(self.engine, "_gate", return_value=None), \
-                patch("shiguang.engine.guard_decisions", side_effect=lambda message, commands, profile: commands):
+        with patch("niannian.engine.LLMExtractor", return_value=fake), patch.object(self.engine, "_gate", return_value=None), \
+                patch("niannian.engine.guard_decisions", side_effect=lambda message, commands, profile: commands):
             return self.engine.process(force=True, **kwargs)
 
     def test_round_and_session_limits_come_from_settings(self):
@@ -113,9 +113,9 @@ class EngineTests(unittest.TestCase):
             seen.update(kwargs)
             return FakeModel({0: [Instruction(action="IGNORE")]})
 
-        with patch("shiguang.engine.LLMExtractor", side_effect=spy), \
+        with patch("niannian.engine.LLMExtractor", side_effect=spy), \
                 patch.object(self.engine, "_gate", return_value=None), \
-                patch("shiguang.engine.guard_decisions", side_effect=lambda message, commands, profile: commands):
+                patch("niannian.engine.guard_decisions", side_effect=lambda message, commands, profile: commands):
             self.engine.process(force=True)
         self.assertEqual(seen["max_tokens_single"], 700)
         self.assertEqual(seen["temperature"], 0.0)
@@ -125,9 +125,9 @@ class EngineTests(unittest.TestCase):
         self.values.update({"ai_temperature": 0.5, "ai_max_tokens_batch": 4000, "new_message_chars": 900,
                             "history_rows": 2, "batch_limit": 1, "batch_char_budget": 5000})
         seen.clear()
-        with patch("shiguang.engine.LLMExtractor", side_effect=spy), \
+        with patch("niannian.engine.LLMExtractor", side_effect=spy), \
                 patch.object(self.engine, "_gate", return_value=None), \
-                patch("shiguang.engine.guard_decisions", side_effect=lambda message, commands, profile: commands):
+                patch("niannian.engine.guard_decisions", side_effect=lambda message, commands, profile: commands):
             self.engine.process(force=True)
         self.assertEqual((seen["temperature"], seen["max_tokens_batch"], seen["new_message_chars"],
                           seen["history_rows"]), (0.5, 4000, 900, 2))
@@ -138,15 +138,15 @@ class EngineTests(unittest.TestCase):
         self.ingest(2, 700)
         shapes = []
         self.values["batch_limit"] = 1
-        with patch("shiguang.engine.LLMExtractor", side_effect=lambda *args, **kwargs: Recorder(shapes)), \
+        with patch("niannian.engine.LLMExtractor", side_effect=lambda *args, **kwargs: Recorder(shapes)), \
                 patch.object(self.engine, "_gate", return_value=None), \
-                patch("shiguang.engine.guard_decisions", side_effect=lambda message, commands, profile: commands):
+                patch("niannian.engine.guard_decisions", side_effect=lambda message, commands, profile: commands):
             wide = self.engine.process(force=True)
         self.db.execute("UPDATE messages SET processed=0")
         self.values["batch_limit"] = 4
-        with patch("shiguang.engine.LLMExtractor", side_effect=lambda *args, **kwargs: Recorder(shapes)), \
+        with patch("niannian.engine.LLMExtractor", side_effect=lambda *args, **kwargs: Recorder(shapes)), \
                 patch.object(self.engine, "_gate", return_value=None), \
-                patch("shiguang.engine.guard_decisions", side_effect=lambda message, commands, profile: commands):
+                patch("niannian.engine.guard_decisions", side_effect=lambda message, commands, profile: commands):
             narrow = self.engine.process(force=True)
         # batch_limit=1 时每段单独请求；放宽后一次带走多段，请求次数随之减少。
         self.assertEqual((wide["batches"], wide["items"]), (0, 3))
@@ -219,7 +219,7 @@ class EngineTests(unittest.TestCase):
             return [Instruction(action="CREATE", title="确认交付对象A")]
 
         fake.extract = answer
-        with patch("shiguang.engine.LLMExtractor", return_value=fake), patch.object(self.engine, "_gate", return_value=None):
+        with patch("niannian.engine.LLMExtractor", return_value=fake), patch.object(self.engine, "_gate", return_value=None):
             result = self.engine.process(force=True)
         self.assertEqual((result["skipped"], result["created"], result["processed"]), (1, 0, 0))
 
@@ -233,7 +233,7 @@ class EngineTests(unittest.TestCase):
             return [Instruction(action="UPDATE", related_task_id=task_id, priority="high")]
 
         fake.extract = answer
-        with patch("shiguang.engine.LLMExtractor", return_value=fake), patch.object(self.engine, "_gate", return_value=None):
+        with patch("niannian.engine.LLMExtractor", return_value=fake), patch.object(self.engine, "_gate", return_value=None):
             result = self.engine.process(force=True)
         self.assertEqual(result["updated"], 0)
         self.assertEqual(self.db.one("SELECT priority,version FROM tasks WHERE id=?", (task_id,)), {"priority": "low", "version": 2})
@@ -249,7 +249,7 @@ class EngineTests(unittest.TestCase):
             return {1: [Instruction(action="UPDATE", related_task_id=task_id, priority="high")]}
 
         fake.extract_batch = answer
-        with patch("shiguang.engine.LLMExtractor", return_value=fake), patch.object(self.engine, "_gate", return_value=None), \
+        with patch("niannian.engine.LLMExtractor", return_value=fake), patch.object(self.engine, "_gate", return_value=None), \
                 patch.object(self.engine, "_fallback", return_value=[Instruction(action="IGNORE")]):
             result = self.engine.process(force=True)
         self.assertEqual(result["updated"], 0)
@@ -367,7 +367,7 @@ class EngineTests(unittest.TestCase):
         self.assertIsNone(self.engine._duplicate("提交通知所有人", [{"id": 1, "title": "提交所有人通知"}]))
 
     def test_user_extract_rule_enables_real_special_action_candidate(self):
-        from shiguang.llm import requires_review
+        from niannian.llm import requires_review
         candidates = [row for row in self.fixture["messages"] if not self.engine.REQUEST.search(row["content"]) and
                       self.engine.ACTION_OBJECT.search(row["content"]) and not self.engine.CONDITIONAL.search(row["content"]) and
                       not requires_review(row, "") and 8 <= len(row["content"]) <= 120 and not row["is_self"]]
@@ -380,7 +380,7 @@ class EngineTests(unittest.TestCase):
         self.assertTrue(any(command.action == "CREATE" for command in decisions))
 
     def test_specific_unknown_roles_are_reviewed_in_real_capture(self):
-        from shiguang.llm import ROLE_ASSIGNMENT, UNIVERSAL_REQUEST
+        from niannian.llm import ROLE_ASSIGNMENT, UNIVERSAL_REQUEST
         candidates = [row for row in self.fixture["messages"] if row["session_id"].endswith("@chatroom") and
                       ROLE_ASSIGNMENT.search(row["content"]) and not UNIVERSAL_REQUEST.search(row["content"])]
         if not candidates:
@@ -393,13 +393,13 @@ class EngineTests(unittest.TestCase):
     def test_final_engine_guard_rejects_information_title(self):
         self.ingest()
         fake = FakeModel({0: [Instruction(action="CREATE", title="返校确认操作流程")]})
-        with patch("shiguang.engine.LLMExtractor", return_value=fake), patch.object(self.engine, "_gate", return_value=None):
+        with patch("niannian.engine.LLMExtractor", return_value=fake), patch.object(self.engine, "_gate", return_value=None):
             result = self.engine.process(force=True)
         self.assertEqual(result["created"], 0)
         self.assertEqual(result["ignored"], 1)
 
     def test_mixed_all_member_notice_does_not_assign_special_role_to_self(self):
-        from shiguang.llm import guard_decisions, ROLE_ASSIGNMENT, UNIVERSAL_REQUEST
+        from niannian.llm import guard_decisions, ROLE_ASSIGNMENT, UNIVERSAL_REQUEST
         candidates = [row for row in self.fixture["messages"] if ROLE_ASSIGNMENT.search(row["content"]) and
                       UNIVERSAL_REQUEST.search(row["content"])]
         if not candidates and (ROOT / "data" / "raw-wechat.json").exists():
@@ -416,7 +416,7 @@ class EngineTests(unittest.TestCase):
         self.assertTrue(all(command.action == "IGNORE" for command in decisions))
 
     def test_universal_signing_request_survives_negative_exception(self):
-        from shiguang.llm import guard_decisions, UNIVERSAL_REQUEST, CONDITIONAL_PROHIBITION
+        from niannian.llm import guard_decisions, UNIVERSAL_REQUEST, CONDITIONAL_PROHIBITION
         raw_path = ROOT / "data" / "raw-wechat.json"
         if not raw_path.exists():
             self.skipTest("Raw capture unavailable")
@@ -432,7 +432,7 @@ class EngineTests(unittest.TestCase):
         self.assertEqual([command.action for command in result], ["CREATE"])
 
     def test_real_optional_household_transfer_requires_review(self):
-        from shiguang.llm import guard_decisions, requires_review
+        from niannian.llm import guard_decisions, requires_review
         raw_path = ROOT / "data" / "raw-wechat.json"
         if not raw_path.exists():
             self.skipTest("Raw capture unavailable")
@@ -498,7 +498,7 @@ class EngineTests(unittest.TestCase):
         for original in self.fixture["messages"]:
             self.db.ingest({**original, "account": self.fixture["account"],
                             "sender_key": original["metadata"].get("sender_username") or original["sender_name"]})
-        with patch("shiguang.engine.ROUND_LIMIT", 12), patch("shiguang.engine.PER_SESSION_LIMIT", 8):
+        with patch("niannian.engine.ROUND_LIMIT", 12), patch("niannian.engine.PER_SESSION_LIMIT", 8):
             rows = self.engine.pending_messages(force=True)
         selected = Counter(row["session_id"] for row in rows)
         actual = set(row["session_id"] for row in self.fixture["messages"])

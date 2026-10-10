@@ -3,7 +3,7 @@
 from pathlib import Path
 import tempfile
 
-from shiguang.storage import Database
+from niannian.storage import Database
 
 
 def _db(tmp_path: Path | str) -> Database:

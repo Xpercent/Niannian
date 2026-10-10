@@ -6,7 +6,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from shiguang.llm import (Instruction, LLMExtractor, NEW_MESSAGE_CHARS, HISTORY_CHARS, TASK_CHARS,
+from niannian.llm import (Instruction, LLMExtractor, NEW_MESSAGE_CHARS, HISTORY_CHARS, TASK_CHARS,
                        clip_text, requires_review)
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -45,7 +45,7 @@ class ModelTests(unittest.TestCase):
 
     def test_multiple_instructions_and_thinking_always_disabled(self):
         payload = {"instructions": [{"action": "CREATE", "title": "确认交付对象A"}, {"action": "CREATE", "title": "提交独立对象B"}]}
-        with patch("shiguang.llm.urlopen", return_value=self.response(payload)) as mocked:
+        with patch("niannian.llm.urlopen", return_value=self.response(payload)) as mocked:
             result = self.model.extract(self.message, [], self.tasks, "", "session")
         self.assertEqual(len(result), 2)
         request = json.loads(mocked.call_args.args[0].data)
@@ -69,7 +69,7 @@ class ModelTests(unittest.TestCase):
                              history_chars=200, history_rows=2, task_chars=120, profile_chars=60)
         largest = max(self.messages, key=lambda row: len(row["content"]))
         tasks = [{**self.tasks[0], "id": index + 1} for index in range(100)]
-        with patch("shiguang.llm.urlopen", return_value=self.response({"instructions": [{"action": "IGNORE"}]})) as mocked:
+        with patch("niannian.llm.urlopen", return_value=self.response({"instructions": [{"action": "IGNORE"}]})) as mocked:
             tuned.extract(largest, self.messages, tasks, "画像" * 500, "session")
         request = json.loads(mocked.call_args.args[0].data)
         data = json.loads(request["messages"][1]["content"])
@@ -80,13 +80,13 @@ class ModelTests(unittest.TestCase):
         self.assertLessEqual(len(data["history"]), 2)
         self.assertLessEqual(sum(len(json.dumps(task, ensure_ascii=False)) for task in data["pending_tasks"]), 120)
         self.assertLessEqual(len(data["user_profile"]), 60)
-        with patch("shiguang.llm.urlopen", return_value=self.response({"items": []})) as mocked:
+        with patch("niannian.llm.urlopen", return_value=self.response({"items": []})) as mocked:
             tuned.extract_batch([self.message, self.second], [], tasks)
         self.assertEqual(json.loads(mocked.call_args.args[0].data)["max_tokens"], 3000)
 
     def test_history_rows_zero_sends_no_context(self):
         bare = LLMExtractor("https://example.invalid/v1", "unused", "model", history_rows=0)
-        with patch("shiguang.llm.urlopen", return_value=self.response({"instructions": [{"action": "IGNORE"}]})) as mocked:
+        with patch("niannian.llm.urlopen", return_value=self.response({"instructions": [{"action": "IGNORE"}]})) as mocked:
             bare.extract(self.message, self.messages, [], "", "session")
         data = json.loads(json.loads(mocked.call_args.args[0].data)["messages"][1]["content"])
         self.assertEqual(data["history"], [])
@@ -94,18 +94,18 @@ class ModelTests(unittest.TestCase):
     def test_malformed_item_does_not_discard_valid_batch_siblings(self):
         payload = {"items": [{"index": 0, "instructions": [{"action": "CREATE", "title": "确认交付对象A"}]},
                              {"index": 1, "instructions": [{"action": "RESOLVE", "related_task_id": 999}]}]}
-        with patch("shiguang.llm.urlopen", return_value=self.response(payload)):
+        with patch("niannian.llm.urlopen", return_value=self.response(payload)):
             result = self.model.extract_batch([self.message, self.second], [], self.tasks)
         self.assertEqual(list(result), [0])
 
     def test_batch_lifecycle_references_require_earlier_creation(self):
         payload = {"items": [{"index": 0, "instructions": [{"action": "CREATE", "title": "确认交付对象A"}]},
                              {"index": 1, "instructions": [{"action": "UPDATE", "related_task_ref": "0:0", "priority": "high"}]}]}
-        with patch("shiguang.llm.urlopen", return_value=self.response(payload)):
+        with patch("niannian.llm.urlopen", return_value=self.response(payload)):
             result = self.model.extract_batch([self.message, self.second], [], self.tasks)
         self.assertEqual(result[1][0].related_task_ref, "0:0")
         payload["items"][1]["instructions"][0]["related_task_ref"] = "1:0"
-        with patch("shiguang.llm.urlopen", return_value=self.response(payload)):
+        with patch("niannian.llm.urlopen", return_value=self.response(payload)):
             result = self.model.extract_batch([self.message, self.second], [], self.tasks)
         self.assertNotIn(1, result)
 
@@ -113,7 +113,7 @@ class ModelTests(unittest.TestCase):
         payload = {"items": [{"index": 0, "instructions": [{"action": "IGNORE"}]},
                              {"index": 0, "instructions": [{"action": "CREATE", "title": "确认交付对象A"}]},
                              {"index": 22, "instructions": [{"action": "IGNORE"}]}]}
-        with patch("shiguang.llm.urlopen", return_value=self.response(payload)):
+        with patch("niannian.llm.urlopen", return_value=self.response(payload)):
             self.assertEqual(self.model.extract_batch([self.message, self.second], [], self.tasks), {})
 
     def test_missing_endpoint_and_full_endpoint(self):
@@ -122,14 +122,14 @@ class ModelTests(unittest.TestCase):
             self.assertEqual(model.endpoint, "https://example.invalid/v1/chat/completions")
 
     def test_transport_failure_preserves_fallback_signal(self):
-        with patch("shiguang.llm.urlopen", side_effect=TimeoutError):
+        with patch("niannian.llm.urlopen", side_effect=TimeoutError):
             self.assertIsNone(self.model.extract(self.message, [], self.tasks))
         self.assertEqual((self.model.stats["requests"], self.model.stats["failures"], self.model.last_error), (1, 1, "TimeoutError"))
 
     def test_context_budget_uses_real_long_messages(self):
         largest = max(self.messages, key=lambda row: len(row["content"]))
         tasks = [{**self.tasks[0], "id": index + 1} for index in range(100)]
-        with patch("shiguang.llm.urlopen", return_value=self.response({"instructions": [{"action": "IGNORE"}]})) as mocked:
+        with patch("niannian.llm.urlopen", return_value=self.response({"instructions": [{"action": "IGNORE"}]})) as mocked:
             self.model.extract(largest, self.messages, tasks)
         body = json.loads(mocked.call_args.args[0].data)
         data = json.loads(body["messages"][1]["content"])
@@ -142,26 +142,26 @@ class ModelTests(unittest.TestCase):
         candidate = next((row for row in self.messages if requires_review(row, "")), None)
         if candidate is None:
             self.skipTest("No captured role-conditional notice")
-        with patch("shiguang.llm.urlopen", return_value=self.response({"instructions": [{"action": "CREATE", "title": "确认交付对象A"}]})):
+        with patch("niannian.llm.urlopen", return_value=self.response({"instructions": [{"action": "CREATE", "title": "确认交付对象A"}]})):
             result = self.model.extract(candidate, [], self.tasks)
         self.assertEqual([instruction.action for instruction in result], ["IGNORE"])
         self.assertIn("需复核", result[0].context_summary)
 
     def test_minimal_ignore_tolerates_irrelevant_provider_nulls(self):
-        with patch("shiguang.llm.urlopen", return_value=self.response({"instructions": [{"action": "IGNORE", "title": None,
+        with patch("niannian.llm.urlopen", return_value=self.response({"instructions": [{"action": "IGNORE", "title": None,
                                                                                          "context_summary": None, "related_task_id": 0}]})):
             result = self.model.extract(self.message, [], self.tasks)
         self.assertEqual([instruction.action for instruction in result], ["IGNORE"])
 
     def test_empty_instruction_list_means_ignore_not_rule_fallback(self):
-        with patch("shiguang.llm.urlopen", return_value=self.response({"items": [{"index": 0, "instructions": []},
+        with patch("niannian.llm.urlopen", return_value=self.response({"items": [{"index": 0, "instructions": []},
                                                                                  {"index": 1, "instructions": []}]})):
             result = self.model.extract_batch([self.message, self.second], [], self.tasks)
         self.assertEqual(list(result), [0, 1])
         self.assertEqual([result[index][0].action for index in result], ["IGNORE", "IGNORE"])
 
     def test_information_only_titles_cannot_become_tasks(self):
-        from shiguang.llm import guard_decisions
+        from niannian.llm import guard_decisions
         for title in ("i志愿注册流程指南", "返校健康安全提醒", "返校确认操作流程"):
             result = guard_decisions(self.message, [Instruction(action="CREATE", title=title)])
             self.assertEqual([command.action for command in result], ["IGNORE"])

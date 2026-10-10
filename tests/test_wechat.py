@@ -8,9 +8,9 @@ from pathlib import Path
 
 import pytest
 
-from shiguang.media import TITLE_REQUEST, attachment_only, parse_attachment, safe_media_path, summarize
-from shiguang.storage import Database
-from shiguang.wechat import WechatWorker, _sender, acquire_instance_lock, infer_self_ids, normalize, session_id
+from niannian.media import TITLE_REQUEST, attachment_only, parse_attachment, safe_media_path, summarize
+from niannian.storage import Database
+from niannian.wechat import WechatWorker, _sender, acquire_instance_lock, infer_self_ids, normalize, session_id
 
 
 @pytest.fixture(scope="module")
@@ -150,7 +150,7 @@ def test_verified_identity_evidence_survives_restart(worker, captured):
 
 
 def test_public_operations_use_one_source_thread(tmp_path, captured, monkeypatch):
-    import shiguang.wechat as integration
+    import niannian.wechat as integration
     db = Database(tmp_path / "queue.sqlite3")
     db.init()
     thread_ids = []

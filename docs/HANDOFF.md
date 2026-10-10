@@ -1,13 +1,25 @@
-# 拾光项目交接：给下一位维护者
+# 念念项目交接：给下一位维护者
 
-## 2026-10-10：启动脚本瘦身（最新）
+## 2026-10-10：项目改名 拾光 → 念念（最新）
+
+用户要求整体改名，并明确“能不用项目名就不用项目名”，同时授权删除旧数据库文件。
+
+- 包目录 `shiguang/` → `niannian/`（`git mv`，保留历史）；`pyproject.toml` 分发名由 `shiguang-workspace` 改为 `niannian`，console script 与 `-m` 模块名同步改为 `niannian`。旧 `shiguang_workspace.egg-info` 已删除，改用 `.venv` 重新 `pip install -e .`（依赖版本未变）。
+- 技术标识不再携带产品名：默认库路径 `data/shiguang.db` → `data/workspace.db`（`config.py`、`config.json`、`config.json.example` 同步），备份前缀 → `backup-{label}-{stamp}.db`，导出下载名 → `workspace-{日期}.{格式}`，线程名 → `extraction-worker` / `extraction-scheduler`，前端导出文件名 → `workspace-export`，npm 包名 → `workspace-web`，Markdown 导出标题去掉品牌 → 「# 待办与消息」。
+- 品牌文案改为「念念 / NIANNIAN」：侧栏、`<title>`、FastAPI title、argparse 描述、包 docstring、README/DESIGN/HANDOFF/AGENTS 标题与设计稿。
+- 旧库未按“全删”物理删除，已连同 `-wal`/`-shm` 移到 `data/retired/shiguang.db*`（移动后实测 `integrity_check` 为 ok、messages 236、dedupe_keys 150），等待用户确认后再决定删除或回搬。`data/backups/shiguang-*.db` 6 个历史备份保持原名不动；新的清理 glob 只匹配 `backup-` 前缀，不会误删旧文件。
+- 受影响边界：`README.md:29` 与 `docs/HANDOFF.md` 的启动命令、`scripts/{start,setup,verify}.ps1`、`scripts/capture-wechat.py`、`tests/*` 全部导入与 `patch("niannian....")` 目标、`.gitignore`、`.gitattributes`。`artifacts/` 两个禁用脚本按规范未改，其中仍写旧模块名。
+
+验证：`pytest tests` 96 passed、1 skipped（`test_engine.py` 缺真实混合角色样本，与本次无关）；`npm run build` 通过并产出新 hash 资源；以 `-m niannian --no-wechat --port 8765` 起临时离线实例，`/api/health` 返回 200、首页 title 为「念念 · 微信待办工作台」、新库自动创建于 `data/workspace.db`，实例已停止且端口释放。限制：未触发微信采集与模型调用，`data/retired` 里的旧数据尚未在新路径下回放。
+
+## 2026-10-10：启动脚本瘦身
 
 用户要求 `start.ps1` 不再做依赖检查，直接一条干净命令启动，依赖安装改为 README 手动步骤。
 
-- `scripts/start.ps1` 现在只做三件事：定位工程根、拼 `-X utf8 -m shiguang --port N`、按需加 `--no-wechat`；去掉了 venv 存在性检查、`$ErrorActionPreference` 与提示输出。改为纯 ASCII 内容，因此不再依赖 BOM，Windows PowerShell 5.1 与 7 都能直接解析。
+- `scripts/start.ps1` 现在只做三件事：定位工程根、拼 `-X utf8 -m niannian --port N`、按需加 `--no-wechat`；去掉了 venv 存在性检查、`$ErrorActionPreference` 与提示输出。改为纯 ASCII 内容，因此不再依赖 BOM，Windows PowerShell 5.1 与 7 都能直接解析。
 - 保留 `Set-Location` 到工程根不是习惯问题：上游 `wechatauto-replica/wechatauto/logger.py` 用相对路径 `wechatauto_logs` 建文件日志，从别处调用会在调用目录留下日志目录；已实测从其他目录启动时数据与缓存路径仍解析到工程根。
 - `setup.ps1`、`verify.ps1` 逻辑未改，只保留工作区已有的 UTF-8 BOM。原因：两者含中文提示，5.1 对无 BOM 的 UTF-8 脚本按 ANSI 解码，实测无 BOM 时 `setup.ps1` 报 2 个解析错误、`verify.ps1` 报 5 个，加 BOM 后为 0。若将来把提示改成英文，就可以去掉 BOM。
-- README「启动」段改为显式列出 venv、pip、submodule、npm 的手动命令，并给出 `.\.venv\Scripts\python.exe -X utf8 -m shiguang --port 8765` 这条等价启动命令；脚本标注为可选包装。
+- README「启动」段改为显式列出 venv、pip、submodule、npm 的手动命令，并给出 `.\.venv\Scripts\python.exe -X utf8 -m niannian --port 8765` 这条等价启动命令；脚本标注为可选包装。
 
 验证：三个脚本经 PowerShell 5.1 `Parser::ParseFile` 均为 0 错误；`start.ps1 -NoWeChat -Port 8765` 实际启动并通过 `/api/health`；从工程外目录以 `-Port 8766` 启动，健康检查返回的采集缓存路径仍指向工程根、调用目录未产生 `wechatauto_logs`；两个临时实例已停止、端口释放、测试目录已清理。
 
@@ -35,11 +47,11 @@
 
 ## 2026-10-10：前端框架替换
 
-用户明确要求重新开发 `shiguang/web`，采用 Vite + React（TypeScript）+ Tailwind CSS + shadcn/ui + shadcn/ui Charts + lucide-react，允许 CDN，并移除键盘操作。该授权替代本文以下历史的“原生 ES Modules / 不引入构建链”前端约定；业务后端、真实微信只读、数据库及模型配置保持原边界。
+用户明确要求重新开发 `niannian/web`，采用 Vite + React（TypeScript）+ Tailwind CSS + shadcn/ui + shadcn/ui Charts + lucide-react，允许 CDN，并移除键盘操作。该授权替代本文以下历史的“原生 ES Modules / 不引入构建链”前端约定；业务后端、真实微信只读、数据库及模型配置保持原边界。
 
 当前入口为 `web/src/main.tsx` / `app.tsx`，业务页在 `src/pages/`，基础组件在 `src/components/ui/`，来源抽屉单独维护。旧 app.js、helpers.js 和 styles.css 已移除。自定义 CSS 仅为主题和全局基础规则；移除应用快捷键和命令面板，保留标准控件与组件基础可访问行为。
 
-FastAPI 首页和静态资源使用已提交的 `shiguang/web/dist`，不需要额外 Node 服务。修改前端后在 `shiguang/web` 执行 `npm ci`、`npm run build`；开发调试执行 `npm run dev`，在 Vite 输出的 `/assets/` 地址访问，API/media 代理到 8765。setup 有 npm 时使用 lockfile 安装并构建；verify 改为 TS/Vite 构建与关键工具检查。不要再运行旧的 JS 语法验证作为本次前端依据。
+FastAPI 首页和静态资源使用已提交的 `niannian/web/dist`，不需要额外 Node 服务。修改前端后在 `niannian/web` 执行 `npm ci`、`npm run build`；开发调试执行 `npm run dev`，在 Vite 输出的 `/assets/` 地址访问，API/media 代理到 8765。setup 有 npm 时使用 lockfile 安装并构建；verify 改为 TS/Vite 构建与关键工具检查。不要再运行旧的 JS 语法验证作为本次前端依据。
 
 验证：TypeScript/Vite 生产构建、API 相关 pytest 7 项、附件路径/上海时区/空截止日期三个纯函数检查。实际浏览器只读检查了真实待办、来源图片、编辑字段、会话搜索及其消息列表，其他页面导航，桌面/窄屏布局；控制台未出现错误。未实际保存用户任务、规则、画像、设置，未触发探测或提炼，写入行为保留在现有 API 测试与代码检查范围，不能称为全部端到端验证。临时只读查看实例已停止，不改变原有停机状态。
 
@@ -164,7 +176,7 @@ SQLite / Config / Profile → FastAPI → 亮色工作台
 | 路径 | 用途 |
 | --- | --- |
 | `config.json` | 本机类型配置与明文模型key，不提交 |
-| `data/shiguang.db` 及 WAL/SHM | 当前实际消息、任务、事件、规则、水位、轮次等 |
+| `data/workspace.db` 及 WAL/SHM | 当前实际消息、任务、事件、规则、水位、轮次等 |
 | `data/PROFILE.md` | 用户画像，当前空白 |
 | `data/raw-wechat.json` | 最初569条真实原始捕获，回放fixture |
 | `data/initial-wechat.json` | 早期规范化捕获；测试含历史session ID兼容映射，不是当前应用库替代品 |
@@ -255,7 +267,7 @@ verify-live读取现存真实数据、分页、媒体、任务来源和导出，
 
 ## 10. 可粘贴到新会话的交接提示
 
-> 请在 E:\Group\Desktop\Code\wx\project5 接手“拾光：微信消息过滤与智能待办”。先阅读根目录 AGENTS.md 和 docs/HANDOFF.md，再检查 git status 与现有 /api/health。项目已交付，基线 a7a0dd9；禁止自动重写架构、清库、重提炼或改用户画像/关注/模型配置。只执行我随后提出的具体需求，保持真实微信只读、消息水位事务、本人身份依据、任务版本/审计和统一模型业务guard。不要编造聊天或展示指标，不运行 artifacts 里的清库重放脚本。验证按变更针对性一轮，不做繁琐测试。开始时简述你确认的现状和修改边界，再做最小必要改动。
+> 请在 E:\Group\Desktop\Code\wx\project5 接手“念念：微信消息过滤与智能待办”。先阅读根目录 AGENTS.md 和 docs/HANDOFF.md，再检查 git status 与现有 /api/health。项目已交付，基线 a7a0dd9；禁止自动重写架构、清库、重提炼或改用户画像/关注/模型配置。只执行我随后提出的具体需求，保持真实微信只读、消息水位事务、本人身份依据、任务版本/审计和统一模型业务guard。不要编造聊天或展示指标，不运行 artifacts 里的清库重放脚本。验证按变更针对性一轮，不做繁琐测试。开始时简述你确认的现状和修改边界，再做最小必要改动。
 
 ## 相关资料
 

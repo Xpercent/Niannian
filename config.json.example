@@ -1,5 +1,5 @@
 {
-  "db_path": "data/shiguang.db",
+  "db_path": "data/workspace.db",
   "profile_path": "data/PROFILE.md",
   "ai_enabled": true,
   "ai_base_url": "https://api.siliconflow.cn/v1",

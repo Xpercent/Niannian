@@ -171,9 +171,9 @@ export function App() {
             <Leaf className="size-5" />
           </span>
           <span>
-            <strong className="block text-xl tracking-widest">拾光</strong>
+            <strong className="block text-xl tracking-widest">念念</strong>
             <span className="block text-[9px] tracking-[.2em] text-stone-400">
-              SHIGUANG
+              NIANNIAN
             </span>
           </span>
         </a>

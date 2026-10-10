@@ -7,10 +7,10 @@ from pathlib import Path
 
 from fastapi.testclient import TestClient
 
-from shiguang.api import create_app
-from shiguang.engine import Engine
-from shiguang.jobs import ExtractionJobs
-from shiguang.storage import Database
+from niannian.api import create_app
+from niannian.engine import Engine
+from niannian.jobs import ExtractionJobs
+from niannian.storage import Database
 from support import ingest_capture
 
 

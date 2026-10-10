@@ -9,8 +9,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from shiguang.config import ConfigStore, atomic_text
-from shiguang.wechat import acquire_instance_lock, infer_self_ids, normalize, open_wechat, session_id
+from niannian.config import ConfigStore, atomic_text
+from niannian.wechat import acquire_instance_lock, infer_self_ids, normalize, open_wechat, session_id
 
 
 def main():

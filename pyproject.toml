@@ -3,7 +3,7 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "shiguang-workspace"
+name = "niannian"
 version = "1.0.0"
 description = "A traceable WeChat inbox and intelligent task workspace"
 readme = "README.md"
@@ -14,10 +14,10 @@ dependencies = ["fastapi>=0.115,<0.143", "uvicorn>=0.30,<0.55", "pydantic>=2.7,<
 dev = ["httpx2>=2.13,<3", "pytest>=8,<10"]
 
 [project.scripts]
-shiguang = "shiguang.__main__:main"
+niannian = "niannian.__main__:main"
 
 [tool.setuptools.packages.find]
-include = ["shiguang*"]
+include = ["niannian*"]
 
 [tool.setuptools.package-data]
-shiguang = ["web/dist/*", "web/dist/assets/*"]
+niannian = ["web/dist/*", "web/dist/assets/*"]
