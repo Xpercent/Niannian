@@ -75,15 +75,21 @@ export function SessionsPage({ sessions, onRefresh, notify }: Props) {
   const current = useRef({ id: selectedId, tab });
   current.current = { id: selectedId, tab };
 
-  const selected = sessions.find((session) => session.id === selectedId);
+  const monitoredSessions = useMemo(
+    () => sessions.filter((session) => session.monitored),
+    [sessions],
+  );
+  const selected = monitoredSessions.find(
+    (session) => session.id === selectedId,
+  );
   const visibleSessions = useMemo(
     () =>
-      sessions.filter((session) =>
+      monitoredSessions.filter((session) =>
         (session.name || session.id)
           .toLocaleLowerCase()
           .includes(query.toLocaleLowerCase()),
       ),
-    [sessions, query],
+    [monitoredSessions, query],
   );
 
   async function loadConversation(id: string, older = false) {
@@ -288,7 +294,7 @@ export function SessionsPage({ sessions, onRefresh, notify }: Props) {
         <Card>
           <CardHeader>
             <CardTitle>消息来源</CardTitle>
-            <Badge>{sessions.length}</Badge>
+            <Badge>{monitoredSessions.length}</Badge>
           </CardHeader>
           <CardContent className="space-y-3 p-3">
             <div className="relative">
@@ -336,7 +342,9 @@ export function SessionsPage({ sessions, onRefresh, notify }: Props) {
               ))}
               {!visibleSessions.length && (
                 <p className="py-8 text-center text-sm text-stone-400">
-                  没有匹配的会话
+                  {monitoredSessions.length
+                    ? "没有匹配的会话"
+                    : "暂无已关注会话，点击右上角“添加关注”。"}
                 </p>
               )}
             </div>

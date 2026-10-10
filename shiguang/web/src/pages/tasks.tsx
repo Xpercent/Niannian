@@ -20,7 +20,6 @@ import {
   Input,
 } from "../components/ui";
 import { Empty, ErrorNotice, Loading } from "../components/common";
-import { WorkspaceChart } from "../components/workspace-chart";
 import { api, cn, dateText, priorityNames } from "../lib/utils";
 import type { Session, Stats, Task, TaskStatus } from "../lib/types";
 
@@ -321,7 +320,6 @@ export function TasksPage({
           </div>
         </Card>
         <aside className="grid gap-5 sm:grid-cols-2 xl:grid-cols-1">
-          <WorkspaceChart stats={stats} />
           <Card className="border-emerald-100 bg-emerald-50/60">
             <CardContent className="space-y-4">
               <Sparkles className="size-5 text-emerald-700" />
