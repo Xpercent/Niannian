@@ -4,6 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from threading import Event
+from unittest.mock import patch
 
 from niannian.jobs import ExtractionJobs
 from niannian.storage import Database
@@ -51,6 +52,18 @@ class JobTests(unittest.TestCase):
         self.jobs.worker.join(timeout=3)
         self.assertEqual(self.engine.calls, 1)
         self.assertEqual(self.jobs.latest()["status"], "cancelled")
+
+    def test_scheduler_waits_full_interval_after_completion(self):
+        self.engine.release.set()
+        with patch("niannian.jobs.time.monotonic", return_value=1000):
+            self.jobs.start(force=False)
+            self.jobs.worker.join(timeout=3)
+        self.assertEqual(self.jobs.last_finished, 1000)
+        with patch.object(self.jobs.stop_event, "wait", side_effect=[False, False, True]), \
+                patch("niannian.jobs.time.monotonic", side_effect=[1299, 1300]), \
+                patch.object(self.jobs, "start") as start:
+            self.jobs._schedule()
+        start.assert_called_once_with(force=False)
 
     def test_restart_marks_interrupted_run_retriable(self):
         self.jobs._persist({"id": "interrupted", "status": "running", "total": 10, "done": 3})

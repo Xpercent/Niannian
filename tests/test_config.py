@@ -35,7 +35,7 @@ class ConfigTests(unittest.TestCase):
         defaults = store.public()["defaults"]
         for key, value in (("batch_limit", 4), ("batch_char_budget", 4200), ("new_message_chars", 2600),
                            ("history_chars", 1200), ("history_rows", 6), ("task_chars", 1600),
-                           ("profile_chars", 1200), ("round_limit", 240), ("per_session_limit", 80),
+                           ("profile_chars", 1200),
                            ("ai_max_tokens_single", 700), ("ai_max_tokens_batch", 1200),
                            ("ignored_keep_per_session", 100)):
             self.assertEqual(defaults[key], value, key)
@@ -50,7 +50,7 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(fresh.read()["history_rows"], 0)
         for fields in ({"batch_limit": 0}, {"batch_limit": 21}, {"batch_char_budget": 399},
                        {"ai_temperature": 2.5}, {"ai_temperature": "0.4"}, {"new_message_chars": 199},
-                       {"round_limit": 2001}, {"per_session_limit": 0}, {"history_rows": 21},
+                       {"history_rows": 21},
                        {"ignored_keep_per_session": 9}, {"ai_max_tokens_single": 63}):
             with self.assertRaises(ValueError):
                 store.update(fields)

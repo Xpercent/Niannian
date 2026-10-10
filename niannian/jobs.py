@@ -22,6 +22,7 @@ class ExtractionJobs:
         self.current: dict | None = None
         self.worker: Thread | None = None
         self.scheduler: Thread | None = None
+        self.last_finished = time.monotonic()
 
     def recover(self) -> None:
         for row in self.db.rows("SELECT id,snapshot FROM runs WHERE status='running'"):
@@ -68,11 +69,13 @@ class ExtractionJobs:
                 self.current.update(status="cancelled" if self.cancel_event.is_set() or self.stop_event.is_set() else "completed",
                                     result=result, finished_at=utc_now(), session=None)
                 self._persist(self.current)
+                self.last_finished = time.monotonic()
         except Exception as exc:
             log.exception("提炼轮次失败，未处理消息保留")
             with self.lock:
                 self.current.update(status="failed", error=f"{type(exc).__name__}: {str(exc)[:300]}", finished_at=utc_now())
                 self._persist(self.current)
+                self.last_finished = time.monotonic()
 
     def get(self, run_id: str) -> dict | None:
         row = self.db.one("SELECT snapshot FROM runs WHERE id=?", (run_id,))
@@ -96,15 +99,18 @@ class ExtractionJobs:
         self.scheduler.start()
 
     def _schedule(self):
-        last_run = time.monotonic()
         while not self.stop_event.wait(1):
             interval = self.config.read()["batch_interval_seconds"]
-            if time.monotonic() - last_run >= interval:
-                last_run = time.monotonic()
+            with self.lock:
+                running = self.current and self.current["status"] == "running"
+                due = not running and time.monotonic() - self.last_finished >= interval
+            if due:
                 try:
                     self.start(force=False)
                 except Exception:
                     log.exception("调度失败")
+                    with self.lock:
+                        self.last_finished = time.monotonic()
 
     def stop(self) -> None:
         self.stop_event.set()

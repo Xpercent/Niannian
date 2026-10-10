@@ -18,8 +18,6 @@ from .storage import canonical_time, utc_now
 SHANGHAI = timezone(timedelta(hours=8))
 BATCH_LIMIT = 4
 BATCH_CHAR_BUDGET = 4200
-ROUND_LIMIT = 240
-PER_SESSION_LIMIT = 80
 IGNORED_KEEP_PER_SESSION = 100
 
 
@@ -50,55 +48,29 @@ class Engine:
     def _settings(self):
         return dict(self.config.read() if hasattr(self.config, "read") else self.config)
 
+    def _session_ready(self, session_id, account, force, values):
+        session = self.db.one("SELECT monitored,account FROM sessions WHERE id=?", (session_id,))
+        if not session or not session["monitored"] or session["account"] != account:
+            return False
+        if force:
+            return True
+        latest = self.db.one("SELECT MAX(created_at) AS latest FROM messages WHERE session_id=? AND account=?",
+                             (session_id, account))
+        return not latest["latest"] or (
+            datetime.now(timezone.utc) - parse_time(latest["latest"])
+        ).total_seconds() >= values.get("settle_window_seconds", 60)
+
     def pending_messages(self, force=False, session_id=None, values=None):
-        """A bounded round gives each active session a turn before consuming a backlog."""
-        values = values or self._settings()
-        per_session = values.get("per_session_limit", PER_SESSION_LIMIT)
-        round_limit = values.get("round_limit", ROUND_LIMIT)
+        """Freeze this round's backlog; new arrivals are considered next round."""
+        values = self._settings() if values is None else values
         where = " AND s.id=?" if session_id else ""
-        params = (session_id,) if session_id else ()
-        sessions = self.db.rows(
-            "SELECT s.id, MIN(m.created_at) AS oldest FROM sessions s "
-            "JOIN messages m ON m.session_id=s.id WHERE s.monitored=1 AND m.processed=0" + where +
-            " GROUP BY s.id ORDER BY oldest,s.id", params)
-        queues = []
-        now = datetime.now(timezone.utc)
-        window = values.get("settle_window_seconds", 45)
-        for session in sessions:
-            rows = self.db.rows("SELECT * FROM messages WHERE session_id=? AND processed=0 "
-                                "ORDER BY created_at,id LIMIT ?", (session["id"], per_session + 1))
-            released = []
-            if force:
-                released = rows[:per_session]
-            else:
-                cutoff = 0
-                for index, row in enumerate(rows[:per_session]):
-                    created = parse_time(row["created_at"])
-                    if (now - created).total_seconds() < window:
-                        break
-                    # Only cut before a recent tail if there was a real quiet gap.
-                    # Old oversized bursts are bounded at per_session so they
-                    # cannot permanently block their own session.
-                    following = rows[index + 1] if index + 1 < len(rows) else None
-                    if following is None or (parse_time(following["created_at"]) - created).total_seconds() >= window:
-                        cutoff = index + 1
-                        break
-                    if index + 1 == per_session and (now - parse_time(following["created_at"])).total_seconds() >= window:
-                        cutoff = per_session
-                released = rows[:cutoff]
-            if released:
-                queues.append(deque(released))
-        selected = []
-        while queues and len(selected) < round_limit:
-            remaining = []
-            for queue in queues:
-                if len(selected) >= round_limit:
-                    break
-                selected.append(queue.popleft())
-                if queue:
-                    remaining.append(queue)
-            queues = remaining
-        return sorted(selected, key=lambda row: (parse_time(row["created_at"]), row["id"]))
+        rows = self.db.rows(
+            "SELECT m.* FROM messages m JOIN sessions s ON s.id=m.session_id "
+            "WHERE s.monitored=1 AND m.processed=0 AND m.account=s.account" + where +
+            " ORDER BY m.created_at,m.id", (session_id,) if session_id else ())
+        scopes = {(row["session_id"], row["account"]) for row in rows}
+        ready = {scope for scope in scopes if self._session_ready(*scope, force, values)}
+        return [row for row in rows if (row["session_id"], row["account"]) in ready]
 
     def aggregate(self, messages, merge_window_seconds=None):
         window = (self._settings().get("merge_window_seconds", 60) if merge_window_seconds is None
@@ -376,6 +348,12 @@ class Engine:
                     counts["cancelled"] = len(items) - done
                     break
                 scope, queue = chunks.popleft()
+                if not self._session_ready(scope[1], scope[0], force, values):
+                    counts["skipped"] += len(queue)
+                    done += len(queue)
+                    if progress:
+                        progress(done, len(items), None)
+                    continue
                 chunk, characters = [], 0
                 while queue and len(chunk) < batch_limit:
                     size = min(len(queue[0]["content"]), new_chars)
@@ -384,7 +362,7 @@ class Engine:
                     chunk.append(queue.popleft())
                     characters += size
                 if queue:
-                    chunks.append((scope, queue))
+                    chunks.appendleft((scope, queue))
                 session = self.db.one("SELECT * FROM sessions WHERE id=?", (scope[1],))
                 pending = self.db.rows("SELECT * FROM tasks WHERE session_id=? AND status='pending' ORDER BY id", (scope[1],))
                 expected_versions = {task["id"]: task["version"] for task in pending}

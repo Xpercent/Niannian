@@ -94,16 +94,26 @@ class EngineTests(unittest.TestCase):
                 patch("niannian.engine.guard_decisions", side_effect=lambda message, commands, profile: commands):
             return self.engine.process(force=True, **kwargs)
 
-    def test_round_and_session_limits_come_from_settings(self):
+    def test_legacy_limits_do_not_defer_backlog(self):
         for index in range(6):
             self.ingest(index, 900 - index * 30)
-        capped = self.engine.pending_messages(force=True, values={"per_session_limit": 3, "round_limit": 100})
-        self.assertTrue(capped)
-        self.assertLessEqual(max(Counter(row["session_id"] for row in capped).values()), 3)
-        tight = self.engine.pending_messages(force=True, values={"per_session_limit": 80, "round_limit": 4})
-        self.assertEqual(len(tight), 4)
-        default = self.engine.pending_messages(force=True, values={})
-        self.assertGreater(len(default), len(capped))
+        rows = self.engine.pending_messages(force=True, values={"per_session_limit": 3, "round_limit": 4})
+        self.assertEqual(len(rows), 6)
+
+    def test_new_arrival_defers_remaining_session_without_processing_it(self):
+        first = self.ingest(0, 700)
+        second = self.ingest(1, 500)
+        self.values["batch_limit"] = 1
+        fake = FakeModel({0: [Instruction(action="IGNORE")]})
+        def progress(done, total, session):
+            if done == 1:
+                self.ingest(2, 0)
+        with patch("niannian.engine.LLMExtractor", return_value=fake), patch.object(self.engine, "_gate", return_value=None):
+            result = self.engine.process(progress=progress)
+        self.assertEqual(fake.stats["requests"], 1)
+        self.assertEqual(result["processed"], 1)
+        self.assertEqual(self.db.one("SELECT processed FROM messages WHERE id=?", (first,))["processed"], 1)
+        self.assertEqual(self.db.one("SELECT processed FROM messages WHERE id=?", (second,))["processed"], 0)
 
     def test_model_request_parameters_come_from_settings(self):
         self.ingest(0)
@@ -494,17 +504,21 @@ class EngineTests(unittest.TestCase):
         self.assertEqual(result["resolved"], 0)
         self.assertEqual(self.db.one("SELECT status,version FROM tasks WHERE id=?", (task_id,)), {"status": "pending", "version": 1})
 
-    def test_bounded_selection_gives_each_real_session_a_turn(self):
+    def test_all_real_sessions_are_drained_in_sequence(self):
         for original in self.fixture["messages"]:
             self.db.ingest({**original, "account": self.fixture["account"],
                             "sender_key": original["metadata"].get("sender_username") or original["sender_name"]})
-        with patch("niannian.engine.ROUND_LIMIT", 12), patch("niannian.engine.PER_SESSION_LIMIT", 8):
-            rows = self.engine.pending_messages(force=True)
-        selected = Counter(row["session_id"] for row in rows)
-        actual = set(row["session_id"] for row in self.fixture["messages"])
-        self.assertEqual(set(selected), actual)
-        self.assertEqual(len(rows), 12)
-        self.assertLessEqual(max(selected.values()) - min(selected.values()), 1)
+        rows = self.engine.pending_messages(force=True)
+        expected = self.db.one("SELECT COUNT(*) AS n FROM messages WHERE processed=0")["n"]
+        self.assertEqual(len(rows), expected)
+        fake = FakeModel()
+        sessions = []
+        with patch("niannian.engine.LLMExtractor", return_value=fake), patch.object(self.engine, "_gate", return_value=None):
+            result = self.engine.process(force=True, progress=lambda done, total, session: sessions.append(session) if session else None)
+        self.assertEqual(result["processed"], expected)
+        self.assertEqual(self.db.queued_count(), 0)
+        blocks = [name for index, name in enumerate(sessions) if index == 0 or sessions[index - 1] != name]
+        self.assertEqual(len(blocks), len(set(sessions)))
 
     def test_history_excludes_late_ingested_future_messages(self):
         self.ingest(0, 30)  # Ingest the more recent captured message first.

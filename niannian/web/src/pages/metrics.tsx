@@ -452,10 +452,7 @@ export default function MetricsPage({ revision }: Props) {
                 每批最多 {model.batch_limit} 段 / {model.batch_char_budget} 字 ·
                 输出上限 {model.max_tokens_batch}
               </span>
-              <span>
-                单轮上限 {model.round_limit} 条 · 单会话{" "}
-                {model.per_session_limit} 条
-              </span>
+              <span>符合条件的会话依次处理，整轮完成后计时</span>
               <span className="ml-auto flex items-center gap-1.5">
                 <Database className="size-3.5 text-stone-400" />
                 统计基于最近 {metrics.scanned} 轮记录

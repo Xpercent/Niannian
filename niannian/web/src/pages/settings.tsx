@@ -28,8 +28,6 @@ type NumericKey =
   | "batch_interval_seconds"
   | "settle_window_seconds"
   | "merge_window_seconds"
-  | "round_limit"
-  | "per_session_limit"
   | "batch_limit"
   | "batch_char_budget"
   | "new_message_chars"
@@ -109,19 +107,19 @@ const groups: Array<{ title: string; note: string; items: Option[] }> = [
   },
   {
     title: "提炼节奏",
-    note: "决定多久跑一轮、一轮吃多少条。",
+    note: "整轮完成后再等待；所有符合条件的会话依次处理。",
     items: [
       {
         key: "batch_interval_seconds",
         label: "自动提炼间隔（秒）",
-        hint: "调度器启动下一轮的最小间隔",
+        hint: "本轮完成后，等待这么久再启动下一轮",
         min: 15,
         max: 86400,
       },
       {
         key: "settle_window_seconds",
         label: "稳定窗口（秒）",
-        hint: "消息静默这么久才提炼，自动轮次等待",
+        hint: "会话静默这么久才发送；等待中有新消息则本轮暂缓",
         min: 0,
         max: 600,
       },
@@ -132,27 +130,11 @@ const groups: Array<{ title: string; note: string; items: Option[] }> = [
         min: 0,
         max: 600,
       },
-      {
-        key: "round_limit",
-        label: "单轮最多段数（条）",
-        hint: "一轮从队列里取多少条消息",
-        min: 1,
-        max: 2000,
-        verified: 240,
-      },
-      {
-        key: "per_session_limit",
-        label: "单会话每轮上限（条）",
-        hint: "防止一个会话长期占住整轮",
-        min: 1,
-        max: 500,
-        verified: 80,
-      },
     ],
   },
   {
     title: "上下文预算",
-    note: "送进模型的内容规模，直接影响耗时与费用。",
+    note: "限制单次请求大小；超出则在本轮拆成多次请求。",
     items: [
       {
         key: "batch_limit",

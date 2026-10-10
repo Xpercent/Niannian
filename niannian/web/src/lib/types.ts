@@ -211,8 +211,6 @@ export interface MetricsPayload {
     merge_window_seconds: number;
     batch_limit: number;
     batch_char_budget: number;
-    round_limit: number;
-    per_session_limit: number;
   };
 }
 export type Notify = (message: string, error?: boolean) => void;
