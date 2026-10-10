@@ -1,5 +1,7 @@
 # 重构前验证与架构决策
 
+> 历史资料：本文是对只读参考工程 project4 的历史审查，不是当前 project5 的需求或缺陷清单；本地失败兜底等旧行为已变更，当前实现见 HANDOFF.md 与 ARCHITECTURE.md。
+
 日期：2026-10-09（Asia/Shanghai）。参考工程 project4 只读，开发目录 project5。
 
 ## 微信先接入
