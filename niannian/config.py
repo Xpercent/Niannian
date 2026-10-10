@@ -31,8 +31,7 @@ class Settings(BaseModel):
     ai_temperature: float = Field(default=0.0, ge=0, le=2)
     ai_max_tokens_single: int = Field(default=700, ge=64, le=8000)
     ai_max_tokens_batch: int = Field(default=1200, ge=64, le=16000)
-    # 单次请求的段数与正文字数；不限制一轮处理的会话或消息总量。
-    batch_limit: int = Field(default=4, ge=1, le=20)
+    # 单次请求只按正文字数分批；不限制段数或一轮消息总量。
     batch_char_budget: int = Field(default=4200, ge=400, le=60000)
     # 送进模型的上下文预算。
     new_message_chars: int = Field(default=2600, ge=200, le=12000)

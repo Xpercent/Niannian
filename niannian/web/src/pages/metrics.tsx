@@ -449,7 +449,7 @@ export default function MetricsPage({ revision }: Props) {
               <span>静默窗口 {model.settle_window_seconds} 秒</span>
               <span>请求超时 {model.timeout_seconds} 秒</span>
               <span>
-                每批最多 {model.batch_limit} 段 / {model.batch_char_budget} 字 ·
+                每批正文预算 {model.batch_char_budget} 字 ·
                 输出上限 {model.max_tokens_batch}
               </span>
               <span>符合条件的会话依次处理，整轮完成后计时</span>

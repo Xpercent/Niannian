@@ -209,7 +209,6 @@ export interface MetricsPayload {
     batch_interval_seconds: number;
     settle_window_seconds: number;
     merge_window_seconds: number;
-    batch_limit: number;
     batch_char_budget: number;
   };
 }

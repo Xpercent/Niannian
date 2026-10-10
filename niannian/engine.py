@@ -17,7 +17,6 @@ from .media import attachment_only
 from .storage import canonical_time, utc_now
 
 SHANGHAI = timezone(timedelta(hours=8))
-BATCH_LIMIT = 4
 BATCH_CHAR_BUDGET = 4200
 IGNORED_KEEP_PER_SESSION = 100
 
@@ -332,7 +331,6 @@ class Engine:
     def process(self, force=False, progress=None, should_stop=None, session_id=None):
         with self.lock:
             values = self._settings()
-            batch_limit = values.get("batch_limit", BATCH_LIMIT)
             batch_budget = values.get("batch_char_budget", BATCH_CHAR_BUDGET)
             new_chars = values.get("new_message_chars", NEW_MESSAGE_CHARS)
             ignored_keep = values.get("ignored_keep_per_session", IGNORED_KEEP_PER_SESSION)
@@ -371,7 +369,7 @@ class Engine:
                         progress(done, len(items), None)
                     continue
                 chunk, characters = [], 0
-                while queue and len(chunk) < batch_limit:
+                while queue:
                     size = min(len(queue[0]["content"]), new_chars)
                     if chunk and characters + size > batch_budget:
                         break

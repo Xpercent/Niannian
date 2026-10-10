@@ -33,7 +33,7 @@ class ConfigTests(unittest.TestCase):
     def test_tunable_budgets_validate_and_report_defaults(self):
         store = ConfigStore(self.root)
         defaults = store.public()["defaults"]
-        for key, value in (("batch_limit", 4), ("batch_char_budget", 4200), ("new_message_chars", 2600),
+        for key, value in (("batch_char_budget", 4200), ("new_message_chars", 2600),
                            ("history_chars", 1200), ("history_rows", 6), ("task_chars", 1600),
                            ("ai_max_tokens_single", 700), ("ai_max_tokens_batch", 1200),
                            ("ignored_keep_per_session", 100)):
@@ -41,13 +41,13 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(defaults["ai_temperature"], 0)
         self.assertNotIn("ai_api_key", defaults)
         self.assertNotIn("db_path", defaults)
-        store.update({"batch_limit": 8, "batch_char_budget": 9000, "ai_temperature": 0.4,
+        store.update({"batch_char_budget": 9000, "ai_temperature": 0.4,
                       "history_rows": 0, "ignored_keep_per_session": 20})
         fresh = ConfigStore(self.root)
-        self.assertEqual(fresh.read()["batch_limit"], 8)
+        self.assertNotIn("batch_limit", fresh.read())
         self.assertEqual(fresh.read()["ai_temperature"], 0.4)
         self.assertEqual(fresh.read()["history_rows"], 0)
-        for fields in ({"batch_limit": 0}, {"batch_limit": 21}, {"batch_char_budget": 399},
+        for fields in ({"batch_char_budget": 399},
                        {"ai_temperature": 2.5}, {"ai_temperature": "0.4"}, {"new_message_chars": 199},
                        {"history_rows": 21},
                        {"ignored_keep_per_session": 9}, {"ai_max_tokens_single": 63}):

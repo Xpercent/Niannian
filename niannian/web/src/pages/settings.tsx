@@ -28,7 +28,6 @@ type NumericKey =
   | "batch_interval_seconds"
   | "settle_window_seconds"
   | "merge_window_seconds"
-  | "batch_limit"
   | "batch_char_budget"
   | "new_message_chars"
   | "history_chars"
@@ -133,20 +132,12 @@ const groups: Array<{ title: string; note: string; items: Option[] }> = [
   },
   {
     title: "上下文预算",
-    note: "连续消息先拼成段，再按段数和字数分批；剩余内容在同一轮继续发送。",
+    note: "连续消息先拼成段，再按正文字数分批；不限制段数，剩余内容在同一轮继续发送。",
     items: [
-      {
-        key: "batch_limit",
-        label: "一次最多发送几段（段）",
-        hint: "例如有5段，设为4时先发前4段，再发第5段；一起发送仍是独立段落，不会拼成一段。调高可同时参考更多当前消息，但仍受正文预算限制，不能保证补齐缺失信息",
-        min: 1,
-        max: 20,
-        verified: 4,
-      },
       {
         key: "batch_char_budget",
         label: "一次发送的正文预算（字）",
-        hint: "例如每段2000字、预算4200字，一次通常带2段，即使段数上限为4。按每段原文字数与压缩目标中较小值估算；不含历史、待办、画像和模型指令。单段仍会发送，故不是整次请求的硬上限",
+        hint: "例如每段2000字、预算4200字，一次通常带2段。按每段原文字数与压缩目标中较小值估算；不含历史、待办、画像和模型指令。单段仍会发送，故不是整次请求的硬上限",
         min: 400,
         max: 60000,
         verified: 4200,

@@ -170,7 +170,7 @@ def create_app(root: Path | str | None = None, *, live_wechat=True) -> FastAPI:
                           "batch_interval_seconds": values["batch_interval_seconds"],
                           "settle_window_seconds": values["settle_window_seconds"],
                           "merge_window_seconds": values["merge_window_seconds"],
-                          "batch_limit": values["batch_limit"], "batch_char_budget": values["batch_char_budget"]}}
+                          "batch_char_budget": values["batch_char_budget"]}}
 
     @app.get("/api/tasks")
     def tasks(status: Literal["pending", "completed", "cancelled", "all"] = "pending", q: str = Query(default="", max_length=500),

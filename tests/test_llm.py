@@ -86,6 +86,14 @@ class ModelTests(unittest.TestCase):
             tuned.extract_batch([self.message, self.second], [], tasks)
         self.assertEqual(json.loads(mocked.call_args.args[0].data)["max_tokens"], 3000)
 
+    def test_batch_accepts_more_than_twenty_source_segments(self):
+        items = self.messages[:21]
+        self.assertEqual(len(items), 21)
+        payload = {"items": [{"index": index, "instructions": [{"action": "IGNORE"}]} for index in range(21)]}
+        with patch("niannian.llm.urlopen", return_value=self.response(payload)):
+            answers = self.model.extract_batch(items, [], [])
+        self.assertEqual(set(answers), set(range(21)))
+
     def test_compression_sends_full_source_and_rejects_incomplete_output(self):
         largest = max(self.messages, key=lambda row: len(row["content"]))
         self.model.budgets["new_message"] = 200

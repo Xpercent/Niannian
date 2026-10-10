@@ -137,7 +137,7 @@ class MetricsApiTests(unittest.TestCase):
         body = self.client.get("/api/metrics").json()
         self.assertEqual(set(body["model"]), {"name", "enabled", "timeout_seconds", "temperature",
                                              "max_tokens_batch", "batch_interval_seconds",
-                                             "settle_window_seconds", "merge_window_seconds", "batch_limit",
+                                             "settle_window_seconds", "merge_window_seconds",
                                              "batch_char_budget"})
         self.assertNotIn("api_key", json.dumps(body, ensure_ascii=False))
         self.assertNotIn("base_url", json.dumps(body, ensure_ascii=False))

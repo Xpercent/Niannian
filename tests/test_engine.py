@@ -103,7 +103,7 @@ class EngineTests(unittest.TestCase):
     def test_new_arrival_defers_remaining_session_without_processing_it(self):
         first = self.ingest(0, 700)
         second = self.ingest(1, 500)
-        self.values["batch_limit"] = 1
+        self.values["batch_char_budget"] = max(len(row["content"]) for row in self.real[:2])
         fake = FakeModel({0: [Instruction(action="IGNORE")]})
         def progress(done, total, session):
             if done == 1:
@@ -206,7 +206,7 @@ class EngineTests(unittest.TestCase):
         self.assertNotIn("ai_api_key", seen)
 
         self.values.update({"ai_temperature": 0.5, "ai_max_tokens_batch": 4000, "new_message_chars": 900,
-                            "history_rows": 2, "batch_limit": 1, "batch_char_budget": 5000})
+                            "history_rows": 2, "batch_char_budget": 5000})
         seen.clear()
         with patch("niannian.engine.LLMExtractor", side_effect=spy), \
                 patch.object(self.engine, "_gate", return_value=None), \
@@ -215,27 +215,25 @@ class EngineTests(unittest.TestCase):
         self.assertEqual((seen["temperature"], seen["max_tokens_batch"], seen["new_message_chars"],
                           seen["history_rows"]), (0.5, 4000, 900, 2))
 
-    def test_batch_limit_splits_requests(self):
-        self.ingest(0, 900)
-        self.ingest(1, 800)
-        self.ingest(2, 700)
+    def test_only_character_budget_splits_requests(self):
+        for index in range(6):
+            self.ingest(index, 900 - index * 90)
+        self.values["batch_limit"] = 1  # A legacy key must not cap requests.
+        self.values["batch_char_budget"] = 60000
         shapes = []
-        self.values["batch_limit"] = 1
         with patch("niannian.engine.LLMExtractor", side_effect=lambda *args, **kwargs: Recorder(shapes)), \
-                patch.object(self.engine, "_gate", return_value=None), \
-                patch("niannian.engine.guard_decisions", side_effect=lambda message, commands, profile: commands):
+                patch.object(self.engine, "_gate", return_value=None):
             wide = self.engine.process(force=True)
+        self.assertEqual((wide["batches"], wide["batched_items"]), (1, 6))
+        self.assertEqual(shapes, ["batch"])
         self.db.execute("UPDATE messages SET processed=0")
-        self.values["batch_limit"] = 4
+        self.values["batch_char_budget"] = 1
+        shapes.clear()
         with patch("niannian.engine.LLMExtractor", side_effect=lambda *args, **kwargs: Recorder(shapes)), \
-                patch.object(self.engine, "_gate", return_value=None), \
-                patch("niannian.engine.guard_decisions", side_effect=lambda message, commands, profile: commands):
+                patch.object(self.engine, "_gate", return_value=None):
             narrow = self.engine.process(force=True)
-        # batch_limit=1 时每段单独请求；放宽后一次带走多段，请求次数随之减少。
-        self.assertEqual((wide["batches"], wide["items"]), (0, 3))
-        self.assertEqual(shapes.count("single"), 3)
-        self.assertEqual((narrow["batches"], narrow["batched_items"]), (1, 3))
-        self.assertEqual(shapes.count("batch"), 1)
+        self.assertEqual(narrow["processed"], 6)
+        self.assertEqual(shapes, ["single"] * 6)
 
     def test_multiple_tasks_from_one_real_message(self):
         message_id = self.ingest()
