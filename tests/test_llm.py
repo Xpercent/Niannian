@@ -84,6 +84,28 @@ class ModelTests(unittest.TestCase):
             tuned.extract_batch([self.message, self.second], [], tasks)
         self.assertEqual(json.loads(mocked.call_args.args[0].data)["max_tokens"], 3000)
 
+    def test_compression_sends_full_source_and_rejects_incomplete_output(self):
+        largest = max(self.messages, key=lambda row: len(row["content"]))
+        self.model.budgets["new_message"] = 200
+        summary = largest["content"][:150]  # Controlled model output, not a new chat.
+        def response(payload, finish="stop"):
+            return io.BytesIO(json.dumps({"choices": [{"finish_reason": finish,
+                "message": {"content": json.dumps(payload)}}]}).encode())
+        with patch("niannian.llm.urlopen", return_value=response({"summary": summary, "complete": True})) as mocked:
+            self.assertEqual(self.model.compress(largest), summary)
+        request = json.loads(mocked.call_args.args[0].data)
+        self.assertFalse(request["enable_thinking"])
+        data = json.loads(request["messages"][1]["content"])
+        self.assertEqual(data["source_text"], largest["content"])
+        self.assertFalse(data["context_available"])
+        self.assertIn("上下文缺失", request["messages"][0]["content"])
+        self.assertIn("例外", request["messages"][0]["content"])
+        for payload, finish in (({"summary": summary, "complete": True}, "length"),
+                                ({"summary": summary, "complete": False}, "stop"),
+                                ({"summary": largest["content"], "complete": True}, "stop")):
+            with patch("niannian.llm.urlopen", return_value=response(payload, finish)):
+                self.assertIsNone(self.model.compress(largest))
+
     def test_history_rows_zero_sends_no_context(self):
         bare = LLMExtractor("https://example.invalid/v1", "unused", "model", history_rows=0)
         with patch("niannian.llm.urlopen", return_value=self.response({"instructions": [{"action": "IGNORE"}]})) as mocked:

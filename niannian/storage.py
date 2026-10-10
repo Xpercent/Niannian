@@ -238,6 +238,30 @@ class Database:
                 updated += 1
         return updated
 
+    def compressed_text(self, message_id: int, fingerprint: str) -> str | None:
+        row = self.one("SELECT metadata_json FROM messages WHERE id=?", (message_id,))
+        cached = json.loads(row["metadata_json"]).get("text_compression", {}) if row else {}
+        return cached.get("summary") if cached.get("fingerprint") == fingerprint else None
+
+    def save_compressed_text(self, item: dict, fingerprint: str, summary: str) -> bool:
+        """Cache on the last source row, merging metadata without changing originals."""
+        with self.connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            rows = []
+            for message_id in item["message_ids"]:
+                row = conn.execute("SELECT * FROM messages WHERE id=?", (message_id,)).fetchone()
+                if not row or row["session_id"] != item["session_id"] or row["account"] != item["account"]:
+                    return False
+                rows.append(row)
+            if not rows or "\n".join(row["content"] for row in rows) != item["content"]:
+                return False
+            metadata = json.loads(rows[-1]["metadata_json"])
+            metadata["text_compression"] = {"fingerprint": fingerprint, "summary": summary,
+                                            "message_ids": item["message_ids"], "created_at": utc_now()}
+            conn.execute("UPDATE messages SET metadata_json=? WHERE id=?",
+                         (json.dumps(metadata, ensure_ascii=False), rows[-1]["id"]))
+        return True
+
     def sessions(self) -> list[dict]:
         return self.rows("SELECT s.*,(SELECT COUNT(*) FROM messages m WHERE m.session_id=s.id) message_count, "
                          "(SELECT COUNT(*) FROM tasks t WHERE t.session_id=s.id AND t.status='pending') task_count "

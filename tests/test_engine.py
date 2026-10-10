@@ -115,6 +115,51 @@ class EngineTests(unittest.TestCase):
         self.assertEqual(self.db.one("SELECT processed FROM messages WHERE id=?", (first,))["processed"], 1)
         self.assertEqual(self.db.one("SELECT processed FROM messages WHERE id=?", (second,))["processed"], 0)
 
+    def test_long_content_uses_persisted_summary_and_preserves_original(self):
+        original = max(self.real, key=lambda row: len(row["content"]))
+        self.real = [original]
+        message_id = self.ingest(0)
+        self.values["new_message_chars"] = 200
+        before = self.db.one("SELECT * FROM messages WHERE id=?", (message_id,))
+        fake = FakeModel({0: [Instruction(action="IGNORE")]})
+        summary = original["content"][:150]  # Simulated model output only.
+        with patch.object(fake, "compress", return_value=summary, create=True) as compress, \
+                patch("niannian.engine.LLMExtractor", return_value=fake), \
+                patch.object(self.engine, "_gate", return_value=None), \
+                patch.object(fake, "extract", wraps=fake.extract) as extract:
+            result = self.engine.process(force=True)
+            self.assertEqual(result["processed"], 1)
+            sent = extract.call_args.args[0]
+            self.assertEqual(sent["model_content"], summary)
+            self.assertEqual(sent["content"], original["content"])
+            after = self.db.one("SELECT * FROM messages WHERE id=?", (message_id,))
+            self.assertEqual(after["content"], before["content"])
+            item = self.engine.aggregate([before], 0)[0]
+            cached = self.engine._compressed_item(item, fake, self.values)
+            self.assertEqual(cached["model_content"], summary)
+            self.assertEqual(compress.call_count, 1)
+            metadata = json.loads(after["metadata_json"])
+            self.assertEqual(metadata["text_compression"]["message_ids"], [message_id])
+            for key, value in json.loads(before["metadata_json"]).items():
+                self.assertEqual(metadata[key], value)
+            self.values["ai_model"] = "changed-model"
+            self.engine._compressed_item(item, fake, self.values)
+            self.assertEqual(compress.call_count, 2)
+
+    def test_failed_compression_does_not_process_or_extract(self):
+        self.real = [max(self.real, key=lambda row: len(row["content"]))]
+        message_id = self.ingest(0)
+        self.values["new_message_chars"] = 200
+        fake = FakeModel()
+        with patch.object(fake, "compress", return_value=None, create=True), \
+                patch("niannian.engine.LLMExtractor", return_value=fake), \
+                patch.object(self.engine, "_gate", return_value=None):
+            result = self.engine.process(force=True)
+        self.assertEqual(result["processed"], 0)
+        self.assertEqual(fake.stats["requests"], 0)
+        self.assertEqual(self.db.one("SELECT processed FROM messages WHERE id=?", (message_id,))["processed"], 0)
+        self.assertEqual(self.db.one("SELECT COUNT(*) AS n FROM task_events")["n"], 0)
+
     def test_model_request_parameters_come_from_settings(self):
         self.ingest(0)
         seen = {}

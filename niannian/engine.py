@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from collections import defaultdict, deque
@@ -11,7 +12,7 @@ from typing import Any
 
 from .llm import (Instruction, LLMExtractor, HISTORY_CHARS, HISTORY_ROWS, MAX_TOKENS_BATCH,
                   MAX_TOKENS_SINGLE, NEW_MESSAGE_CHARS, PROFILE_CHARS, TASK_CHARS, TEMPERATURE,
-                  requires_review, guard_decisions, CONDITIONAL_PROHIBITION, ACTION_VERB)
+                  requires_review, guard_decisions, CONDITIONAL_PROHIBITION, ACTION_VERB, COMPRESSION_VERSION)
 from .media import attachment_only
 from .storage import canonical_time, utc_now
 
@@ -312,6 +313,22 @@ class Engine:
                      (task_id, action, source, json.dumps(ids), instruction.model_dump_json(), now))
         return outcome, task_id
 
+    def _compressed_item(self, item, extractor, values):
+        budget = values.get("new_message_chars", NEW_MESSAGE_CHARS)
+        if len(item["content"]) <= budget:
+            return item
+        identity = {"content": item["content"], "ids": item["message_ids"],
+                    "account": item.get("account", ""), "session": item["session_id"],
+                    "budget": budget, "model": values.get("ai_model", ""),
+                    "endpoint": values.get("ai_base_url", ""), "prompt_version": COMPRESSION_VERSION}
+        fingerprint = hashlib.sha256(json.dumps(identity, ensure_ascii=False, sort_keys=True).encode()).hexdigest()
+        summary = self.db.compressed_text(item["message_ids"][-1], fingerprint)
+        if summary is None:
+            summary = extractor.compress(item)
+            if summary is None or not self.db.save_compressed_text(item, fingerprint, summary):
+                return None
+        return {**item, "model_content": summary}
+
     def process(self, force=False, progress=None, should_stop=None, session_id=None):
         with self.lock:
             values = self._settings()
@@ -371,16 +388,42 @@ class Engine:
                 counts["pre_filtered"] += len(chunk) - len(eligible)
                 answers = {}
                 if eligible and extractor.enabled:
+                    prepared = []
+                    for item in chunk:
+                        if should_stop and should_stop():
+                            break
+                        compressed = self._compressed_item(item, extractor, values)
+                        if compressed is None:
+                            break
+                        prepared.append(compressed)
+                    if len(prepared) != len(chunk):
+                        if should_stop and should_stop():
+                            counts["cancelled"] = len(items) - done
+                            break
+                        # A failed summary must not silently become a clipped decision.
+                        counts["skipped"] += len(chunk)
+                        done += len(chunk)
+                        if progress:
+                            progress(done, len(items), session["name"] if session else scope[1])
+                        continue
+                    if not self._session_ready(scope[1], scope[0], force, values):
+                        counts["skipped"] += len(chunk) + len(queue)
+                        done += len(chunk) + len(queue)
+                        if queue:
+                            chunks.popleft()
+                        if progress:
+                            progress(done, len(items), session["name"] if session else scope[1])
+                        continue
                     # Preserve original indexes for local CREATE references by sending
                     # the whole chunk; trivial decisions still apply locally below.
                     if len(eligible) == 1:
                         index = eligible[0]
-                        answer = extractor.extract(chunk[index], self._history(chunk[index]), pending, profile,
+                        answer = extractor.extract(prepared[index], self._history(chunk[index]), pending, profile,
                                                    session["name"] if session else "")
                         if answer is not None:
                             answers[index] = answer
                     else:
-                        answers = extractor.extract_batch(chunk, self._history(chunk[0]), pending, profile,
+                        answers = extractor.extract_batch(prepared, self._history(chunk[0]), pending, profile,
                                                           session["name"] if session else "")
                         counts["batches"] += 1
                         counts["batched_items"] += len(chunk)
