@@ -20,6 +20,9 @@ class BlockingEngine:
         self.started, self.release = Event(), Event()
         self.calls = 0
 
+    def has_work(self, values=None):
+        return True
+
     def process(self, force, session_id, run_id, progress, should_stop):
         self.calls += 1
         self.started.set()
@@ -64,6 +67,27 @@ class JobTests(unittest.TestCase):
                 patch.object(self.jobs, "start") as start:
             self.jobs._schedule()
         start.assert_called_once_with(force=False)
+
+    def test_scheduler_skips_round_without_pending_messages(self):
+        self.jobs.last_finished = 1000
+        self.engine.has_work = lambda values=None: False
+        with patch.object(self.jobs.stop_event, "wait", side_effect=[False, True]), \
+                patch("niannian.jobs.time.monotonic", side_effect=[1300, 1500]), \
+                patch.object(self.jobs, "start") as start:
+            self.jobs._schedule()
+        start.assert_not_called()
+        self.assertEqual(self.jobs.last_finished, 1500)
+        self.assertIsNone(self.jobs.latest())
+
+    def test_manual_round_is_recorded_even_without_work(self):
+        self.engine.has_work = lambda values=None: False
+        self.engine.process = lambda **kwargs: {"items": 0, "processed": 0}
+        run = self.jobs.start(force=True)
+        self.jobs.worker.join(timeout=3)
+        stored = self.jobs.get(run["id"])
+        self.assertEqual(stored["status"], "completed")
+        self.assertEqual(stored["trigger"], "manual")
+        self.assertEqual(stored["result"]["items"], 0)
 
     def test_restart_marks_interrupted_run_retriable(self):
         self.jobs._persist({"id": "interrupted", "status": "running", "total": 10, "done": 3})

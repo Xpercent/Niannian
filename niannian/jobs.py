@@ -106,13 +106,19 @@ class ExtractionJobs:
             with self.lock:
                 running = self.current and self.current["status"] == "running"
                 due = not running and time.monotonic() - self.last_finished >= interval
-            if due:
-                try:
-                    self.start(force=False)
-                except Exception:
-                    log.exception("调度失败")
+            if not due:
+                continue
+            try:
+                if not self.engine.has_work():
+                    # 没有可处理消息就不开轮；手动提炼仍会留下空跑记录。
                     with self.lock:
                         self.last_finished = time.monotonic()
+                    continue
+                self.start(force=False)
+            except Exception:
+                log.exception("调度失败")
+                with self.lock:
+                    self.last_finished = time.monotonic()
 
     def stop(self) -> None:
         self.stop_event.set()

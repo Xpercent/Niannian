@@ -87,6 +87,10 @@ class Engine:
         ready = {scope for scope in scopes if self._session_ready(*scope, force, values)}
         return [row for row in rows if (row["session_id"], row["account"]) in ready]
 
+    def has_work(self, values=None) -> bool:
+        """调度前的探活：与 process 用同一份待处理口径，避免空跑也落一条轮次。"""
+        return bool(self.pending_messages(False, None, values))
+
     def aggregate(self, messages, merge_window_seconds=None):
         window = (self._settings().get("merge_window_seconds", 60) if merge_window_seconds is None
                   else merge_window_seconds)

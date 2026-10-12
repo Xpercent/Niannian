@@ -360,6 +360,14 @@ class EngineTests(unittest.TestCase):
         self.ingest(1, 30)
         self.assertEqual(self.engine.pending_messages(), [])
         self.assertEqual(len(self.engine.pending_messages(force=True)), 2)
+        self.assertFalse(self.engine.has_work())
+
+    def test_has_work_tracks_unprocessed_messages(self):
+        self.assertFalse(self.engine.has_work())
+        message_id = self.ingest()
+        self.assertTrue(self.engine.has_work())
+        self.db.execute("UPDATE messages SET processed=1 WHERE id=?", (message_id,))
+        self.assertFalse(self.engine.has_work())
 
     def test_configuration_is_read_once_per_round(self):
         self.ingest()
