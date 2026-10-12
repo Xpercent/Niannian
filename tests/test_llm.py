@@ -7,7 +7,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from niannian.llm import (Instruction, LLMExtractor, NEW_MESSAGE_CHARS, HISTORY_CHARS, TASK_CHARS,
-                       clip_text, requires_review)
+                       clip_text, guard_decisions)
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -170,14 +170,12 @@ class ModelTests(unittest.TestCase):
         self.assertLessEqual(sum(len(json.dumps(task, ensure_ascii=False)) for task in data["pending_tasks"]), TASK_CHARS)
         self.assertLessEqual(body["max_tokens"], 700)
 
-    def test_no_profile_conditional_notice_rejects_model_created_tasks(self):
-        candidate = next((row for row in self.messages if requires_review(row, "")), None)
-        if candidate is None:
-            self.skipTest("No captured role-conditional notice")
-        with patch("niannian.llm.urlopen", return_value=self.response({"instructions": [{"action": "CREATE", "title": "确认交付对象A"}]})):
-            result = self.model.extract(candidate, [], self.tasks)
-        self.assertEqual([instruction.action for instruction in result], ["IGNORE"])
-        self.assertIn("需复核", result[0].context_summary)
+    def test_model_layer_does_not_apply_semantic_guard(self):
+        answer = {"instructions": [{"action": "CREATE", "title": "办理银行卡"}]}
+        with patch("niannian.llm.urlopen", return_value=self.response(answer)):
+            result = self.model.extract(self.message, [], self.tasks)
+        self.assertEqual([command.action for command in result], ["CREATE"])
+        self.assertEqual(result[0].title, "办理银行卡")
 
     def test_minimal_ignore_tolerates_irrelevant_provider_nulls(self):
         with patch("niannian.llm.urlopen", return_value=self.response({"instructions": [{"action": "IGNORE", "title": None,
@@ -192,11 +190,43 @@ class ModelTests(unittest.TestCase):
         self.assertEqual(list(result), [0, 1])
         self.assertEqual([result[index][0].action for index in result], ["IGNORE", "IGNORE"])
 
-    def test_information_only_titles_cannot_become_tasks(self):
-        from niannian.llm import guard_decisions
-        for title in ("i志愿注册流程指南", "返校健康安全提醒", "返校确认操作流程"):
-            result = guard_decisions(self.message, [Instruction(action="CREATE", title=title)])
-            self.assertEqual([command.action for command in result], ["IGNORE"])
+    def test_configured_output_limits_do_not_discard_valid_siblings(self):
+        message = next(row for row in self.messages if not row["is_self"])
+        commands = [Instruction(action="CREATE", title="办理银行卡"),
+                    Instruction(action="CREATE", title="确认" + "对象" * 24),
+                    Instruction(action="CREATE", title="查看公示")]
+        result = guard_decisions(message, commands, {"task_title_max_chars": 40})
+        self.assertEqual([command.action for command in result], ["CREATE", "IGNORE", "CREATE"])
+        self.assertIn("40", result[1].context_summary)
+        result = guard_decisions(message, commands, {"max_tasks_per_message": 1})
+        self.assertEqual([command.action for command in result], ["CREATE", "IGNORE", "IGNORE"])
+
+    def test_configured_title_and_task_limits_reach_model_prompt(self):
+        model = LLMExtractor("https://example.invalid/v1", "unused", "model",
+                             task_title_max_chars=60, max_tasks_per_message=5)
+        with patch("niannian.llm.urlopen", return_value=self.response({"instructions": [{"action": "IGNORE"}]})) as mocked:
+            model.extract(self.message, [], [])
+        request = json.loads(mocked.call_args.args[0].data)
+        prompt = request["messages"][0]["content"]
+        self.assertIn("最多60字", prompt)
+        self.assertIn("最多新建5项", prompt)
+        brief = json.loads(request["messages"][1]["content"])["new_message"]
+        self.assertNotIn("identity_confident", brief)
+
+    def test_default_does_not_limit_instructions_to_twelve(self):
+        answer = {"instructions": [{"action": "CREATE", "title": "办理银行卡"} for _ in range(13)]}
+        with patch("niannian.llm.urlopen", return_value=self.response(answer)):
+            result = self.model.extract(self.message, [], [])
+        self.assertEqual(len(result), 13)
+
+    def test_single_request_does_not_inherit_previous_batch_diagnostics(self):
+        answer = {"items": [{"index": 0, "instructions": [{"action": "IGNORE"}]}]}
+        with patch("niannian.llm.urlopen", return_value=self.response(answer)):
+            self.model.extract_batch([self.message, self.second], [], [])
+        self.assertEqual(self.model.last_diagnostics["missing_indexes"], [1])
+        with patch("niannian.llm.urlopen", return_value=self.response({"instructions": [{"action": "IGNORE"}]})):
+            self.model.extract(self.message, [], [])
+        self.assertEqual(self.model.last_diagnostics, {})
 
     def test_relevant_current_object_precedes_newest_unrelated_tasks(self):
         real = max(self.messages, key=lambda message: len(message["content"]))

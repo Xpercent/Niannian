@@ -197,18 +197,6 @@ function SegmentCard({ brief, index }: { brief: BriefMessage; index: number }) {
         {brief.is_self && (
           <span className="rounded bg-stone-100 px-1.5 py-0.5">本人</span>
         )}
-        {brief.is_self && (
-          <span
-            className={cn(
-              "rounded px-1.5 py-0.5",
-              brief.identity_confident
-                ? "bg-emerald-50 text-emerald-700"
-                : "bg-stone-100 text-stone-500",
-            )}
-          >
-            身份{brief.identity_confident ? "已确认" : "未确认"}
-          </span>
-        )}
         {brief.content_is_summary && (
           <span className="rounded bg-sky-50 px-1.5 py-0.5 text-sky-700">
             压缩摘要，非原文

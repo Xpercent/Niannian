@@ -331,7 +331,6 @@ export interface BriefMessage {
   content_is_summary?: boolean;
   is_self?: boolean;
   created_at?: string;
-  identity_confident?: boolean;
 }
 export interface CallMessage {
   id: number;

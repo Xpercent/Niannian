@@ -14,7 +14,7 @@ from typing import Any
 
 from .llm import (Instruction, LLMExtractor, HISTORY_CHARS, HISTORY_ROWS, MAX_TOKENS_BATCH,
                   MAX_TOKENS_SINGLE, NEW_MESSAGE_CHARS, TASK_CHARS, TEMPERATURE,
-                  requires_review, guard_decisions, CONDITIONAL_PROHIBITION, ACTION_VERB, COMPRESSION_VERSION)
+                  guard_decisions, CONDITIONAL_PROHIBITION, COMPRESSION_VERSION)
 from .media import attachment_only
 from .storage import canonical_time, utc_now
 
@@ -27,18 +27,6 @@ IGNORED_KEEP_PER_SESSION = 100
 def parse_time(value: str) -> datetime:
     parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
     return parsed if parsed.tzinfo else parsed.replace(tzinfo=SHANGHAI)
-
-
-def identity_confident(message: dict[str, Any]) -> bool:
-    if "identity_confident" in message:
-        return message["identity_confident"] is True
-    metadata = message.get("metadata")
-    if metadata is None:
-        try:
-            metadata = json.loads(message.get("metadata_json") or "{}")
-        except (TypeError, ValueError):
-            metadata = {}
-    return isinstance(metadata, dict) and metadata.get("identity_confident") is True
 
 
 class ModelCallTrace:
@@ -119,10 +107,9 @@ class Engine:
                     previous["content"] += "\n" + row["content"]
                     previous["message_ids"].append(row["id"])
                     previous["created_at"] = row["created_at"]
-                    previous["identity_confident"] &= identity_confident(row)
                     continue
             groups.append({**row, "sender_key": sender, "message_ids": [row["id"]],
-                           "first_created_at": row["created_at"], "identity_confident": identity_confident(row)})
+                           "first_created_at": row["created_at"]})
         return sorted((group for groups in scopes.values() for group in groups),
                       key=lambda item: (parse_time(item["created_at"]), item["id"]))
 
@@ -174,12 +161,10 @@ class Engine:
     ACKNOWLEDGEMENT = re.compile(r"(?:收到|收到啦|好的|好|嗯|明白|谢谢|了解)[！!。 .\s]*")
     ACTION_OBJECT = re.compile(r"(?:提交|发送|发给|填写|完成|确认|修改|更新|补齐|检查|整理|提供|反馈|转发|注册|接龙|签字|缴纳|上传|下载|领取|观看|核对).{2,}")
 
-    def _gate(self, item, rules, profile=""):
+    def _gate(self, item, rules):
         content = item["content"].strip()
         if not content or attachment_only(content):
             return [Instruction(action="IGNORE", context_summary="附件没有文字行动要求")]
-        if requires_review(item, profile):
-            return [Instruction(action="IGNORE", context_summary="需复核：群条件邀请，画像尚未确认本人角色与参与意愿")]
         for rule in rules:
             try:
                 if rule["action"] == "ignore" and re.fullmatch(rule["pattern"], content, re.I):
@@ -190,7 +175,8 @@ class Engine:
             return [Instruction(action="IGNORE", context_summary="本人承诺不是完成凭证")]
         return None
 
-    def _fallback(self, item, pending, rules, profile=""):
+    def _fallback(self, item, pending, rules, settings=None):
+        settings = settings or {}
         content = item["content"]
         related = self.related(content, pending)
         if self.CANCEL.search(content):
@@ -198,7 +184,7 @@ class Engine:
                 return [Instruction(action="RESOLVE", related_task_id=related["id"], resolution="cancelled", context_summary=content)]
             return [Instruction(action="IGNORE", context_summary="取消缺少唯一可确认的当前待办")]
         if self.COMPLETE.search(content):
-            if item["is_self"] and identity_confident(item) and related:
+            if item["is_self"] and related:
                 return [Instruction(action="RESOLVE", related_task_id=related["id"], context_summary=content)]
             return [Instruction(action="IGNORE", context_summary="完成只认本人且须关联现有待办")]
         if item["is_self"]:
@@ -209,8 +195,8 @@ class Engine:
                 fields = {}
             return [Instruction(action="UPDATE", related_task_id=related["id"], description=content,
                                 context_summary=content, **fields)]
-        if self.CONDITIONAL.search(content) or requires_review(item, profile):
-            return [Instruction(action="IGNORE", context_summary="需复核：条件邀请或群公告，尚未确认本人角色与参与意愿")]
+        if self.CONDITIONAL.search(content):
+            return [Instruction(action="IGNORE", context_summary="本地规则无法确认条件邀请适用于本人")]
         # Rules without a model may only create from an explicit imperative with
         # its object. Dates, application labels and isolated headings never count.
         clauses = re.split(r"[。；;！？]+", re.sub(r"\s*\n\s*", " ", content))
@@ -234,13 +220,13 @@ class Engine:
                 continue
             title = re.sub(r"^(?:请|帮我|麻烦|务必|记得|别忘|需要你|能否|能不能|可以)\s*", "", action)
             title = re.split(r"[，,（(]", title, maxsplit=1)[0].strip()
-            if len(title) > 40 or not ACTION_VERB.search(title):
+            if not title or len(title) > settings.get("task_title_max_chars", 120):
                 continue
             if clause:
                 instructions.append(Instruction(action="CREATE", title=title, description=action[:4000],
                                                 owner="我", priority="high" if re.search(r"紧急|尽快|今天|下班前", clause) else "medium",
                                                 due_at=self.due_at(clause, item["created_at"]), context_summary=clause[:4000]))
-        return guard_decisions(item, instructions[:3], profile) if instructions else [
+        return instructions if instructions else [
             Instruction(action="IGNORE", context_summary="需复核：模型不可用且本地未识别明确完整行动")]
 
     @staticmethod
@@ -301,7 +287,7 @@ class Engine:
                 anchors = duplicate[1] if duplicate else {re.sub(r"\s", "", title.lower())}
                 current_content = re.sub(r"\s", "", item["content"].lower())
                 if not any(anchor in current_content for anchor in anchors):
-                    return None, None  # A history-only duplicate is not a new source.
+                    return None, None  # 合并不能把无关新消息挂成旧任务的来源。
                 merged = sorted(set(json.loads(existing["source_message_ids"])) | set(ids))
                 description = existing["description"]
                 if instruction.description and instruction.description not in description:
@@ -376,7 +362,9 @@ class Engine:
                                      new_message_chars=values.get("new_message_chars", NEW_MESSAGE_CHARS),
                                      history_chars=values.get("history_chars", HISTORY_CHARS),
                                      history_rows=values.get("history_rows", HISTORY_ROWS),
-                                     task_chars=values.get("task_chars", TASK_CHARS), trace=trace)
+                                     task_chars=values.get("task_chars", TASK_CHARS), trace=trace,
+                                     task_title_max_chars=values.get("task_title_max_chars", 120),
+                                     max_tasks_per_message=values.get("max_tasks_per_message", 0))
             self.llm = extractor
             profile = self.profile.read() if self.profile else ""
             rules = self.db.rows("SELECT * FROM rules WHERE enabled=1 ORDER BY id")
@@ -413,7 +401,7 @@ class Engine:
                 session = self.db.one("SELECT * FROM sessions WHERE id=?", (scope[1],))
                 pending = self.db.rows("SELECT * FROM tasks WHERE session_id=? AND status='pending' ORDER BY id", (scope[1],))
                 expected_versions = {task["id"]: task["version"] for task in pending}
-                gates = {index: self._gate(item, rules, profile) for index, item in enumerate(chunk)}
+                gates = {index: self._gate(item, rules) for index, item in enumerate(chunk)}
                 eligible = [index for index in range(len(chunk)) if gates[index] is None]
                 counts["pre_filtered"] += len(chunk) - len(eligible)
                 answers = {}
@@ -461,6 +449,10 @@ class Engine:
                                                           session["name"] if session else "")
                         counts["batches"] += 1
                         counts["batched_items"] += len(chunk)
+                answers = {index: guard_decisions(chunk[index], answer, values)
+                           for index, answer in answers.items()}
+                if extractor.enabled and answers:
+                    extractor.record_final_decisions(chunk, answers)
                 references: dict[str, int] = {}
                 for index, item in enumerate(chunk):
                     if should_stop and should_stop():
@@ -473,15 +465,17 @@ class Engine:
                                                  for command in answer)
                     if answer is None or invalid_ref:
                         if extractor.enabled:
+                            if invalid_ref:
+                                extractor.record_deferred(item)
                             counts["skipped"] += 1
                             done += 1
                             if progress:
                                 progress(done, len(items), session["name"] if session else scope[1])
                             continue
                         pending_now = self.db.rows("SELECT * FROM tasks WHERE session_id=? AND status='pending' ORDER BY id", (scope[1],))
-                        answer = self._fallback(item, pending_now, rules, profile)
+                        answer = self._fallback(item, pending_now, rules, values)
+                        answer = guard_decisions(item, answer, values)
                         source = "rule"
-                    answer = guard_decisions(item, answer, profile)
                     item_counts = defaultdict(int)
                     with self.db.connect() as conn:
                         conn.execute("BEGIN IMMEDIATE")
@@ -496,11 +490,6 @@ class Engine:
                                 if instruction.related_task_ref:
                                     instruction = instruction.model_copy(update={"related_task_id": references[instruction.related_task_ref],
                                                                                  "related_task_ref": None})
-                                blocked = ((item["is_self"] and instruction.action in {"CREATE", "UPDATE"}) or
-                                           (instruction.action == "RESOLVE" and instruction.resolution == "completed" and
-                                            not (item["is_self"] and identity_confident(item))))
-                                if blocked:
-                                    instruction = Instruction(action="IGNORE", context_summary="本人只核销；完成须有已确认的本人身份")
                                 outcome, task_id = self._apply(conn, item, instruction, source,
                                                               expected_versions.get(instruction.related_task_id) if source == "llm" else None)
                                 if outcome:

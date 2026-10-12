@@ -49,7 +49,6 @@ def main():
             session_seen.update(ids)
             for message in page['items']:
                 if message['is_self']:
-                    assert message['metadata'].get('identity_confident') is True
                     self_messages += 1
                 filename = message['metadata'].get('local_file')
                 if filename:
@@ -69,7 +68,7 @@ def main():
     assert len(exported['tasks']) == len(tasks)
     report = {'ok': True, 'messages_paginated': len(seen), 'sessions_paginated': paginated_sessions,
               'catalog_sessions': len(overview['sessions']), 'tasks_with_sources_and_events': len(tasks),
-              'source_links': source_links, 'verified_self_messages': self_messages,
+              'source_links': source_links, 'self_messages': self_messages,
               'local_attachments_renderable': local_media, 'queued': overview['stats']['queued'],
               'thinking_enabled': False}
     print(json.dumps(report, ensure_ascii=False, indent=2))

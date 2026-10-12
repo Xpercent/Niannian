@@ -137,8 +137,9 @@ class TraceTests(unittest.TestCase):
 
     def test_guard_rejection_is_visible_with_reason_and_landing(self):
         message_id = self.ingest()
-        # 标题缺少当前原文依据，真实业务校验会把模型的 CREATE 改成复核 IGNORE。
-        answer = {"instructions": [{"action": "CREATE", "title": "确认交付对象A"}]}
+        # 输出限制由引擎最终校验；真实原文不被改写，诊断保留拒绝原因。
+        self.values["task_title_max_chars"] = 10
+        answer = {"instructions": [{"action": "CREATE", "title": "确认交付对象A" * 3}]}
         self.run_round([body(answer)])
         rows = self.db.model_call_rows(days=30, guarded=True)
         self.assertEqual(len(rows), 1)
@@ -146,12 +147,12 @@ class TraceTests(unittest.TestCase):
         item = detail["outcome_json"]["items"][0]
         self.assertEqual(item["proposed"][0]["action"], "CREATE")
         self.assertEqual(item["final"][0]["action"], "IGNORE")
-        self.assertIn("需复核", item["final"][0]["context_summary"])
+        self.assertIn("配置上限", item["final"][0]["context_summary"])
         self.assertEqual(detail["guard_changes"], 1)
         self.assertEqual(detail["ignored"][0]["message_ids"], [message_id])
-        self.assertIn("需复核", detail["ignored"][0]["reason"])
+        self.assertIn("配置上限", detail["ignored"][0]["reason"])
         issues = self.db.model_call_issues(30)
-        self.assertTrue(any(row["reason"].startswith("需复核") for row in issues["guard_reasons"]), issues["guard_reasons"])
+        self.assertTrue(any("配置上限" in row["reason"] for row in issues["guard_reasons"]), issues["guard_reasons"])
         self.assertEqual(self.db.one("SELECT COUNT(*) n FROM tasks")["n"], 0)
 
     def test_transport_failure_keeps_request_and_error_for_next_round(self):

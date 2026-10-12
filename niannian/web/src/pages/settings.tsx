@@ -25,6 +25,8 @@ type NumericKey =
   | "ai_temperature"
   | "ai_max_tokens_single"
   | "ai_max_tokens_batch"
+  | "task_title_max_chars"
+  | "max_tasks_per_message"
   | "batch_interval_seconds"
   | "settle_window_seconds"
   | "merge_window_seconds"
@@ -100,6 +102,26 @@ const groups: Array<{ title: string; note: string; items: Option[] }> = [
         min: 64,
         max: 16000,
         verified: 1200,
+      },
+    ],
+  },
+  {
+    title: "任务输出",
+    note: "标题长度与每段任务数量可按需要调整。",
+    items: [
+      {
+        key: "task_title_max_chars",
+        label: "任务标题最长字数（字）",
+        hint: "让模型在此长度内写出完整行动，默认 120 字",
+        min: 10,
+        max: 120,
+      },
+      {
+        key: "max_tasks_per_message",
+        label: "每段最多生成任务（项）",
+        hint: "0 表示不限制；一段可以包含同一人的多条连续消息",
+        min: 0,
+        max: 100,
       },
     ],
   },
@@ -518,7 +540,7 @@ export default function SettingsPage({
         <summary className="cursor-pointer rounded-xl px-5 py-4 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-600">
           <span className="font-medium text-stone-900">高级设置</span>
           <span className="mt-1 block text-sm text-stone-500">
-            模型回答、长消息压缩、历史参考与采集记录。通常保留默认值即可。
+            模型回答、任务输出、长消息压缩、历史参考与采集记录。通常保留默认值即可。
           </span>
         </summary>
         <div className="space-y-4 border-t border-stone-200 p-4">
@@ -578,7 +600,7 @@ export default function SettingsPage({
       </Card>
       <p className="text-[11px] leading-6 text-stone-400">
         后端参数在下一轮提炼时生效，不需要重启；接口地址、模型与密钥改动同样在下一轮读取。
-        业务校验、身份判定与“只读微信”的边界不受这些参数影响。
+        真实来源、人工编辑冲突保护与“只读微信”的边界不受这些参数影响。
       </p>
       <div className="flex justify-end">
         <Button onClick={() => void save()} disabled={saving}>

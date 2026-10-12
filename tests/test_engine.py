@@ -9,7 +9,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from niannian.engine import Engine, parse_time
-from niannian.llm import Instruction
+from niannian.llm import Instruction, guard_decisions
 from niannian.storage import Database, utc_now
 from niannian.wechat import _sender, normalize
 
@@ -30,6 +30,12 @@ class FakeModel:
     def __init__(self, answers=None):
         self.answers = answers or {}
         self.stats = {"requests": 0, "failures": 0, "seconds": 0.0}
+
+    def record_final_decisions(self, messages, answers):
+        pass
+
+    def record_deferred(self, message):
+        pass
 
     def extract(self, *args):
         self.stats["requests"] += 1
@@ -88,10 +94,7 @@ class EngineTests(unittest.TestCase):
 
     def run_model(self, answers, **kwargs):
         fake = FakeModel(answers)
-        # These domain fixtures test state transitions independently of model
-        # language quality. Separate capture tests exercise the semantic guard.
-        with patch("niannian.engine.LLMExtractor", return_value=fake), patch.object(self.engine, "_gate", return_value=None), \
-                patch("niannian.engine.guard_decisions", side_effect=lambda message, commands, profile: commands):
+        with patch("niannian.engine.LLMExtractor", return_value=fake), patch.object(self.engine, "_gate", return_value=None):
             return self.engine.process(force=True, **kwargs)
 
     def test_legacy_limits_do_not_defer_backlog(self):
@@ -197,8 +200,7 @@ class EngineTests(unittest.TestCase):
             return FakeModel({0: [Instruction(action="IGNORE")]})
 
         with patch("niannian.engine.LLMExtractor", side_effect=spy), \
-                patch.object(self.engine, "_gate", return_value=None), \
-                patch("niannian.engine.guard_decisions", side_effect=lambda message, commands, profile: commands):
+                patch.object(self.engine, "_gate", return_value=None):
             self.engine.process(force=True)
         self.assertEqual(seen["max_tokens_single"], 700)
         self.assertEqual(seen["temperature"], 0.0)
@@ -209,8 +211,7 @@ class EngineTests(unittest.TestCase):
                             "history_rows": 2, "batch_char_budget": 5000})
         seen.clear()
         with patch("niannian.engine.LLMExtractor", side_effect=spy), \
-                patch.object(self.engine, "_gate", return_value=None), \
-                patch("niannian.engine.guard_decisions", side_effect=lambda message, commands, profile: commands):
+                patch.object(self.engine, "_gate", return_value=None):
             self.engine.process(force=True)
         self.assertEqual((seen["temperature"], seen["max_tokens_batch"], seen["new_message_chars"],
                           seen["history_rows"]), (0.5, 4000, 900, 2))
@@ -391,9 +392,8 @@ class EngineTests(unittest.TestCase):
             self.skipTest("No captured conditional group notice")
         for original in candidates:
             item = {**original, "message_ids": [1]}
-            decisions = self.engine._fallback(item, [], [], profile="")
+            decisions = self.engine._fallback(item, [], [])
             self.assertTrue(all(command.action == "IGNORE" for command in decisions))
-            self.assertTrue(any("需复核" in command.context_summary for command in decisions))
 
     def test_generic_group_words_cannot_associate_unrelated_tasks(self):
         candidates = [row for row in self.fixture["messages"] if "所有人" in row["content"]]
@@ -421,7 +421,7 @@ class EngineTests(unittest.TestCase):
                 found = next((row for row in raw_fixture["messages"] if "i志愿" in row["raw"]["content"] and
                               "注册" in row["raw"]["content"]), None)
                 if found:
-                    real = normalize(raw_fixture["account"], found["session_id"], found["raw"], set())
+                    real = normalize(raw_fixture["account"], found["session_id"], found["raw"])
                     real["session_id"] = found["session_id"]
             if real is None:
                 self.skipTest("No captured registration reminder")
@@ -448,10 +448,9 @@ class EngineTests(unittest.TestCase):
         self.assertIsNone(self.engine._duplicate("提交通知所有人", [{"id": 1, "title": "提交所有人通知"}]))
 
     def test_user_extract_rule_enables_real_special_action_candidate(self):
-        from niannian.llm import requires_review
         candidates = [row for row in self.fixture["messages"] if not self.engine.REQUEST.search(row["content"]) and
                       self.engine.ACTION_OBJECT.search(row["content"]) and not self.engine.CONDITIONAL.search(row["content"]) and
-                      not requires_review(row, "") and 8 <= len(row["content"]) <= 120 and not row["is_self"]]
+                      8 <= len(row["content"]) <= 120 and not row["is_self"]]
         if not candidates:
             self.skipTest("No captured explicit special action outside builtin request pattern")
         import re
@@ -460,72 +459,40 @@ class EngineTests(unittest.TestCase):
         decisions = self.engine._fallback(real, [], [custom])
         self.assertTrue(any(command.action == "CREATE" for command in decisions))
 
-    def test_specific_unknown_roles_are_reviewed_in_real_capture(self):
-        from niannian.llm import ROLE_ASSIGNMENT, UNIVERSAL_REQUEST
-        candidates = [row for row in self.fixture["messages"] if row["session_id"].endswith("@chatroom") and
-                      ROLE_ASSIGNMENT.search(row["content"]) and not UNIVERSAL_REQUEST.search(row["content"])]
+    def test_real_group_notices_reach_model_without_role_keyword_gate(self):
+        candidates = [row for row in self.fixture["messages"]
+                      if row["session_id"].endswith("@chatroom") and not row["is_self"]
+                      and any(word in row["content"] for word in ("班长", "报名", "如果"))
+                      and not row["content"].lstrip().startswith("[")]
         if not candidates:
-            self.skipTest("No captured role-directed group instruction")
+            self.skipTest("No captured group notice with role or participation conditions")
         for row in candidates:
-            gate = self.engine._gate(row, [])
-            self.assertIsNotNone(gate)
-            self.assertTrue(all(command.action == "IGNORE" for command in gate))
+            self.assertIsNone(self.engine._gate(row, []))
 
-    def test_final_engine_guard_rejects_information_title(self):
+    def test_engine_checks_once_and_keeps_legal_sibling(self):
         self.ingest()
-        fake = FakeModel({0: [Instruction(action="CREATE", title="返校确认操作流程")]})
-        with patch("niannian.engine.LLMExtractor", return_value=fake), patch.object(self.engine, "_gate", return_value=None):
+        self.values["task_title_max_chars"] = 40
+        commands = [Instruction(action="CREATE", title="确认" + "对象" * 24),
+                    Instruction(action="CREATE", title="办理银行卡")]
+        fake = FakeModel({0: commands})
+        with patch("niannian.engine.LLMExtractor", return_value=fake), \
+                patch.object(self.engine, "_gate", return_value=None), \
+                patch("niannian.engine.guard_decisions", wraps=guard_decisions) as checked:
             result = self.engine.process(force=True)
-        self.assertEqual(result["created"], 0)
-        self.assertEqual(result["ignored"], 1)
+        self.assertEqual((result["created"], result["ignored"]), (1, 1))
+        self.assertEqual(checked.call_count, 1)
+        self.assertEqual(self.db.one("SELECT title FROM tasks")["title"], "办理银行卡")
 
-    def test_mixed_all_member_notice_does_not_assign_special_role_to_self(self):
-        from niannian.llm import guard_decisions, ROLE_ASSIGNMENT, UNIVERSAL_REQUEST
-        candidates = [row for row in self.fixture["messages"] if ROLE_ASSIGNMENT.search(row["content"]) and
-                      UNIVERSAL_REQUEST.search(row["content"])]
-        if not candidates and (ROOT / "data" / "raw-wechat.json").exists():
-            raw_fixture = json.loads((ROOT / "data" / "raw-wechat.json").read_text(encoding="utf-8"))
-            for original in raw_fixture["messages"]:
-                item = normalize(raw_fixture["account"], original["session_id"], original["raw"], set())
-                if ROLE_ASSIGNMENT.search(item["content"]) and UNIVERSAL_REQUEST.search(item["content"]):
-                    candidates.append(item)
-        if not candidates:
-            self.skipTest("No captured mixed role and universal instruction")
-        row = candidates[0]
-        role_excerpt = ROLE_ASSIGNMENT.search(row["content"])[0]
-        decisions = guard_decisions(row, [Instruction(action="CREATE", title=role_excerpt[:40], description=role_excerpt)])
-        self.assertTrue(all(command.action == "IGNORE" for command in decisions))
-
-    def test_universal_signing_request_survives_negative_exception(self):
-        from niannian.llm import guard_decisions, UNIVERSAL_REQUEST, CONDITIONAL_PROHIBITION
-        raw_path = ROOT / "data" / "raw-wechat.json"
-        if not raw_path.exists():
-            self.skipTest("Raw capture unavailable")
-        raw_fixture = json.loads(raw_path.read_text(encoding="utf-8"))
-        candidates = []
-        for original in raw_fixture["messages"]:
-            item = normalize(raw_fixture["account"], original["session_id"], original["raw"], set())
-            if "双签" in item["content"] and UNIVERSAL_REQUEST.search(item["content"]) and CONDITIONAL_PROHIBITION.search(item["content"]):
-                candidates.append(item)
-        if not candidates:
-            self.skipTest("No real universal signing request with negative exception")
-        result = guard_decisions(candidates[0], [Instruction(action="CREATE", title="完成双签表")])
-        self.assertEqual([command.action for command in result], ["CREATE"])
-
-    def test_real_optional_household_transfer_requires_review(self):
-        from niannian.llm import guard_decisions, requires_review
-        raw_path = ROOT / "data" / "raw-wechat.json"
-        if not raw_path.exists():
-            self.skipTest("Raw capture unavailable")
-        capture = json.loads(raw_path.read_text(encoding="utf-8"))
-        row = next((entry for entry in capture["messages"] if "户口" in entry["raw"]["content"] and
-                    "如果还有" in entry["raw"]["content"]), None)
-        if row is None:
-            self.skipTest("No real optional household transfer invitation")
-        item = normalize(capture["account"], row["session_id"], row["raw"], set())
-        self.assertTrue(requires_review(item, ""))
-        commands = guard_decisions(item, [Instruction(action="CREATE", title="确认户口迁移")])
-        self.assertEqual([command.action for command in commands], ["IGNORE"])
+    def test_task_count_config_preserves_source_on_rejected_batch_reference(self):
+        first = self.ingest(0, 700)
+        second = self.ingest(1, 500)
+        self.values["max_tasks_per_message"] = 1
+        result = self.run_model({0: [Instruction(action="CREATE", title="办理银行卡"),
+                                    Instruction(action="CREATE", title="查看公示")],
+                                 1: [Instruction(action="UPDATE", related_task_ref="0:1", priority="high")]})
+        self.assertEqual((result["created"], result["skipped"]), (1, 1))
+        self.assertEqual(self.db.one("SELECT processed FROM messages WHERE id=?", (first,))["processed"], 1)
+        self.assertEqual(self.db.one("SELECT processed FROM messages WHERE id=?", (second,))["processed"], 0)
 
     def test_time_and_sender_identity_are_stable(self):
         self.assertEqual(parse_time("2026-10-09T00:00:00Z"), parse_time("2026-10-09T08:00:00+08:00"))
@@ -556,9 +523,9 @@ class EngineTests(unittest.TestCase):
         own = next((row for row in capture["messages"] if _sender(row["raw"]["content"])[0] == capture["account"]), None)
         if own is None:
             self.skipTest("No own message with verified embedded origin")
-        payload = normalize(capture["account"], own["session_id"], own["raw"], set())
+        payload = normalize(capture["account"], own["session_id"], own["raw"])
         self.assertTrue(payload["is_self"])
-        self.assertIs(payload["metadata"]["identity_confident"], True)
+        self.assertNotIn("identity_confident", payload["metadata"])
         # This archived fixture predates account-scoped local session IDs. Map
         # the normalized source to the same captured session already in this DB.
         self.sid = own["session_id"]
@@ -566,14 +533,13 @@ class EngineTests(unittest.TestCase):
         self.db.execute("UPDATE sessions SET monitored=1 WHERE id=?", (self.sid,))
         return payload
 
-    def test_unverified_self_identity_cannot_complete(self):
+    def test_self_completion_uses_is_self_without_confirmation_marker(self):
         payload = self.captured_own_message()
-        payload["metadata"].pop("identity_confident")
         task_id = self.task()
         self.db.ingest(payload)
         result = self.run_model({0: [Instruction(action="RESOLVE", related_task_id=task_id)]})
-        self.assertEqual(result["resolved"], 0)
-        self.assertEqual(self.db.one("SELECT status,version FROM tasks WHERE id=?", (task_id,)), {"status": "pending", "version": 1})
+        self.assertEqual(result["resolved"], 1)
+        self.assertEqual(self.db.one("SELECT status,version FROM tasks WHERE id=?", (task_id,)), {"status": "completed", "version": 2})
 
     def test_all_real_sessions_are_drained_in_sequence(self):
         for original in self.fixture["messages"]:

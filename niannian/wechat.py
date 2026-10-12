@@ -48,27 +48,7 @@ def _sender(content: str) -> tuple[str, str]:
     return "", content
 
 
-def infer_self_ids(account: str, messages: list[dict]) -> set[int]:
-    """Resolve per-session numeric IDs using actual embedded origins, not stale indexes."""
-    ids: set[int] = set()
-    origins: dict[int, set[str]] = {}
-    for message in messages:
-        origin, _ = _sender(str(message.get("content") or ""))
-        if origin:
-            try:
-                origins.setdefault(int(message["sender_id"]), set()).add(origin)
-            except (ValueError, TypeError, KeyError):
-                pass
-    for numeric_id, names in origins.items():
-        if names == {account}:
-            ids.add(numeric_id)
-        else:
-            ids.discard(numeric_id)
-    return ids
-
-
-def normalize(account: str, username: str, message: dict,
-              self_sender_ids: set[int] | None = None) -> dict:
+def normalize(account: str, username: str, message: dict) -> dict:
     """Convert an actual source row without exposing attachment XML as content."""
     raw = str(message.get("content") or "")
     origin, content = _sender(raw)
@@ -77,14 +57,8 @@ def normalize(account: str, username: str, message: dict,
         sender_id_value = int(message.get("sender_id"))
     except (ValueError, TypeError):
         sender_id_value = None
-    self_ids = self_sender_ids if self_sender_ids is not None else set()
-    is_self = origin == account if origin else sender_id_value in self_ids
-    confident = bool(origin or sender_id_value in self_ids)
+    is_self = bool(sender and sender == account)
     source_sender = str(message.get("sender_username") or "")
-    conflict = bool(origin and ((source_sender and source_sender != origin) or
-                               (sender_id_value == 2 and origin != account)))
-    if is_self and source_sender and source_sender != account:
-        conflict = True
     group = username.endswith("@chatroom")
     if is_self:
         sender = account
@@ -102,10 +76,7 @@ def normalize(account: str, username: str, message: dict,
                 ("local_id", "server_id", "sort_seq", "type", "md5", "sender_id")}
     metadata.update({"sender_username": sender, "username": username})
     metadata.update({"source_sender_username": source_sender,
-                     "origin_sender_username": origin, "identity_conflict": conflict,
-                     "identity_confident": confident,
-                     "identity_source": "embedded_origin" if origin else
-                     "verified_sender_id" if sender_id_value in self_ids else "unverified_index"})
+                     "origin_sender_username": origin})
     if attachment:
         metadata["attachment"] = attachment
     server_id = message.get("server_id")
@@ -116,7 +87,7 @@ def normalize(account: str, username: str, message: dict,
     source = hashlib.sha256(json.dumps(identity, ensure_ascii=False).encode()).hexdigest()
     return {"session_id": session_id(account, username), "account": account,
             "sender_key": sender or f"unknown:{sender_id_value}", "sender_name": str(name),
-            "is_self": bool(is_self), "identity_confident": confident, "content": body[:19000],
+            "is_self": is_self, "content": body,
             "message_type": str(message.get("type") or "文本"),
             "created_at": datetime.fromtimestamp(int(message["create_time"]), timezone.utc).isoformat(),
             "source_id": f"wechat:{source}", "metadata": metadata}
@@ -208,7 +179,6 @@ class WechatWorker:
         self._wx = None
         self._media = None
         self._lock_handle = None
-        self._identities: dict[str, dict[str, list[str]]] = {}
         with self.db.connect() as conn:
             conn.execute("CREATE TABLE IF NOT EXISTS wechat_checkpoints("
                          "account TEXT NOT NULL,session_id TEXT NOT NULL,sort_seq INTEGER NOT NULL,"
@@ -380,16 +350,6 @@ class WechatWorker:
 
     def _store(self, item: dict, messages: list[dict], watermark: int) -> dict:
         account = self._state["account"]
-        identity_key = f"wechat_identity:{item['id']}"
-        observations = self._identities.setdefault(item["id"], self.db.runtime(identity_key, {}))
-        for raw in messages:
-            origin, _ = _sender(str(raw.get("content") or ""))
-            numeric_id = raw.get("sender_id")
-            if origin and numeric_id is not None:
-                values = observations.setdefault(str(numeric_id), [])
-                if origin not in values:
-                    values.append(origin)
-        self_ids = {int(key) for key, origins in observations.items() if origins == [account]}
         names = self._wx.nickname_map()
         payloads = []
         media_found = []
@@ -397,7 +357,7 @@ class WechatWorker:
             origin, _ = _sender(str(raw.get("content") or ""))
             sender = origin or raw.get("sender_username")
             payload = normalize(account, item["username"],
-                                {**raw, "session_name": item["name"], "sender_name": names.get(sender)}, self_ids)
+                                {**raw, "session_name": item["name"], "sender_name": names.get(sender)})
             if self._media:
                 try:
                     self._media.enrich(item["username"], payload)
@@ -418,6 +378,5 @@ class WechatWorker:
                 self.db.attach_media(media_found)
             except Exception:
                 log.warning("Media backfill temporarily unavailable")
-        self.db.set_runtime(identity_key, observations)
         self._update(imported=self._state["imported"] + int(result.get("inserted", 0)))
         return {**result, "read": len(messages), "checkpoint": checkpoint["sort_seq"]}

@@ -10,7 +10,7 @@ import pytest
 
 from niannian.media import TITLE_REQUEST, attachment_only, parse_attachment, safe_media_path, summarize
 from niannian.storage import Database
-from niannian.wechat import WechatWorker, _sender, acquire_instance_lock, infer_self_ids, normalize, session_id
+from niannian.wechat import WechatWorker, _sender, acquire_instance_lock, normalize, session_id
 
 
 @pytest.fixture(scope="module")
@@ -60,7 +60,6 @@ def test_real_self_messages_and_group_prefix(captured):
         payload = normalize(captured["account"], row["session_id"], row["raw"])
         assert payload["is_self"] and payload["sender_name"] == "我"
         assert payload["sender_key"] == captured["account"]
-        assert payload["metadata"]["identity_confident"]
     group = next(row for row in captured["messages"] if row["session_id"].endswith("@chatroom")
                  and _sender(row["raw"].get("content", ""))[0] and row["raw"]["type"] == "文本")
     origin, content = _sender(group["raw"]["content"])
@@ -73,17 +72,18 @@ def test_nonstandard_self_id_from_real_source(captured):
                   and row["raw"].get("sender_id") != 2]
     assert candidates
     for row in candidates:
-        assert row["raw"]["sender_id"] in infer_self_ids(captured["account"], [row["raw"]])
         assert normalize(captured["account"], row["session_id"], row["raw"])["is_self"]
 
 
-def test_numeric_self_has_no_unverified_default(captured):
-    assert infer_self_ids(captured["account"], []) == set()
-    rows = [row for row in captured["messages"] if row["raw"].get("sender_id") == 2
-            and not _sender(row["raw"].get("content", ""))[0]]
+def test_without_origin_uses_source_account(captured):
+    rows = [row for row in captured["messages"]
+            if not _sender(row["raw"].get("content", ""))[0]]
+    assert rows
     for row in rows:
         payload = normalize(captured["account"], row["session_id"], row["raw"])
-        assert not payload["is_self"] and not payload["metadata"]["identity_confident"]
+        sender = row["raw"].get("sender_username")
+        assert payload["is_self"] == bool(sender and sender == captured["account"])
+        assert payload["metadata"]["source_sender_username"] == (sender or "")
 
 
 def test_stale_index_cannot_override_actual_group_sender(captured):
@@ -94,10 +94,9 @@ def test_stale_index_cannot_override_actual_group_sender(captured):
     for row in rows:
         payload = normalize(captured["account"], row["session_id"], row["raw"])
         assert not payload["is_self"]
-        assert payload["metadata"]["identity_conflict"]
-        assert payload["metadata"]["identity_confident"]
-        if row["raw"].get("sender_id") == 2:
-            assert 2 not in infer_self_ids(captured["account"], [row["raw"]])
+        assert payload["sender_key"] == _sender(row["raw"].get("content", ""))[0]
+        for key in ("identity_confident", "identity_conflict", "identity_source"):
+            assert key not in payload and key not in payload["metadata"]
 
 
 def test_account_scopes_and_stable_source_identity(captured):
@@ -127,26 +126,6 @@ def test_real_history_replay_is_idempotent(worker):
     assert second["duplicates"] == count
     assert worker.db.one("SELECT COUNT(*) AS n FROM messages")["n"] == count
     assert worker._watermark(row["id"]) == first["checkpoint"]
-
-
-def test_verified_identity_evidence_survives_restart(worker, captured):
-    authoritative = next(row for row in captured["messages"] if
-                         not row["session_id"].endswith("@chatroom") and
-                         _sender(row["raw"].get("content", ""))[0] == captured["account"])
-    numeric_id = authoritative["raw"]["sender_id"]
-    item = worker.db.one("SELECT * FROM sessions WHERE username=?", (authoritative["session_id"],))
-    no_origin = next(raw for raw in worker._wx.groups[item["username"]] if
-                     raw.get("sender_id") == numeric_id and not _sender(raw.get("content", ""))[0])
-    worker._store(item, [authoritative["raw"]], 0)
-    restarted = WechatWorker(worker.db, {}, worker.root)
-    restarted._wx = worker._wx
-    restarted._state["account"] = captured["account"]
-    restarted._store(item, [no_origin], worker._watermark(item["id"]))
-    message = worker.db.one("SELECT * FROM messages WHERE source_id=?",
-                            (normalize(captured["account"], item["username"], no_origin)["source_id"],))
-    metadata = json.loads(message["metadata_json"])
-    assert message["is_self"] and metadata["identity_confident"]
-    assert metadata["identity_source"] == "verified_sender_id"
 
 
 def test_public_operations_use_one_source_thread(tmp_path, captured, monkeypatch):

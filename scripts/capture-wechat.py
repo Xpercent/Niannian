@@ -10,7 +10,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from niannian.config import ConfigStore, atomic_text
-from niannian.wechat import acquire_instance_lock, infer_self_ids, normalize, open_wechat, session_id
+from niannian.wechat import acquire_instance_lock, normalize, open_wechat, session_id
 
 
 def main():
@@ -32,14 +32,13 @@ def main():
             name = names.get(username) or username
             catalog.append({"id": session_id(account, username), "username": username, "name": name})
             messages = source.get_messages(username, limit=max(1, min(args.limit, 1000)))
-            own = infer_self_ids(account, messages)
             for message in reversed(messages):
                 raw.append({"session_id": username, "session_name": name, "raw": message})
-                normalized.append(normalize(account, username, {**message, "session_name": name}, own))
+                normalized.append(normalize(account, username, {**message, "session_name": name}))
         atomic_text(ROOT / "data" / "raw-wechat.json", json.dumps({"account": account, "captured_at": time.time(), "messages": raw}, ensure_ascii=False))
         atomic_text(ROOT / "data" / "initial-wechat.json", json.dumps({"account": account, "catalog": catalog, "messages": normalized}, ensure_ascii=False))
         print(json.dumps({"connected": True, "sessions": len(sessions), "actual_messages": len(raw),
-                          "verified_self": sum(m["is_self"] and m["identity_confident"] for m in normalized)}, ensure_ascii=False))
+                          "self_messages": sum(m["is_self"] for m in normalized)}, ensure_ascii=False))
     finally:
         lock.close()
 

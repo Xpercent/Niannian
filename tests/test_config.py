@@ -54,6 +54,33 @@ class ConfigTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 store.update(fields)
 
+    def test_task_output_limits_roundtrip_and_boundaries(self):
+        store = ConfigStore(self.root)
+        defaults = store.public()["defaults"]
+        self.assertEqual(defaults["task_title_max_chars"], 120)
+        self.assertEqual(defaults["max_tasks_per_message"], 0)
+        for fields in (
+            {"task_title_max_chars": 10, "max_tasks_per_message": 100},
+            {"task_title_max_chars": 120, "max_tasks_per_message": 0},
+        ):
+            public = store.update(fields)
+            fresh = ConfigStore(self.root)
+            for key, value in fields.items():
+                self.assertEqual(public[key], value)
+                self.assertEqual(fresh.read()[key], value)
+        prior = store.read()
+        for fields in (
+            {"task_title_max_chars": 9},
+            {"task_title_max_chars": 121},
+            {"max_tasks_per_message": -1},
+            {"max_tasks_per_message": 101},
+            {"max_tasks_per_message": "3"},
+        ):
+            with self.assertRaises(ValueError):
+                store.update(fields)
+        self.assertEqual(store.read(), prior)
+        self.assertEqual(ConfigStore(self.root).read(), prior)
+
     def test_broken_file_preserved_until_explicit_save(self):
         path = self.root / "config.json"
         path.write_text("{invalid", encoding="utf-8")
