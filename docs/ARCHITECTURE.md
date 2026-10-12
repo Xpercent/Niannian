@@ -48,6 +48,8 @@ CREATE 精确或保守语义去重；语义合并只接受同动作族、完整�
 
 每段指令与消息 processed 标记在同一事务内落库。用户编辑的 version 发生变化会阻止旧模型指令覆盖；同批 CREATE 可以明确引用已提交的新任务。取消在批次与段边界检查，未处理部分继续排队。runs 持久化进度，重启标记中断轮次可重试。
 
+每次模型请求另外写入 `model_calls` 诊断表：完整请求体（系统指令 + user JSON）、模型原样回复、解析结果、finish_reason、usage、耗时、错误类型、段落来源ID、上下文预算实际占用，以及结构校验后与业务校验后的指令对照。它是只读旁路：写入失败只记日志，不回滚提炼事务、不改变 processed 与任务结果；请求体不含密钥与接口地址（`enable_thinking=false` 现在直接写在 payload 里，记录即发出内容，不再由 `_post` 偷偷补字段）。诊断行按 `MODEL_CALL_KEEP` 保留最近 1200 次，超限删除最旧的诊断行，不触碰消息、任务、事件与水位。落库结果不重复记录，由 `task_events`、`ignored_messages` 与来源消息ID关联还原。
+
 ## 查询、维护与拓展
 
 消息时间在摄入时规范为 UTC，游标使用会话、时间、ID 组合，防止乱序插入导致漏页。每个连接开启外键与 busy_timeout；SQLite WAL 允许读取与短写入并存。任务手动更新使用乐观版本，事件保留 before/after。备份使用 SQLite backup API 并校验完整性，导出在同一读取快照中完成。
@@ -56,6 +58,6 @@ API 层只校验与协调，不维护业务全局。前端使用 Vite、React、
 
 前端源码在 `niannian/web/src/`：`app.tsx` 管理导航、真实概览与单轮进度；`pages/` 按业务模块拆分；`components/ui/` 为本地 shadcn/ui 组件源码，`components/task-drawer.tsx` 负责详情、来源和带 version 的更新，`lib/` 放类型与请求/日期/附件路径工具。样式以 Tailwind 为主，`src/styles.css` 只保留亮色主题与基础规则。图表依赖按构建配置分块，修改后运行 `npm run build`，FastAPI 服务 `web/dist`，不服务 TS 源文件。未构建时首页明确返回 503。
 
-依照同次用户要求移除了命令面板和全部应用自定义键盘快捷操作；保留浏览器标准控件与 shadcn/ui 弹层的基本焦点行为。统计图来自真实 overview 或 /api/metrics，未补造趋势或演示数据。开发服务器仅监听 127.0.0.1，API/media 请求代理至原有 8765 服务，不启动第二套采集/提炼通道。
+依照同次用户要求移除了命令面板和全部应用自定义键盘快捷操作；保留浏览器标准控件与 shadcn/ui 弹层的基本焦点行为。诊断台数据来自真实 `runs`、`model_calls`、`task_events`、`ignored_messages` 与消息队列，未补造趋势或演示数据；`/api/metrics` 仍提供轮次汇总。开发服务器仅监听 127.0.0.1，API/media 请求代理至原有 8765 服务，不启动第二套采集/提炼通道。
 
-当前 schema 为 v1。未来新增结构应添加顺序迁移，不能修改已有 v1 定义后宣称历史数据库已升级。可在独立适配器中增加 OCR/转写，保持原始消息不可变，并让提炼输入明确区分机器识别文本与真实原文；可替换 LLMExtractor 或仓储，避免把服务商耦合带入业务引擎。
+当前 schema 为 v2。SCHEMA 文本只描述 v1 基线，之后的结构变化写在 `storage.MIGRATIONS` 里按版本顺序执行并登记 `schema_version`；v2 只新增 `model_calls` 表与索引，不修改任何 v1 定义。旧库在 `Database.init()` 时自动补上，不需要删库重建；备份与恢复仍按下一节流程。可在独立适配器中增加 OCR/转写，保持原始消息不可变，并让提炼输入明确区分机器识别文本与真实原文；可替换 LLMExtractor 或仓储，避免把服务商耦合带入业务引擎。

@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import re
+import sqlite3
 from collections import defaultdict, deque
 from datetime import datetime, timedelta, timezone
 from threading import Lock
@@ -16,6 +18,7 @@ from .llm import (Instruction, LLMExtractor, HISTORY_CHARS, HISTORY_ROWS, MAX_TO
 from .media import attachment_only
 from .storage import canonical_time, utc_now
 
+log = logging.getLogger(__name__)
 SHANGHAI = timezone(timedelta(hours=8))
 BATCH_CHAR_BUDGET = 4200
 IGNORED_KEEP_PER_SESSION = 100
@@ -36,6 +39,35 @@ def identity_confident(message: dict[str, Any]) -> bool:
         except (TypeError, ValueError):
             metadata = {}
     return isinstance(metadata, dict) and metadata.get("identity_confident") is True
+
+
+class ModelCallTrace:
+    """把每次模型请求与响应写进诊断表；诊断写入失败不能影响真实提炼。"""
+
+    def __init__(self, db, run_id: str | None = None):
+        self.db, self.run_id = db, run_id
+        self.session_id = ""
+        self.message_ids: list[int] = []
+
+    def begin(self, session_id, message_ids) -> None:
+        """标记接下来这次请求负责的会话与段落来源。"""
+        self.session_id, self.message_ids = session_id, list(message_ids)
+
+    def record(self, call: dict) -> int | None:
+        try:
+            return self.db.log_model_call({**call, "run_id": self.run_id, "session_id": self.session_id,
+                                           "message_ids": self.message_ids})
+        except sqlite3.Error:
+            log.warning("模型调用诊断写入失败，本轮提炼继续", exc_info=True)
+            return None
+
+    def outcome(self, call_id: int | None, outcome: dict, counters: dict) -> None:
+        if call_id is None:
+            return
+        try:
+            self.db.record_model_call_outcome(call_id, outcome, counters)
+        except sqlite3.Error:
+            log.warning("模型校验对照写入失败，本轮提炼继续", exc_info=True)
 
 
 class Engine:
@@ -328,12 +360,13 @@ class Engine:
                 return None
         return {**item, "model_content": summary}
 
-    def process(self, force=False, progress=None, should_stop=None, session_id=None):
+    def process(self, force=False, progress=None, should_stop=None, session_id=None, run_id=None):
         with self.lock:
             values = self._settings()
             batch_budget = values.get("batch_char_budget", BATCH_CHAR_BUDGET)
             new_chars = values.get("new_message_chars", NEW_MESSAGE_CHARS)
             ignored_keep = values.get("ignored_keep_per_session", IGNORED_KEEP_PER_SESSION)
+            trace = ModelCallTrace(self.db, run_id)
             extractor = LLMExtractor(values.get("ai_base_url", ""), values.get("ai_api_key", ""),
                                      values.get("ai_model", ""), timeout=values.get("ai_timeout_seconds", 25),
                                      enabled=values.get("ai_enabled", False),
@@ -343,7 +376,7 @@ class Engine:
                                      new_message_chars=values.get("new_message_chars", NEW_MESSAGE_CHARS),
                                      history_chars=values.get("history_chars", HISTORY_CHARS),
                                      history_rows=values.get("history_rows", HISTORY_ROWS),
-                                     task_chars=values.get("task_chars", TASK_CHARS))
+                                     task_chars=values.get("task_chars", TASK_CHARS), trace=trace)
             self.llm = extractor
             profile = self.profile.read() if self.profile else ""
             rules = self.db.rows("SELECT * FROM rules WHERE enabled=1 ORDER BY id")
@@ -389,6 +422,8 @@ class Engine:
                     for item in chunk:
                         if should_stop and should_stop():
                             break
+                        # 压缩请求只针对当前段落，诊断按段落归属方便回查原文。
+                        trace.begin(scope[1], item["message_ids"])
                         compressed = self._compressed_item(item, extractor, values)
                         if compressed is None:
                             break
@@ -415,11 +450,13 @@ class Engine:
                     # the whole chunk; trivial decisions still apply locally below.
                     if len(eligible) == 1:
                         index = eligible[0]
+                        trace.begin(scope[1], prepared[index]["message_ids"])
                         answer = extractor.extract(prepared[index], self._history(chunk[index]), pending, profile,
                                                    session["name"] if session else "")
                         if answer is not None:
                             answers[index] = answer
                     else:
+                        trace.begin(scope[1], [message_id for entry in prepared for message_id in entry["message_ids"]])
                         answers = extractor.extract_batch(prepared, self._history(chunk[0]), pending, profile,
                                                           session["name"] if session else "")
                         counts["batches"] += 1

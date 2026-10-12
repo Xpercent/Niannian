@@ -14,6 +14,10 @@ SHANGHAI = timezone(timedelta(hours=8))
 
 # 轮次快照按时间倒序取最近这些；调度间隔下足够覆盖数周，再多也不至于拖慢页面。
 RUN_SCAN_LIMIT = 1000
+# 一次模型调用的完整请求与响应都入库，只保留最近这些条；上限防止本机库无限增长。
+MODEL_CALL_KEEP = 1200
+# 异常聚合里逐条解析校验对照的记录数上限。
+GUARD_SCAN_LIMIT = 300
 # Engine.process 的返回值就是指标来源，字段缺失按 0 计（旧快照没有 merged 等键）。
 ROUND_RESULT_FIELDS = ("items", "processed", "created", "updated", "resolved", "merged", "ignored",
                        "skipped", "cancelled", "pre_filtered", "llm_decided", "rule_decided",
@@ -106,6 +110,33 @@ CREATE TABLE IF NOT EXISTS runs (
 );
 """
 
+# 结构变化按版本顺序执行；SCHEMA 只描述 v1 基线，新增表走这里的迁移。
+MIGRATIONS = (
+    (2, """
+CREATE TABLE IF NOT EXISTS model_calls (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, run_id TEXT REFERENCES runs(id) ON DELETE CASCADE,
+    kind TEXT NOT NULL, session_id TEXT NOT NULL DEFAULT '', message_ids TEXT NOT NULL DEFAULT '[]',
+    segments INTEGER NOT NULL DEFAULT 0, status TEXT NOT NULL,
+    error TEXT, error_detail TEXT, started_at TEXT NOT NULL, duration_seconds REAL NOT NULL DEFAULT 0,
+    model TEXT NOT NULL DEFAULT '', temperature REAL, max_tokens INTEGER, finish_reason TEXT,
+    request_json TEXT NOT NULL DEFAULT '', response_text TEXT, parsed_json TEXT,
+    usage_json TEXT, stats_json TEXT NOT NULL DEFAULT '{}', outcome_json TEXT,
+    input_chars INTEGER NOT NULL DEFAULT 0, output_chars INTEGER NOT NULL DEFAULT 0,
+    answered_items INTEGER NOT NULL DEFAULT 0, missing_items INTEGER NOT NULL DEFAULT 0,
+    rejected_items INTEGER NOT NULL DEFAULT 0, guard_changes INTEGER NOT NULL DEFAULT 0,
+    CHECK(kind IN ('compress','single','batch')), CHECK(status IN ('ok','error'))
+);
+CREATE INDEX IF NOT EXISTS idx_model_call_run ON model_calls(run_id,id);
+CREATE INDEX IF NOT EXISTS idx_model_call_started ON model_calls(started_at,id);
+CREATE INDEX IF NOT EXISTS idx_model_call_session ON model_calls(session_id,id);
+"""),
+)
+
+MODEL_CALL_COLUMNS = ("run_id", "kind", "session_id", "message_ids", "segments", "status", "error",
+                      "error_detail", "started_at", "duration_seconds", "model", "temperature",
+                      "max_tokens", "finish_reason", "request_json", "response_text", "parsed_json",
+                      "usage_json", "stats_json", "input_chars", "output_chars")
+
 
 class ConflictError(Exception):
     pass
@@ -136,6 +167,12 @@ class Database:
             conn.execute("PRAGMA journal_mode=WAL")
             conn.executescript(SCHEMA)
             conn.execute("INSERT OR IGNORE INTO schema_version VALUES(1,?)", (utc_now(),))
+            current = conn.execute("SELECT MAX(version) AS version FROM schema_version").fetchone()["version"] or 1
+            for version, script in MIGRATIONS:
+                if version <= current:
+                    continue
+                conn.executescript(script)
+                conn.execute("INSERT INTO schema_version VALUES(?,?)", (version, utc_now()))
             if not conn.execute("SELECT 1 FROM app_settings WHERE key='rules_initialized'").fetchone():
                 conn.executemany("INSERT INTO rules(name,description,pattern,action,created_at) VALUES(?,?,?,?,?)", [
                     ("明确请求", "本地降级时识别行动请求", r"请|麻烦|帮我|需要|给我|补齐|提交|确认|检查|整理", "extract_task", utc_now()),
@@ -467,6 +504,220 @@ class Database:
         ordered = sorted(values)
         index = max(0, min(len(ordered) - 1, math.ceil(fraction * len(ordered)) - 1))
         return ordered[index]
+
+    def log_model_call(self, record: dict) -> int:
+        """写一次模型调用的完整请求与响应；超出保留量后删最旧的诊断行。"""
+        values = {"run_id": None, "kind": "single", "session_id": "", "message_ids": [], "segments": 0,
+                  "status": "error", "error": None, "error_detail": None, "started_at": utc_now(),
+                  "duration_seconds": 0.0, "model": "", "temperature": None, "max_tokens": None,
+                  "finish_reason": None, "request_json": "", "response_text": None, "parsed_json": None,
+                  "usage_json": None, "stats_json": {}, "outcome_json": None, "input_chars": 0,
+                  "output_chars": 0, **record}
+        values["message_ids"] = json.dumps(values["message_ids"], ensure_ascii=False)
+        for key in ("request_json", "parsed_json", "usage_json", "stats_json"):
+            value = values.get(key)
+            if value is not None and not isinstance(value, str):
+                values[key] = json.dumps(value, ensure_ascii=False)
+        for key in ("segments", "input_chars", "output_chars"):
+            values[key] = int(values[key] or 0)
+        values["duration_seconds"] = float(values["duration_seconds"] or 0)
+        with self.connect() as conn:
+            cur = conn.execute("INSERT INTO model_calls(" + ",".join(MODEL_CALL_COLUMNS) + ") VALUES(" +
+                               ",".join("?" for _ in MODEL_CALL_COLUMNS) + ")",
+                               tuple(values.get(key) for key in MODEL_CALL_COLUMNS))
+            conn.execute("DELETE FROM model_calls WHERE id NOT IN "
+                         "(SELECT id FROM model_calls ORDER BY id DESC LIMIT ?)", (MODEL_CALL_KEEP,))
+            return cur.lastrowid
+
+    def record_model_call_outcome(self, call_id: int, outcome: dict, counters: dict) -> None:
+        self.execute("UPDATE model_calls SET outcome_json=?, answered_items=?, missing_items=?,"
+                     "rejected_items=?, guard_changes=? WHERE id=?",
+                     (json.dumps(outcome, ensure_ascii=False), int(counters.get("answered", 0)),
+                      int(counters.get("missing", 0)), int(counters.get("rejected", 0)),
+                      int(counters.get("guard", 0)), call_id))
+
+    def model_call_rows(self, run_id="", session_id="", kind="", status="", q="", message_id=None,
+                        days=30, limit=80, offset=0, truncated=False, guarded=False) -> list[dict]:
+        clauses, params = [], []
+        cutoff = datetime.now(timezone.utc) - timedelta(days=days) if days else None
+        if cutoff:
+            clauses.append("c.started_at>=?")
+            params.append(cutoff.isoformat(timespec="microseconds"))
+        for key, value in (("run_id", run_id), ("session_id", session_id), ("kind", kind), ("status", status)):
+            if value:
+                clauses.append(f"c.{key}=?")
+                params.append(value)
+        if message_id is not None:
+            clauses.append("EXISTS(SELECT 1 FROM json_each(c.message_ids) j WHERE j.value=?)")
+            params.append(message_id)
+        if truncated:
+            clauses.append("c.finish_reason='length'")
+        if guarded:
+            clauses.append("c.guard_changes>0")
+        if q:
+            escaped = q.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            clauses.append("(c.request_json LIKE ? ESCAPE '\\' OR c.response_text LIKE ? ESCAPE '\\' "
+                           "OR c.outcome_json LIKE ? ESCAPE '\\')")
+            params.extend(["%" + escaped + "%"] * 3)
+        where = " WHERE " + " AND ".join(clauses) if clauses else ""
+        rows = self.rows("SELECT c.id,c.run_id,c.kind,c.session_id,c.message_ids,c.segments,c.status,c.error,"
+                         "c.error_detail,c.started_at,c.duration_seconds,c.model,c.max_tokens,c.finish_reason,"
+                         "c.input_chars,c.output_chars,c.answered_items,c.missing_items,c.rejected_items,"
+                         "c.guard_changes,c.stats_json,s.name session_name FROM model_calls c "
+                         "LEFT JOIN sessions s ON s.id=c.session_id" + where + " ORDER BY c.id DESC LIMIT ? OFFSET ?",
+                         (*params, limit, offset))
+        for row in rows:
+            row["message_ids"] = json.loads(row["message_ids"])
+            row["stats_json"] = json.loads(row["stats_json"] or "{}")
+            row["session_name"] = row["session_name"] or row["session_id"]
+        return rows
+
+    def model_call_detail(self, call_id: int) -> dict | None:
+        row = self.one("SELECT * FROM model_calls WHERE id=?", (call_id,))
+        if not row:
+            return None
+        for key in ("request_json", "parsed_json", "usage_json", "stats_json", "outcome_json"):
+            row[key] = json.loads(row[key]) if row[key] else None
+        row["message_ids"] = json.loads(row["message_ids"])
+        session = self.one("SELECT id,name,monitored FROM sessions WHERE id=?", (row["session_id"],))
+        row["session_name"] = session["name"] if session else row["session_id"]
+        rows = self._message_slice(row["message_ids"])
+        row["messages"] = rows
+        # 摘要缓存挂在段落末条，代表整段压缩结果而不是那一条消息。
+        row["segment_summary"] = rows[-1]["summary"] if rows else None
+        marks = ",".join("?" for _ in row["message_ids"])
+        related = ("EXISTS(SELECT 1 FROM json_each({table}.message_ids) j WHERE j.value IN (" + marks + "))"
+                   if row["message_ids"] else "0")
+        row["events"] = self.rows("SELECT e.*,t.title,t.status task_status FROM task_events e "
+                                  "LEFT JOIN tasks t ON t.id=e.task_id WHERE e.source!='manual' AND " +
+                                  related.format(table="e"), tuple(row["message_ids"]))
+        row["ignored"] = self.rows("SELECT * FROM ignored_messages WHERE " +
+                                   related.format(table="ignored_messages"), tuple(row["message_ids"]))
+        for item in row["events"] + row["ignored"]:
+            item["message_ids"] = json.loads(item["message_ids"])
+            if "detail_json" in item:
+                item["detail"] = json.loads(item["detail_json"] or "{}")
+                item.pop("detail_json")
+        return row
+
+    def _message_slice(self, ids: list[int]) -> list[dict]:
+        if not ids:
+            return []
+        marks = ",".join("?" for _ in ids)
+        rows = self.rows("SELECT id,session_id,sender_name,content,created_at,processed,is_self,"
+                         "json_extract(metadata_json,'$.text_compression.summary') summary "
+                         f"FROM messages WHERE id IN ({marks}) ORDER BY created_at,id", tuple(ids))
+        for row in rows:
+            row["is_self"] = bool(row["is_self"])
+            row["processed"] = bool(row["processed"])
+        return rows
+
+    def model_call_counts(self, run_ids: list[str]) -> dict[str, dict]:
+        if not run_ids:
+            return {}
+        marks = ",".join("?" for _ in run_ids)
+        rows = self.rows("SELECT run_id,COUNT(*) calls,SUM(status='error') failures,"
+                         "SUM(kind='compress') compress_calls,SUM(kind='batch') batch_calls,"
+                         "SUM(kind='single') single_calls,SUM(finish_reason='length') truncated,"
+                         "SUM(guard_changes>0) guarded_calls,SUM(answered_items) answered,"
+                         "SUM(missing_items) missing,SUM(rejected_items) rejected,"
+                         "ROUND(SUM(duration_seconds),2) seconds,MIN(started_at) first_at,MAX(started_at) last_at "
+                         f"FROM model_calls WHERE run_id IN ({marks}) GROUP BY run_id", tuple(run_ids))
+        return {row["run_id"]: row for row in rows}
+
+    def model_call_issues(self, days: int = 30) -> dict:
+        """按失败类型、索引缺口与校验拦截归类；只统计已落库的真实记录。"""
+        cutoff = datetime.now(timezone.utc) - timedelta(days=days) if days else None
+        filters, params = ([], [])
+        if cutoff:
+            filters.append("started_at>=?")
+            params.append(cutoff.isoformat(timespec="microseconds"))
+        where = (" WHERE " + " AND ".join(filters)) if filters else ""
+        buckets: dict[tuple[str, str], dict] = {}
+
+        def add(kind: str, value: str, row: dict):
+            bucket = buckets.setdefault((kind, value), {"type": kind, "value": value, "count": 0,
+                                                        "last_at": None, "last_call_id": None})
+            bucket["count"] += 1
+            if (row["started_at"] or "") >= (bucket["last_at"] or ""):
+                bucket["last_at"], bucket["last_call_id"] = row["started_at"], row["id"]
+
+        for row in self.rows("SELECT id,kind,status,error,finish_reason,segments,started_at,"
+                             "missing_items,rejected_items,guard_changes FROM model_calls" + where, params):
+            if row["status"] == "error":
+                add("request_error", row["error"] or "Unknown", row)
+            if row["finish_reason"] == "length":
+                add("output_truncated", row["kind"], row)
+            if row["missing_items"]:
+                add("index_missing", row["kind"], row)
+            if row["rejected_items"]:
+                add("instruction_rejected", row["kind"], row)
+        reasons: dict[str, dict] = {}
+        guard_where = " WHERE " + " AND ".join([*filters, "guard_changes>0"])
+        guarded = self.rows("SELECT id,session_id,started_at,outcome_json FROM model_calls" + guard_where +
+                            " ORDER BY id DESC LIMIT ?", (*params, GUARD_SCAN_LIMIT))
+        for row in guarded:
+            outcome = json.loads(row["outcome_json"] or "{}")
+            for item in outcome.get("items", []):
+                proposed, final = item.get("proposed") or [], item.get("final") or []
+                if proposed == final or not any(command.get("action") != "IGNORE" for command in proposed):
+                    continue
+                # 只统计“模型想建单/改单，被业务校验改成无需行动”的改写原因。
+                for command in final:
+                    if command.get("action") != "IGNORE":
+                        continue
+                    reason = (command.get("context_summary") or "未标注原因").strip()[:200]
+                    bucket = reasons.setdefault(reason, {"reason": reason, "count": 0,
+                                                          "last_at": None, "last_call_id": row["id"]})
+                    bucket["count"] += 1
+                    if (row["started_at"] or "") >= (bucket["last_at"] or ""):
+                        bucket["last_at"], bucket["last_call_id"] = row["started_at"], row["id"]
+        return {"buckets": sorted(buckets.values(), key=lambda item: (-item["count"], item["type"])),
+                "guard_reasons": sorted(reasons.values(), key=lambda item: -item["count"]),
+                "guard_scanned": len(guarded)}
+
+    def model_call_retention(self) -> dict:
+        row = self.one("SELECT COUNT(*) stored,MIN(started_at) oldest_at FROM model_calls")
+        return {"keep": MODEL_CALL_KEEP, "stored": row["stored"] or 0, "oldest_at": row["oldest_at"]}
+
+    def backlog(self, limit: int = 80) -> dict:
+        """未处理的真实消息与被模型触及的情况，用来定位一直留在队列里的段落。"""
+        sessions = self.rows("SELECT m.session_id,s.name session_name,s.last_message_at,COUNT(*) messages,"
+                             "MIN(m.created_at) oldest,MAX(m.created_at) newest "
+                             "FROM messages m JOIN sessions s ON s.id=m.session_id "
+                             "WHERE m.processed=0 AND s.monitored=1 GROUP BY m.session_id ORDER BY oldest")
+        touched = {row["message_id"]: row for row in self.rows(
+            "SELECT j.value message_id,COUNT(*) calls,SUM(c.status='error') failures,"
+            "MAX(c.started_at) last_at FROM model_calls c, json_each(c.message_ids) j "
+            "WHERE c.kind IN ('single','batch') GROUP BY j.value")}
+        rows = self.rows("SELECT m.id,m.session_id,s.name session_name,m.sender_name,m.created_at,"
+                         "substr(m.content,1,200) content,m.processed "
+                         "FROM messages m JOIN sessions s ON s.id=m.session_id "
+                         "WHERE m.processed=0 AND s.monitored=1 ORDER BY m.created_at,m.id LIMIT ?", (limit,))
+        for row in rows:
+            info = touched.get(row["id"]) or {}
+            row["calls"] = info.get("calls") or 0
+            row["failures"] = info.get("failures") or 0
+            row["last_call_at"] = info.get("last_at")
+        return {"sessions": sessions, "messages": rows, "touched": len(touched)}
+
+    def run_records(self, since: str, until: str | None = None) -> dict:
+        """一轮里真正落地的变更与判定为无需行动的段落，按轮次时间窗取。"""
+        clauses, params = ["created_at>=?"], [since]
+        if until:
+            clauses.append("created_at<=?")
+            params.append(until)
+        where = " WHERE " + " AND ".join(clauses)
+        events = self.rows("SELECT task_id,action,source,message_ids,created_at,detail_json FROM task_events" +
+                           where + " ORDER BY id", tuple(params))
+        ignored = self.rows("SELECT id,session_id,message_ids,source,reason,created_at FROM ignored_messages" +
+                            where + " ORDER BY id", tuple(params))
+        for item in events + ignored:
+            item["message_ids"] = json.loads(item["message_ids"])
+        for item in events:
+            item["detail"] = json.loads(item["detail_json"] or "{}")
+            item.pop("detail_json")
+        return {"events": events, "ignored": ignored}
 
     def backup(self, label: str = "manual") -> dict:
         directory = self.path.parent / "backups"

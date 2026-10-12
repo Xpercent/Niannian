@@ -93,6 +93,17 @@ export const statusNames: Record<string, string> = {
   completed: "已完成",
   cancelled: "已忽略",
 };
+export const secondsText = (value: number | null | undefined) => {
+  if (value === null || value === undefined || Number.isNaN(value)) return "—";
+  if (value < 1) return `${Math.round(value * 1000)} 毫秒`;
+  if (value < 60) return `${value.toFixed(2)} 秒`;
+  return `${Math.floor(value / 60)} 分 ${Math.round(value % 60)} 秒`;
+};
+export const percentText = (value: number | null | undefined) => {
+  if (value === null || value === undefined) return "—";
+  const percent = value * 100;
+  return `${percent >= 10 ? Math.round(percent) : percent.toFixed(1)}%`;
+};
 export const priorityNames: Record<string, string> = {
   high: "高",
   medium: "普通",

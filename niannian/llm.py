@@ -189,17 +189,31 @@ def _brief(message: dict[str, Any]) -> dict[str, Any]:
             "identity_confident": message.get("identity_confident", metadata.get("identity_confident", False)) is True}
 
 
+def _item(index, message, raw, proposed, final, *, summary=None, note=None) -> dict[str, Any]:
+    """诊断对照条目：模型原样返回、结构校验后、业务校验后三份一起留档。"""
+    def dump(commands):
+        return None if commands is None else [command.model_dump() for command in commands]
+    ids = message.get("message_ids") or ([message["id"]] if message.get("id") else [])
+    return {"index": index, "message_ids": list(ids), "raw": raw, "proposed": dump(proposed),
+            "final": dump(final), "summary": summary, "note": note,
+            "rejected": proposed is None and final is None and summary is None and note is None}
+
+
 class LLMExtractor:
     def __init__(self, base_url: str, api_key: str, model: str, timeout: float = 25, enabled: bool = True,
                  temperature: float = TEMPERATURE, max_tokens_single: int = MAX_TOKENS_SINGLE,
                  max_tokens_batch: int = MAX_TOKENS_BATCH,
                  new_message_chars: int = NEW_MESSAGE_CHARS, history_chars: int = HISTORY_CHARS,
-                 history_rows: int = HISTORY_ROWS, task_chars: int = TASK_CHARS):
+                 history_rows: int = HISTORY_ROWS, task_chars: int = TASK_CHARS, trace=None):
         self.timeout = timeout
         self.enabled = bool(enabled and base_url and api_key)
         self.last_error: str | None = None
         self.stats = {"requests": 0, "failures": 0, "seconds": 0.0}
         self.last_diagnostics = {}
+        # 诊断记录器；引擎注入，写入失败不回滚提炼事务，见 engine.ModelCallTrace。
+        self.trace = trace
+        self.last_call_id: int | None = None
+        self.last_payload_stats: dict[str, Any] = {}
         # 请求参数由设置页可调；enable_thinking 始终固定为关闭。
         self.temperature, self.max_tokens_single, self.max_tokens_batch = temperature, max_tokens_single, max_tokens_batch
         self.budgets = {"new_message": new_message_chars, "history": history_chars, "rows": history_rows,
@@ -212,7 +226,6 @@ class LLMExtractor:
         self.api_key, self.model = api_key, model
 
     def _post(self, payload: dict[str, Any]):
-        payload["enable_thinking"] = False
         request = Request(self.endpoint, data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
                           headers={"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"},
                           method="POST")
@@ -220,7 +233,7 @@ class LLMExtractor:
 
     def probe(self) -> str | None:
         try:
-            with self._post({"model": self.model, "temperature": 0, "max_tokens": 12,
+            with self._post({"model": self.model, "temperature": 0, "max_tokens": 12, "enable_thinking": False,
                              "messages": [{"role": "user", "content": "ping"}]}) as response:
                 body = json.load(response)
             if not body.get("choices"):
@@ -232,9 +245,10 @@ class LLMExtractor:
     def compress(self, message: dict[str, Any]) -> str | None:
         """Never clip the source before summarizing, or accept a clipped summary."""
         budget = self.budgets["new_message"]
+        self.last_payload_stats = {"source_chars": len(message["content"]), "summary_budget": budget}
         result = self._complete(
             {"source_text": message["content"], "max_summary_chars": budget,
-             "context_available": False}, False, policy=COMPRESSION_POLICY,
+             "context_available": False}, False, kind="compress", policy=COMPRESSION_POLICY,
             max_tokens=min(16000, max(1200, budget * 3)), require_finished=True)
         summary = result.get("summary") if result else None
         if (not result or result.get("complete") is not True or not isinstance(summary, str)
@@ -242,45 +256,81 @@ class LLMExtractor:
             if result is not None:
                 self.stats["failures"] += 1
             self.last_error = "CompressionRejected"
+            self._trace_outcome([_item(0, message, result, None, None, note="压缩输出未通过完整性校验")])
             return None
+        self._trace_outcome([_item(0, message, result, None, None, summary=summary)])
         return summary
 
-    def _complete(self, data: dict[str, Any], batch: bool, *, policy=None,
+    def _complete(self, data: dict[str, Any], batch: bool, *, kind: str, policy=None,
                   max_tokens=None, require_finished=False) -> Any:
         shape = ('输出 {"items":[{"index":0,"instructions":[{"action":"IGNORE"}]},'
                  '{"index":1,"instructions":[{"action":"CREATE","title":"动作+具体对象","description":"简短要求"}]}]}。'
                  f'必须覆盖索引0到{len(data.get("new_messages", []))-1}，不省略任何消息。'
                  if batch else '输出 {"instructions":[{"action":"IGNORE"}]} 或 {"instructions":[{"action":"CREATE","title":"动作+具体对象","description":"简短要求"}]}。')
+        system = policy if policy is not None else POLICY + (
+            "\n正文可能是压缩总结。总结中标明的上下文缺失与不确定不得自行补全；"
+            "只有给定同会话历史明确提供依据时才可消解指代，不猜角色、期限或意愿。\n" + shape)
+        user = json.dumps(data, ensure_ascii=False)
         payload = {"model": self.model, "temperature": self.temperature,
                    "max_tokens": max_tokens if max_tokens is not None else (self.max_tokens_batch if batch else self.max_tokens_single),
                    "response_format": {"type": "json_object"},
-                   "messages": [{"role": "system", "content": policy if policy is not None else POLICY +
-                                 "\n正文可能是压缩总结。总结中标明的上下文缺失与不确定不得自行补全；"
-                                 "只有给定同会话历史明确提供依据时才可消解指代，不猜角色、期限或意愿。\n" + shape},
-                                {"role": "user", "content": json.dumps(data, ensure_ascii=False)}]}
+                   # 诊断记录的就是发出去的字节，思考开关在这里落实而不是请求前偷偷改写。
+                   "enable_thinking": False,
+                   "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}]}
         started = time.perf_counter()
         self.stats["requests"] += 1
+        record = {"kind": kind, "model": self.model, "temperature": self.temperature,
+                  "max_tokens": payload["max_tokens"], "segments": len(data.get("new_messages") or [data.get("new_message") or {}]),
+                  "request_json": json.dumps(payload, ensure_ascii=False), "input_chars": len(system) + len(user),
+                  "stats_json": {**self.last_payload_stats,
+                                 "segment_chars": [len(item.get("content") or "")
+                                                   for item in (data.get("new_messages") or [data.get("new_message") or {}])],
+                                 "compressed_segments": [bool(item.get("content_is_summary"))
+                                                         for item in (data.get("new_messages") or [data.get("new_message") or {}])],
+                                 "system_chars": len(system), "payload_chars": len(user)}}
+        parsed = None
         try:
             with self._post(payload) as response:
                 body = json.load(response)
-            if require_finished and body["choices"][0].get("finish_reason") != "stop":
-                raise ValueError("Incomplete compression response")
-            raw = body["choices"][0]["message"]["content"]
+            choice = body["choices"][0]
+            record["finish_reason"] = choice.get("finish_reason")
+            record["usage_json"] = body.get("usage")
+            raw = choice["message"]["content"]
             if not isinstance(raw, str):
                 raise ValueError("Model returned no text content")
-            raw = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw.strip())
-            parsed = json.loads(raw)
+            record["response_text"] = raw
+            record["output_chars"] = len(raw)
+            if require_finished and record["finish_reason"] != "stop":
+                raise ValueError("Incomplete compression response")
+            parsed = json.loads(re.sub(r"^```(?:json)?\s*|\s*```$", "", raw.strip()))
             if not isinstance(parsed, dict):
                 raise ValueError("Expected a JSON object")
             self.last_error = None
+            record["parsed_json"] = parsed
+            record["status"] = "ok"
             return parsed
         except (OSError, ValueError, KeyError, IndexError, TypeError) as exc:
             self.stats["failures"] += 1
             self.last_error = type(exc).__name__
+            record["error"] = type(exc).__name__
+            record["error_detail"] = str(exc)[:500]
             log.warning("模型请求失败：%s", self.last_error)
             return None
         finally:
             self.stats["seconds"] += time.perf_counter() - started
+            record["duration_seconds"] = round(time.perf_counter() - started, 3)
+            record["parsed_json"] = parsed
+            self.last_call_id = self.trace.record(record) if self.trace else None
+
+    def _trace_outcome(self, items: list[dict[str, Any]], diagnostics: dict[str, Any] | None = None) -> None:
+        if not self.trace or self.last_call_id is None:
+            return
+        answered = sum(1 for item in items if item.get("final") is not None or item.get("summary"))
+        guard = sum(1 for item in items if item.get("proposed") != item.get("final") and item.get("final") is not None)
+        self.trace.outcome(self.last_call_id, {"items": items, "diagnostics": diagnostics or self.last_diagnostics},
+                           {"answered": answered, "guard": guard,
+                            "rejected": sum(1 for item in items if item.get("rejected")),
+                            "missing": len(diagnostics.get("missing_indexes", [])) if diagnostics else 0})
 
     def _validate(self, values: Any, tasks: list[dict[str, Any]], index: int | None = None,
                   decisions: dict[int, list[Instruction]] | None = None) -> list[Instruction] | None:
@@ -316,7 +366,8 @@ class LLMExtractor:
     def _data(self, message, context, tasks, profile, session_name, relevance_text=None):
         history, history_size = [], 0
         rows = self.budgets["rows"]
-        for row in reversed(context[-rows:] if rows else []):
+        candidates = context[-rows:] if rows else []
+        for row in reversed(candidates):
             brief = _brief(row)
             size = len(brief["content"])
             if history_size + size > self.budgets["history"]:
@@ -339,6 +390,14 @@ class LLMExtractor:
                 break
             pending.append(brief)
             task_size += size
+        # 诊断用：模型实际收到多少历史/待办，剩余部分是预算放不下还是压根没有。
+        self.last_payload_stats = {"session_name": session_name, "is_group": message["session_id"].endswith("@chatroom"),
+                                   "history_available": len(context), "history_candidates": len(candidates),
+                                   "history_sent": len(history), "history_chars": history_size,
+                                   "history_budget": self.budgets["history"],
+                                   "tasks_available": len(tasks), "tasks_sent": len(pending),
+                                   "tasks_chars": task_size, "tasks_budget": self.budgets["tasks"],
+                                   "profile_chars": len(profile or ""), "message_budget": self.budgets["new_message"]}
         return {"now": message["created_at"], "timezone": "Asia/Shanghai",
                 "session": {"name": session_name, "is_group": message["session_id"].endswith("@chatroom")},
                 "user_profile": profile, "history": history[::-1],
@@ -348,24 +407,30 @@ class LLMExtractor:
         if not self.enabled:
             return None
         data = self._data(message, context, tasks, profile, session_name)
-        result = self._complete({**data, "new_message": _brief(message)}, False)
+        result = self._complete({**data, "new_message": _brief(message)}, False, kind="single")
         if result is None:
             return None
         # Also accept the previous one-instruction contract for provider compatibility.
         values = result.get("instructions", [result] if "action" in result else None)
-        return guard_decisions(message, self._validate(values, tasks), profile)
+        validated = self._validate(values, tasks)
+        guarded = guard_decisions(message, validated, profile)
+        self._trace_outcome([_item(0, message, result, validated, guarded)])
+        return guarded
 
     def extract_batch(self, items, context, tasks, profile="", session_name="") -> dict[int, list[Instruction]]:
         if not self.enabled or not items:
             return {}
         data = self._data(items[-1], context, tasks, profile, session_name, "\n".join(item["content"] for item in items))
-        result = self._complete({**data, "new_messages": [_brief(item) for item in items]}, True)
+        result = self._complete({**data, "new_messages": [_brief(item) for item in items]}, True, kind="batch")
         if result is None:
             return {}
         entries = result.get("items", result.get("instructions", []))
         if not isinstance(entries, list) or len(entries) > len(items):
+            self.last_diagnostics = {"shape_rejected": True, "input_count": len(items)}
+            self._trace_outcome([])
             return {}
         indexed = {}
+        raw_entries: dict[int, Any] = {}
         duplicated = set()
         for entry in entries:
             if not isinstance(entry, dict) or type(entry.get("index")) is not int:
@@ -376,18 +441,26 @@ class LLMExtractor:
             if index in indexed:
                 duplicated.add(index)
             indexed[index] = entry.get("instructions", [entry["instruction"]] if "instruction" in entry else None)
+            raw_entries[index] = entry
         answers: dict[int, list[Instruction]] = {}
+        outcome: list[dict[str, Any]] = []
         rejected = []
         for index, values in sorted(indexed.items()):
             if index in duplicated:
                 continue
             instructions = self._validate(values, tasks, index, answers)
             if instructions is not None:
-                answers[index] = guard_decisions(items[index], instructions, profile)
+                guarded = guard_decisions(items[index], instructions, profile)
+                answers[index] = guarded
+                outcome.append(_item(index, items[index], raw_entries[index], instructions, guarded))
             else:
                 rejected.append(index)
+                outcome.append(_item(index, items[index], raw_entries[index], None, None))
+        for index in sorted(duplicated):
+            outcome.append(_item(index, items[index], raw_entries[index], None, None, note="同一索引重复返回"))
         self.last_diagnostics = {"input_count": len(items), "returned_indexes": sorted(indexed),
                                  "accepted_indexes": sorted(answers), "rejected_indexes": rejected,
                                  "duplicate_indexes": sorted(duplicated),
                                  "missing_indexes": sorted(set(range(len(items))) - set(indexed))}
+        self._trace_outcome(outcome)
         return answers

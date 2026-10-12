@@ -158,19 +158,81 @@ def create_app(root: Path | str | None = None, *, live_wechat=True) -> FastAPI:
         ctx = container()
         return {"stats": ctx.db.stats(), "sessions": ctx.db.sessions(), "wechat": ctx.wechat.status(), "run": ctx.jobs.latest()}
 
+    def model_block(values: dict) -> dict:
+        """对外只暴露模型名与参数，密钥和接口地址不进统计接口。"""
+        return {"name": values["ai_model"], "enabled": values["ai_enabled"],
+                "timeout_seconds": values["ai_timeout_seconds"],
+                "temperature": values["ai_temperature"],
+                "max_tokens_batch": values["ai_max_tokens_batch"],
+                "max_tokens_single": values["ai_max_tokens_single"],
+                "batch_interval_seconds": values["batch_interval_seconds"],
+                "settle_window_seconds": values["settle_window_seconds"],
+                "merge_window_seconds": values["merge_window_seconds"],
+                "batch_char_budget": values["batch_char_budget"],
+                "new_message_chars": values["new_message_chars"],
+                "history_chars": values["history_chars"],
+                "history_rows": values["history_rows"],
+                "task_chars": values["task_chars"]}
+
     @app.get("/api/metrics")
     def metrics(days: int = Query(default=30, ge=0, le=365)):
         ctx = container()
-        values = ctx.config.read()
         return {"metrics": ctx.db.processing_metrics(days), "stats": ctx.db.stats(),
-                "model": {"name": values["ai_model"], "enabled": values["ai_enabled"],
-                          "timeout_seconds": values["ai_timeout_seconds"],
-                          "temperature": values["ai_temperature"],
-                          "max_tokens_batch": values["ai_max_tokens_batch"],
-                          "batch_interval_seconds": values["batch_interval_seconds"],
-                          "settle_window_seconds": values["settle_window_seconds"],
-                          "merge_window_seconds": values["merge_window_seconds"],
-                          "batch_char_budget": values["batch_char_budget"]}}
+                "model": model_block(ctx.config.read())}
+
+    @app.get("/api/diagnostics/runs")
+    def diagnostics_runs(days: int = Query(default=30, ge=0, le=365),
+                         status: Literal["", "completed", "running", "failed", "cancelled"] = "",
+                         trigger: Literal["", "scheduled", "manual"] = "",
+                         limit: int = Query(default=150, ge=1, le=500)):
+        ctx = container()
+        metrics = ctx.db.processing_metrics(days)
+        rounds = [row for row in metrics["rounds"]
+                  if (not status or row["status"] == status) and (not trigger or (row["trigger"] or "") == trigger)]
+        rounds = rounds[::-1][:limit]
+        counts = ctx.db.model_call_counts([row["id"] for row in rounds])
+        for row in rounds:
+            row["calls"] = counts.get(row["id"]) or {}
+        return {"days": days, "runs": rounds, "summary": metrics["summary"],
+                "ignored_reasons": metrics["ignored_reasons"], "issues": ctx.db.model_call_issues(days),
+                "retention": ctx.db.model_call_retention(), "queued": metrics["queued"],
+                "model": model_block(ctx.config.read()),
+                "scanned": metrics["scanned"], "scanned_limit": metrics["scanned_limit"]}
+
+    @app.get("/api/diagnostics/runs/{run_id}")
+    def diagnostics_run(run_id: str):
+        ctx = container()
+        run = ctx.jobs.get(run_id)
+        if not run:
+            raise HTTPException(404, "提炼记录不存在")
+        return {"run": run, "calls": ctx.db.model_call_rows(run_id=run_id, days=0, limit=300),
+                "ledger": ctx.db.run_records(run["started_at"], run.get("finished_at"))}
+
+    @app.get("/api/diagnostics/calls")
+    def diagnostics_calls(days: int = Query(default=30, ge=0, le=365),
+                          kind: Literal["", "compress", "single", "batch"] = "",
+                          status: Literal["", "ok", "error"] = "", session_id: str = Query(default="", max_length=120),
+                          run_id: str = Query(default="", max_length=64), q: str = Query(default="", max_length=200),
+                          message_id: int | None = None, truncated: bool = False, guarded: bool = False,
+                          limit: int = Query(default=60, ge=1, le=200), offset: int = Query(default=0, ge=0)):
+        rows = container().db.model_call_rows(days=days, kind=kind, status=status, session_id=session_id,
+                                              run_id=run_id, q=q, message_id=message_id, truncated=truncated,
+                                              guarded=guarded, limit=limit + 1, offset=offset)
+        return {"calls": rows[:limit], "has_more": len(rows) > limit, "offset": offset}
+
+    @app.get("/api/diagnostics/calls/{call_id}")
+    def diagnostics_call(call_id: int):
+        detail = container().db.model_call_detail(call_id)
+        if not detail:
+            raise HTTPException(404, "诊断记录不存在，可能已超出保留上限")
+        return detail
+
+    @app.get("/api/diagnostics/backlog")
+    def diagnostics_backlog(limit: int = Query(default=80, ge=1, le=300)):
+        ctx = container()
+        values = ctx.config.read()
+        return {**ctx.db.backlog(limit), "queued": ctx.db.queued_count(),
+                "settle_window_seconds": values["settle_window_seconds"], "ai_enabled": values["ai_enabled"]}
 
     @app.get("/api/tasks")
     def tasks(status: Literal["pending", "completed", "cancelled", "all"] = "pending", q: str = Query(default="", max_length=500),

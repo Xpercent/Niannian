@@ -136,9 +136,9 @@ class MetricsApiTests(unittest.TestCase):
     def test_model_block_excludes_credentials(self):
         body = self.client.get("/api/metrics").json()
         self.assertEqual(set(body["model"]), {"name", "enabled", "timeout_seconds", "temperature",
-                                             "max_tokens_batch", "batch_interval_seconds",
-                                             "settle_window_seconds", "merge_window_seconds",
-                                             "batch_char_budget"})
+                                             "max_tokens_batch", "max_tokens_single", "batch_interval_seconds",
+                                             "settle_window_seconds", "merge_window_seconds", "batch_char_budget",
+                                             "new_message_chars", "history_chars", "history_rows", "task_chars"})
         self.assertNotIn("api_key", json.dumps(body, ensure_ascii=False))
         self.assertNotIn("base_url", json.dumps(body, ensure_ascii=False))
 

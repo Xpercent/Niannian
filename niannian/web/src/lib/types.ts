@@ -162,54 +162,271 @@ export interface RoundSummary {
   last_round_at: string | null;
   last_active_round_at: string | null;
 }
-export interface DailyRow {
-  date: string;
-  rounds: number;
-  active_rounds: number;
-  items: number;
-  processed: number;
-  created: number;
-  ignored: number;
-  model_requests: number;
-  model_failures: number;
-  wall_seconds: number;
-  model_seconds: number;
-}
-export interface DecisionCount {
-  action: string;
-  source: string;
-  count: number;
-  last_at: string;
-}
 export interface IgnoredReason {
   reason: string;
   source: string;
   count: number;
   last_at: string;
 }
-export interface MetricsPayload {
-  metrics: {
-    summary: RoundSummary;
-    rounds: RoundRow[];
-    daily: DailyRow[];
-    events: DecisionCount[];
-    ignored_reasons: IgnoredReason[];
-    queued: number;
-    window_days: number;
-    scanned: number;
-    scanned_limit: number;
+export interface ModelBlock {
+  name: string;
+  enabled: boolean;
+  timeout_seconds: number;
+  temperature: number;
+  max_tokens_batch: number;
+  max_tokens_single: number;
+  batch_interval_seconds: number;
+  settle_window_seconds: number;
+  merge_window_seconds: number;
+  batch_char_budget: number;
+  new_message_chars: number;
+  history_chars: number;
+  history_rows: number;
+  task_chars: number;
+}
+export interface CallCounts {
+  calls?: number;
+  failures?: number;
+  compress_calls?: number;
+  batch_calls?: number;
+  single_calls?: number;
+  truncated?: number;
+  guarded_calls?: number;
+  answered?: number;
+  missing?: number;
+  rejected?: number;
+  seconds?: number;
+  first_at?: string | null;
+  last_at?: string | null;
+}
+export interface RunRow extends RoundRow {
+  calls: CallCounts;
+}
+export interface IssueBucket {
+  type: string;
+  value: string;
+  count: number;
+  last_at: string | null;
+  last_call_id: number | null;
+}
+export interface GuardReasonRow {
+  reason: string;
+  count: number;
+  last_at: string | null;
+  last_call_id: number | null;
+}
+export interface Retention {
+  keep: number;
+  stored: number;
+  oldest_at: string | null;
+}
+export interface DiagnosticsPayload {
+  days: number;
+  runs: RunRow[];
+  summary: RoundSummary;
+  ignored_reasons: IgnoredReason[];
+  issues: {
+    buckets: IssueBucket[];
+    guard_reasons: GuardReasonRow[];
+    guard_scanned: number;
   };
-  stats: Stats;
-  model: {
-    name: string;
-    enabled: boolean;
-    timeout_seconds: number;
-    temperature: number;
-    max_tokens_batch: number;
-    batch_interval_seconds: number;
-    settle_window_seconds: number;
-    merge_window_seconds: number;
-    batch_char_budget: number;
-  };
+  retention: Retention;
+  queued: number;
+  model: ModelBlock;
+  scanned: number;
+  scanned_limit: number;
+}
+export interface PayloadStats {
+  session_name?: string;
+  is_group?: boolean;
+  history_available?: number;
+  history_candidates?: number;
+  history_sent?: number;
+  history_chars?: number;
+  history_budget?: number;
+  tasks_available?: number;
+  tasks_sent?: number;
+  tasks_chars?: number;
+  tasks_budget?: number;
+  profile_chars?: number;
+  message_budget?: number;
+  segments?: number;
+  segment_chars?: number[];
+  compressed_segments?: boolean[];
+  system_chars?: number;
+  payload_chars?: number;
+  source_chars?: number;
+  summary_budget?: number;
+}
+export interface CallRow {
+  id: number;
+  run_id: string | null;
+  kind: string;
+  session_id: string;
+  session_name: string;
+  message_ids: number[];
+  segments: number;
+  status: string;
+  error: string | null;
+  error_detail: string | null;
+  started_at: string;
+  duration_seconds: number;
+  model: string;
+  max_tokens: number | null;
+  finish_reason: string | null;
+  input_chars: number;
+  output_chars: number;
+  answered_items: number;
+  missing_items: number;
+  rejected_items: number;
+  guard_changes: number;
+  stats_json: PayloadStats;
+}
+export interface InstructionJson {
+  action: string;
+  title?: string | null;
+  description?: string | null;
+  owner?: string | null;
+  priority?: string | null;
+  due_at?: string | null;
+  context_summary?: string | null;
+  related_task_id?: number | null;
+  related_task_ref?: string | null;
+  resolution?: string | null;
+}
+export interface OutcomeItem {
+  index: number;
+  message_ids: number[];
+  raw: unknown;
+  proposed: InstructionJson[] | null;
+  final: InstructionJson[] | null;
+  summary?: string | null;
+  note?: string | null;
+  rejected?: boolean;
+}
+export interface ChatPayload {
+  model: string;
+  temperature: number;
+  max_tokens: number;
+  response_format?: { type: string };
+  enable_thinking?: boolean;
+  messages: { role: string; content: string }[];
+}
+export interface ModelData {
+  now?: string;
+  timezone?: string;
+  session?: { name: string; is_group: boolean };
+  user_profile?: string;
+  history?: BriefMessage[];
+  pending_tasks?: { id: number; title: string; priority?: string; due_at?: string | null }[];
+  new_message?: BriefMessage;
+  new_messages?: BriefMessage[];
+  source_text?: string;
+  max_summary_chars?: number;
+  context_available?: boolean;
+}
+export interface BriefMessage {
+  sender_name: string;
+  content: string;
+  content_is_summary?: boolean;
+  is_self?: boolean;
+  created_at?: string;
+  identity_confident?: boolean;
+}
+export interface CallMessage {
+  id: number;
+  sender_name: string;
+  content: string;
+  created_at: string;
+  processed: boolean;
+  is_self: boolean;
+  summary: string | null;
+}
+export interface CallDetail extends CallRow {
+  temperature: number | null;
+  request_json: ChatPayload | null;
+  response_text: string | null;
+  parsed_json: unknown;
+  usage_json: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number } | null;
+  outcome_json: { items?: OutcomeItem[]; diagnostics?: Record<string, unknown> } | null;
+  segment_summary: string | null;
+  messages: CallMessage[];
+  events: {
+    task_id: number | null;
+    action: string;
+    source: string;
+    message_ids: number[];
+    created_at: string;
+    detail: Record<string, unknown>;
+    title?: string | null;
+    task_status?: string | null;
+  }[];
+  ignored: {
+    id: number;
+    session_id: string;
+    message_ids: number[];
+    source: string;
+    reason: string;
+    created_at: string;
+  }[];
+}
+export interface RunSnapshot {
+  id: string;
+  status: string;
+  started_at: string;
+  finished_at: string | null;
+  trigger: string | null;
+  total: number;
+  done: number;
+  session: string | null;
+  error: string | null;
+  cancel_requested?: boolean;
+  result?: Record<string, number | string>;
+}
+export interface RunLedgerEvent {
+  task_id: number | null;
+  action: string;
+  source: string;
+  message_ids: number[];
+  created_at: string;
+  detail: Record<string, unknown>;
+}
+export interface RunDetail {
+  run: RunSnapshot;
+  calls: CallRow[];
+  ledger: { events: RunLedgerEvent[]; ignored: CallDetail["ignored"] };
+}
+export interface BacklogSession {
+  session_id: string;
+  session_name: string;
+  last_message_at: string | null;
+  messages: number;
+  oldest: string;
+  newest: string;
+}
+export interface BacklogMessage {
+  id: number;
+  session_id: string;
+  session_name: string;
+  sender_name: string;
+  content: string;
+  created_at: string;
+  calls: number;
+  failures: number;
+  last_call_at: string | null;
+}
+export interface BacklogPayload {
+  sessions: BacklogSession[];
+  messages: BacklogMessage[];
+  touched: number;
+  queued: number;
+  settle_window_seconds: number;
+  ai_enabled: boolean;
+}
+export interface CallsPayload {
+  calls: CallRow[];
+  has_more: boolean;
+  offset: number;
 }
 export type Notify = (message: string, error?: boolean) => void;
+

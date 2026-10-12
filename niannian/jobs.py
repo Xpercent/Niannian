@@ -46,7 +46,8 @@ class ExtractionJobs:
                             "result": None, "error": None, "cancel_requested": False,
                             "trigger": "manual" if force else "scheduled"}
             self._persist(self.current)
-            self.worker = Thread(target=self._execute, args=(force, session_id), name="extraction-worker", daemon=True)
+            self.worker = Thread(target=self._execute, args=(force, session_id, self.current["id"]),
+                                 name="extraction-worker", daemon=True)
             self.worker.start()
             return dict(self.current)
 
@@ -61,9 +62,10 @@ class ExtractionJobs:
             self.current.update({k: v for k, v in fields.items() if k in {"done", "total", "session"}})
             self._persist(self.current)
 
-    def _execute(self, force, session_id):
+    def _execute(self, force, session_id, run_id):
         try:
-            result = self.engine.process(force=force, session_id=session_id, progress=self._progress,
+            result = self.engine.process(force=force, session_id=session_id, run_id=run_id,
+                                         progress=self._progress,
                                          should_stop=lambda: self.cancel_event.is_set() or self.stop_event.is_set())
             with self.lock:
                 self.current.update(status="cancelled" if self.cancel_event.is_set() or self.stop_event.is_set() else "completed",

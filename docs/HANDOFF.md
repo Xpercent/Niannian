@@ -1,13 +1,13 @@
 # 念念 project5 维护交接
 
-更新日期：2026-10-10。本文描述当前源码与维护边界，不再逐次记录开发操作；具体改动见 Git 历史。开始工作先读根目录 `AGENTS.md`，核查工作区、服务与用户本次任务，不自动继续优化。
+更新日期：2026-10-12。本文描述当前源码与维护边界，不再逐次记录开发操作；具体改动见 Git 历史。开始工作先读根目录 `AGENTS.md`，核查工作区、服务与用户本次任务，不自动继续优化。
 
 ## 当前工程与运行
 
 | 项目 | 当前说明 |
 | --- | --- |
 | 工作目录 | `E:\Group\Desktop\Code\wx\project5`；project4 只读 |
-| 后端 | FastAPI、SQLite WAL、schema v1；包目录 `niannian/` |
+| 后端 | FastAPI、SQLite WAL、schema v2；包目录 `niannian/` |
 | 前端 | Vite + React + TypeScript + Tailwind CSS + shadcn/ui + Recharts + lucide-react |
 | 服务 | 默认 `127.0.0.1:8765`，版本 `1.0.0` |
 | 默认数据路径 | `data/workspace.db`、`data/PROFILE.md`；以实际配置为准 |
@@ -45,6 +45,7 @@ Invoke-RestMethod http://127.0.0.1:8765/api/health
 7. 模型已启用时，云端失败、无效/漏答或失效同批引用不交本地兜底；对应消息保持未处理，下轮再请求。同批有效结果独立落库。模型停用/未配置时保留本地规则处理；请求前过滤与统一 `guard_decisions` 始终保留。合法模型结果被业务校验拒绝，不等于请求失败。
 8. 一段指令、任务来源/事件与消息 processed 同事务提交；取消保留未处理消息，人工编辑版本冲突不能通过重新读取版本绕过。
 9. 整轮完成、取消或失败后才开始等待下一次自动间隔；手动轮次结束也重新计时。仍只有一个提炼作业通道。
+10. 每次模型请求（压缩、单段、批量）另外写入 `model_calls` 诊断表，按 run_id 与会话、来源消息ID归属，含完整请求体、原样回复、finish_reason、usage、耗时、错误与校验前后对照。它是只读旁路：不参与事务、不改变 processed 与任务结果，写入失败只记日志；只保留最近 1200 次。
 
 上述前端替换、预算开放、取消总量/段数/画像长度限制、总结压缩及失败留存均由用户在2026-10-10明确要求。它们替代旧约定；不能据此扩大到清库、全量重提炼、改关注或画像、发送微信、换模型等行为。
 
@@ -80,13 +81,15 @@ Invoke-RestMethod http://127.0.0.1:8765/api/health
 | 消息/水位、版本、事务、备份、指标、压缩缓存 | `niannian/storage.py` |
 | 只读采集、历史命令、身份、隔离缓存 | `niannian/wechat.py` |
 | 附件解析与已下载文件 | `niannian/media.py` |
-| 模型请求、压缩提示词、输出与业务校验 | `niannian/llm.py` |
-| 聚合、分批、云端失败留存、去重与落库 | `niannian/engine.py` |
+| 模型请求、压缩提示词、输出与业务校验、调用诊断留档 | `niannian/llm.py` |
+| 聚合、分批、云端失败留存、去重与落库、诊断范围与写入器 | `niannian/engine.py` |
 | 单作业调度、取消、恢复、结束后计时 | `niannian/jobs.py` |
+| 模型请求诊断接口 | `niannian/api.py` 的 `/api/diagnostics/runs`、`/runs/{id}`、`/calls`、`/calls/{id}`、`/backlog` |
 | 导航、轮次状态与前端页面 | `niannian/web/src/app.tsx`、`src/pages/` |
+| 诊断台界面 | `src/pages/diagnostics.tsx`、`src/components/model-call-inspector.tsx` |
 | 来源抽屉、组件、请求与时间工具 | `src/components/task-drawer.tsx`、`src/components/ui/`、`src/lib/` |
 
-处理状态页汇总真实 `runs`、`task_events`、`ignored_messages`，压缩请求包含在模型请求数与耗时中。缺样本比率显示“—”，不能补造指标。微信文件晚落盘时，重复扫描只补挂 metadata 的附件路径/档位，不修改正文、processed或水位。
+诊断台（原“处理状态”页，2026-10-12 按用户要求完全重写）逐次还原模型请求：`model_calls` 表保存完整请求体、模型原样回复、解析结果、finish_reason、usage、耗时、错误、段落来源与上下文预算占用，并附结构校验后/业务校验后的指令对照；落库变更与无需行动仍由 `task_events`、`ignored_messages` 按来源消息ID关联，不重复记账。诊断写入是旁路，失败只记日志，绝不影响提炼事务。压缩请求包含在模型请求数与耗时中。缺样本比率显示“—”，不能补造指标。微信文件晚落盘时，重复扫描只补挂 metadata 的附件路径/档位，不修改正文、processed或水位。
 
 ## 数据保护与已知限制
 
@@ -97,7 +100,7 @@ Invoke-RestMethod http://127.0.0.1:8765/api/health
 - 云端失败留存没有额外并发重试通道，持续失败可持续留在队列。群一直不静默可能延后提炼；一个大积压会话会延后后续会话。用户尚未要求改变这两项。
 - 压缩提示词要求保留条件、例外、否定与更正，缺上下文标明未知；模型自报 complete 不是语义准确保证。压缩失败/输出截断/超预算保留消息。现有真实捕获最长958字，几千字通知的真实云端压缩质量尚未验证。
 - 不做OCR、语音转写、自动下载媒体、微信发送、多用户服务或公网发布。模型判断仍可能遗漏或误解，需回查原文。
-- schema v1 结构变化必须有顺序迁移与旧库验证，不以删库重建替代。历史提交改写前哈希不能用于当前操作；旧历史标签 `history-before-i18n` 只作恢复参照，不擅自切换或删标签。
+- schema 现为 v2：v2 只新增 `model_calls` 表与索引，走 `storage.MIGRATIONS` 顺序迁移并在 `Database.init()` 时登记 `schema_version`；本机正式库已于 2026-10-12 重启时自动迁移，迁移前用 `Database.backup('pre-diagnostics')` 留下一致性快照，迁移后 `PRAGMA quick_check` 为 ok。以后结构变化同样必须提供顺序迁移与旧库验证，不以删库重建替代。诊断表按 `MODEL_CALL_KEEP`（当前 1200 次）自动裁剪最旧行，只删诊断记录，不删消息、任务、事件、去重键或水位。历史提交改写前哈希不能用于当前操作；旧历史标签 `history-before-i18n` 只作恢复参照，不擅自切换或删标签。
 
 ## 验证与资料
 
@@ -110,7 +113,7 @@ Invoke-RestMethod http://127.0.0.1:8765/api/health
 .\.venv\Scripts\python.exe -X utf8 scripts\verify-live.py
 ```
 
-最近一次相关验证：Engine/LLM/Config/Metrics 67 passed、1 skipped，前端构建通过；这是取消段数限制的针对性检查，不是当前所有功能全量通过。近期模型测试用真实捕获和模拟响应，未真实调用云端。近期设置界面只读检查未执行真实配置保存，也未重启服务。运行中的版本与源码一致性需要现场确认。
+最近一次相关验证（2026-10-12，诊断台重写）：`pytest tests/` 117 passed、1 skipped（含新增 `tests/test_diagnostics.py` 13 项：真实捕获 + 模拟传输跑完整轮次，断言请求体、原样回复、压缩与提炼各留一档、校验改写原因、失败留存、截断标记、保留上限裁剪与五个诊断接口）；前端 `npm run build` 与 `npm test` 通过。另在一次性工作区（正式库的一致性备份副本、`--no-wechat`、独立端口）对已配置云端真实跑了 72 段一轮，确认 4 次批量调用的请求正文、模型原样 JSON、usage、校验改写原因与原文对照都能在界面读出；该副本的 `UPDATE messages SET processed=0` 只作用于副本，正式库未被重提炼。正式 8765 服务经用户允许后重启，微信重新连接、队列 0、schema v2 迁移生效、诊断接口读出真实轮次。此前 Engine/LLM/Config/Metrics 67 passed 的记录属于取消段数限制那一轮，不是当前全量。运行中的版本与源码一致性需要现场确认。
 
 - `ARCHITECTURE.md`：当前数据与执行边界。
 - `DESIGN.md`：当前界面结构与交互。

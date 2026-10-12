@@ -41,16 +41,16 @@ class ApiTests(unittest.TestCase):
             self.assertEqual(fresh.get("/api/settings").json()["batch_interval_seconds"], 120)
 
     def test_tunables_persist_and_validate(self):
-        result = self.client.patch("/api/settings", json={"batch_limit": 6, "ai_temperature": 0.3,
+        result = self.client.patch("/api/settings", json={"ai_temperature": 0.3,
                                                           "ignored_keep_per_session": 50, "history_rows": 0})
         self.assertEqual(result.status_code, 200)
         body = result.json()
-        self.assertEqual((body["batch_limit"], body["ai_temperature"], body["ignored_keep_per_session"],
-                          body["history_rows"]), (6, 0.3, 50, 0))
-        self.assertEqual(body["defaults"]["batch_limit"], 4)
+        self.assertEqual((body["ai_temperature"], body["ignored_keep_per_session"], body["history_rows"]),
+                         (0.3, 50, 0))
         self.assertEqual(body["defaults"]["batch_char_budget"], 4200)
+        self.assertEqual(body["defaults"]["history_rows"], 6)
         self.assertNotIn("ai_api_key", body["defaults"])
-        self.assertEqual(self.client.patch("/api/settings", json={"batch_limit": 99}).status_code, 422)
+        self.assertEqual(self.client.patch("/api/settings", json={"history_rows": 21}).status_code, 422)
         self.assertEqual(self.client.patch("/api/settings", json={"ai_temperature": "hot"}).status_code, 422)
         self.assertEqual(self.client.patch("/api/settings", json={"new_message_chars": 199}).status_code, 422)
 

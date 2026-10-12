@@ -20,7 +20,7 @@ class BlockingEngine:
         self.started, self.release = Event(), Event()
         self.calls = 0
 
-    def process(self, force, session_id, progress, should_stop):
+    def process(self, force, session_id, run_id, progress, should_stop):
         self.calls += 1
         self.started.set()
         self.release.wait(3)
