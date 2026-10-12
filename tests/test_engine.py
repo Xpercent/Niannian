@@ -8,9 +8,10 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
 
-from niannian.engine import Engine, parse_time
+from niannian import local_rules
+from niannian.engine import Engine
 from niannian.llm import Instruction, guard_decisions
-from niannian.storage import Database, utc_now
+from niannian.storage import Database, parse_time, utc_now
 from niannian.wechat import _sender, normalize
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -168,7 +169,7 @@ class EngineTests(unittest.TestCase):
         fake = FakeModel()
         with patch("niannian.engine.LLMExtractor", return_value=fake), \
                 patch.object(self.engine, "_gate", return_value=None), \
-                patch.object(self.engine, "_fallback", side_effect=AssertionError("No local fallback")):
+                patch("niannian.engine.local_rules.decisions", side_effect=AssertionError("No local fallback")):
             failed = self.engine.process(force=True)
             self.assertEqual(failed["processed"], 0)
             self.assertEqual(failed["skipped"], 1)
@@ -185,7 +186,7 @@ class EngineTests(unittest.TestCase):
         fake = FakeModel({1: [Instruction(action="IGNORE")]})
         with patch("niannian.engine.LLMExtractor", return_value=fake), \
                 patch.object(self.engine, "_gate", return_value=None), \
-                patch.object(self.engine, "_fallback", side_effect=AssertionError("No local fallback")):
+                patch("niannian.engine.local_rules.decisions", side_effect=AssertionError("No local fallback")):
             result = self.engine.process(force=True)
         self.assertEqual(result["processed"], 1)
         self.assertEqual(self.db.one("SELECT processed FROM messages WHERE id=?", (first,))["processed"], 0)
@@ -332,7 +333,7 @@ class EngineTests(unittest.TestCase):
 
         fake.extract_batch = answer
         with patch("niannian.engine.LLMExtractor", return_value=fake), patch.object(self.engine, "_gate", return_value=None), \
-                patch.object(self.engine, "_fallback", side_effect=AssertionError("Cloud failures must not fall back")):
+                patch("niannian.engine.local_rules.decisions", side_effect=AssertionError("Cloud failures must not fall back")):
             result = self.engine.process(force=True)
         self.assertEqual(result["updated"], 0)
         self.assertEqual(self.db.one("SELECT priority,version FROM tasks WHERE id=?", (task_id,)), {"priority": "low", "version": 2})
@@ -387,12 +388,12 @@ class EngineTests(unittest.TestCase):
 
     def test_real_conditional_group_notices_do_not_fragment_into_tasks(self):
         candidates = [row for row in self.fixture["messages"] if row["session_id"].endswith("@chatroom") and
-                      self.engine.CONDITIONAL.search(row["content"])]
+                      local_rules.CONDITIONAL.search(row["content"])]
         if not candidates:
             self.skipTest("No captured conditional group notice")
         for original in candidates:
             item = {**original, "message_ids": [1]}
-            decisions = self.engine._fallback(item, [], [])
+            decisions = local_rules.decisions(item, [], [])
             self.assertTrue(all(command.action == "IGNORE" for command in decisions))
 
     def test_generic_group_words_cannot_associate_unrelated_tasks(self):
@@ -401,15 +402,15 @@ class EngineTests(unittest.TestCase):
             self.skipTest("No captured all-member group notice")
         pending = [{"id": 1, "title": "@所有人 unrelated_object"}]
         for row in candidates:
-            self.assertIsNone(self.engine.related(row["content"], pending))
+            self.assertIsNone(local_rules.related(row["content"], pending))
 
     def test_matching_requires_distinctive_object_and_unique_target(self):
         # Pure task and object contracts contain no invented chat messages.
-        self.assertIsNone(self.engine.related("所有人", [{"id": 1, "title": "通知所有人"}]))
-        self.assertIsNone(self.engine.related("项目", [{"id": 1, "title": "确认项目"}]))
+        self.assertIsNone(local_rules.related("所有人", [{"id": 1, "title": "通知所有人"}]))
+        self.assertIsNone(local_rules.related("项目", [{"id": 1, "title": "确认项目"}]))
         pending = [{"id": 1, "title": "提交独特交付对象"}, {"id": 2, "title": "检查另一交付对象"}]
-        self.assertEqual(self.engine.related("独特交付对象", pending)["id"], 1)
-        self.assertIsNone(self.engine.related("交付对象", pending))
+        self.assertEqual(local_rules.related("独特交付对象", pending)["id"], 1)
+        self.assertIsNone(local_rules.related("交付对象", pending))
 
     def test_semantic_reminder_merges_source_and_audit(self):
         real = next((row for row in self.fixture["messages"] if "i志愿" in row["content"] and
@@ -448,15 +449,15 @@ class EngineTests(unittest.TestCase):
         self.assertIsNone(self.engine._duplicate("提交通知所有人", [{"id": 1, "title": "提交所有人通知"}]))
 
     def test_user_extract_rule_enables_real_special_action_candidate(self):
-        candidates = [row for row in self.fixture["messages"] if not self.engine.REQUEST.search(row["content"]) and
-                      self.engine.ACTION_OBJECT.search(row["content"]) and not self.engine.CONDITIONAL.search(row["content"]) and
+        candidates = [row for row in self.fixture["messages"] if not local_rules.REQUEST.search(row["content"]) and
+                      local_rules.ACTION_OBJECT.search(row["content"]) and not local_rules.CONDITIONAL.search(row["content"]) and
                       8 <= len(row["content"]) <= 120 and not row["is_self"]]
         if not candidates:
             self.skipTest("No captured explicit special action outside builtin request pattern")
         import re
         real = candidates[0]
         custom = {"action": "extract_task", "pattern": re.escape(real["content"][:4])}
-        decisions = self.engine._fallback(real, [], [custom])
+        decisions = local_rules.decisions(real, [], [custom])
         self.assertTrue(any(command.action == "CREATE" for command in decisions))
 
     def test_real_group_notices_reach_model_without_role_keyword_gate(self):

@@ -4,6 +4,8 @@
 
 `create_app` 在导入时不连接微信、不打开数据库、不启动线程。FastAPI lifespan 构造 Application，配置、仓储、画像、引擎、采集和作业各自承担明确职责。退出时先停止采集，再请求取消提炼，等待当前有超时的网络请求结束；没有完成提交的消息仍未处理。
 
+2026-10-12 用户授权按稳定缝隙拆大文件：模型提示词文本与系统指令拼装移到 `niannian/prompts.py`，云端未启用时的本地降级（正则候选、关联待办、截止推断）移到 `niannian/local_rules.py`，`parse_time` 从 `engine.py` 下沉到 `storage.py` 供引擎与降级模块共用，使降级不再反向依赖引擎。这是纯搬运：新旧系统指令逐字对拍一致，提炼链路、事务边界、校验顺序与数据流未变。
+
 ```mermaid
 flowchart LR
   W[已登录微信数据库] --> R[串行 WechatWorker]

@@ -80,10 +80,12 @@ Invoke-RestMethod http://127.0.0.1:8765/api/health
 | --- | --- |
 | 生命周期、HTTP契约 | `niannian/api.py` |
 | 配置与画像原子保存 | `niannian/config.py` |
-| 消息/水位、版本、事务、备份、指标、压缩缓存 | `niannian/storage.py` |
+| 消息/水位、版本、事务、备份、指标、压缩缓存、ISO 时间解析 | `niannian/storage.py` |
 | 只读采集、历史命令、身份、隔离缓存 | `niannian/wechat.py` |
 | 附件解析与已下载文件 | `niannian/media.py` |
-| 模型请求、压缩提示词、输出与业务校验、调用诊断留档 | `niannian/llm.py` |
+| 模型请求与传输、预算、结构校验、业务校验函数、调用诊断留档 | `niannian/llm.py` |
+| 提炼与压缩提示词文本、系统指令拼装 | `niannian/prompts.py` |
+| 云端未启用时的本地降级候选（正则、关联待办、截止推断） | `niannian/local_rules.py` |
 | 聚合、分批、云端失败留存、去重与落库、诊断范围与写入器 | `niannian/engine.py` |
 | 单作业调度、取消、恢复、结束后计时 | `niannian/jobs.py` |
 | 模型请求诊断接口 | `niannian/api.py` 的 `/api/diagnostics/runs`、`/runs/{id}`、`/calls`、`/calls/{id}`、`/backlog` |

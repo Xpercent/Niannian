@@ -25,14 +25,19 @@ ROUND_RESULT_FIELDS = ("items", "processed", "created", "updated", "resolved", "
 ROUND_DAILY_FIELDS = ("items", "processed", "created", "ignored", "model_requests", "model_failures")
 
 
+def parse_time(value: str) -> datetime:
+    """解析 ISO 时间；无时区按 Asia/Shanghai 理解，与界面输入和截止推断一致。"""
+    parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=SHANGHAI)
+
+
 def _moment(value: str | None) -> datetime | None:
     if not value:
         return None
     try:
-        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        return parse_time(value)
     except (TypeError, ValueError):
         return None
-    return parsed if parsed.tzinfo else parsed.replace(tzinfo=SHANGHAI)
 
 
 def _seconds_between(start: datetime | None, end: datetime | None) -> float | None:
