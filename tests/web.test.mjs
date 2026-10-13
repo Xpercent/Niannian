@@ -18,3 +18,12 @@ for (const value of [null, undefined, '', 'not-a-date']) {
   assert.equal(dateText(value), '未设置');
 }
 console.log('PASS absent or invalid deadlines');
+
+// Invalid legacy JSON must not crash the diagnostic inspector.
+const { parseModelContext } = await import('../niannian/web/src/lib/model-context.ts');
+for (const raw of ['null', '[]', 'true', '{', '{"new_messages": {}}', '{"history":[null]}', '{"new_message":42}', '{"user_profile":42}', '{"pending_tasks":[null]}']) {
+  assert.equal(parseModelContext(raw), null);
+}
+const legacy = {new_message: {sender_name:'来源', content:'序列化边界', is_self:false}, pending_tasks:[]};
+assert.deepEqual(parseModelContext(JSON.stringify(legacy)), legacy);
+console.log('PASS model diagnostic legacy context boundary');

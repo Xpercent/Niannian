@@ -12,6 +12,7 @@ import {
 import { Button, Card, CardContent, CardHeader, CardTitle } from "./ui";
 import { ErrorNotice, Loading } from "./common";
 import { api, cn, dateText, secondsText } from "../lib/utils";
+import { parseModelContext } from "../lib/model-context";
 import type {
   BriefMessage,
   CallDetail,
@@ -83,7 +84,9 @@ function Bar({
 function Body({ text, className }: { text: string; className?: string }) {
   const parts = text.split(truncationMarker);
   return (
-    <div className={cn("space-y-1 text-xs leading-6 text-stone-700", className)}>
+    <div
+      className={cn("space-y-1 text-xs leading-6 text-stone-700", className)}
+    >
       {parts.map((part, index) => (
         <span key={index}>
           {index > 0 && (
@@ -138,7 +141,9 @@ function Fold({
     <details open={defaultOpen} className="rounded-lg border border-stone-100">
       <summary className="cursor-pointer px-3 py-2 text-xs font-medium text-stone-600">
         {label}
-        {hint && <span className="ml-2 text-[11px] text-stone-400">{hint}</span>}
+        {hint && (
+          <span className="ml-2 text-[11px] text-stone-400">{hint}</span>
+        )}
       </summary>
       <div className="border-t border-stone-100 px-3 py-3">{children}</div>
     </details>
@@ -212,7 +217,13 @@ function SegmentCard({ brief, index }: { brief: BriefMessage; index: number }) {
   );
 }
 
-function Warning({ tone, children }: { tone: "amber" | "rose"; children: ReactNode }) {
+function Warning({
+  tone,
+  children,
+}: {
+  tone: "amber" | "rose";
+  children: ReactNode;
+}) {
   return (
     <div
       className={cn(
@@ -278,7 +289,9 @@ export function ModelCallInspector({
     setLoading(true);
     setError("");
     setCall(null);
-    api<CallDetail>(`/api/diagnostics/calls/${callId}`, { signal: controller.signal })
+    api<CallDetail>(`/api/diagnostics/calls/${callId}`, {
+      signal: controller.signal,
+    })
       .then(setCall)
       .catch((e: Error) => {
         if (e.name !== "AbortError") setError(e.message);
@@ -306,14 +319,11 @@ export function ModelCallInspector({
     );
 
   const sent = call.request_json;
-  const system = sent?.messages.find((item) => item.role === "system")?.content || "";
-  const userRaw = sent?.messages.find((item) => item.role === "user")?.content || "";
-  let data: ModelData | null = null;
-  try {
-    data = JSON.parse(userRaw) as ModelData;
-  } catch {
-    data = null;
-  }
+  const system =
+    sent?.messages.find((item) => item.role === "system")?.content || "";
+  const userRaw =
+    sent?.messages.find((item) => item.role === "user")?.content || "";
+  const data: ModelData | null = parseModelContext(userRaw);
   const segments: BriefMessage[] =
     data?.new_messages || (data?.new_message ? [data.new_message] : []);
   const stats = call.stats_json || {};
@@ -322,16 +332,18 @@ export function ModelCallInspector({
     string,
     unknown
   >;
-  const indexLists = ["missing_indexes", "rejected_indexes", "duplicate_indexes"]
-    .map((key) => `${key}:${JSON.stringify(diagnostics[key] || [])}`)
-    .join("|");
   const missing = diagnostics.missing_indexes as number[] | undefined;
   const rejected = diagnostics.rejected_indexes as number[] | undefined;
   const duplicates = diagnostics.duplicate_indexes as number[] | undefined;
+  const extra = diagnostics.extra_indexes as number[] | undefined;
+  const unindexed = Number(diagnostics.unindexed_entries) || 0;
   const usage = call.usage_json || null;
   const failed = call.status === "error";
   const truncated = call.finish_reason === "length";
-  const outputRatio = call.max_tokens ? Math.min(call.output_chars / call.max_tokens, 1) : 0;
+  const outputRatio =
+    call.max_tokens && usage?.completion_tokens !== undefined
+      ? usage.completion_tokens / call.max_tokens
+      : null;
 
   return (
     <div className="space-y-5">
@@ -383,13 +395,14 @@ export function ModelCallInspector({
             <span>温度 {call.temperature ?? "—"}</span>
             <span>思考 关闭</span>
             <span>
-              段落 {call.segments} · 输入 {call.input_chars.toLocaleString()} 字符
+              段落 {call.segments} · 输入 {call.input_chars.toLocaleString()}{" "}
+              字符
             </span>
             <span>耗时 {secondsText(call.duration_seconds)}</span>
             {usage?.total_tokens !== undefined && (
               <span>
-                tokens {usage.prompt_tokens ?? "?"}+{usage.completion_tokens ?? "?"}=
-                {usage.total_tokens}
+                tokens {usage.prompt_tokens ?? "?"}+
+                {usage.completion_tokens ?? "?"}={usage.total_tokens}
               </span>
             )}
           </span>
@@ -406,14 +419,15 @@ export function ModelCallInspector({
       {truncated && (
         <Warning tone="amber">
           模型输出撞到 max_tokens={call.max_tokens ?? "—"}
-          上限被截断，下面的 JSON 可能不完整。这是解析失败常见原因：调高“提炼输出长度”或缩小每段正文。
+          上限被截断，下面的 JSON
+          可能不完整。这是解析失败常见原因：调高“提炼输出长度”或缩小每段正文。
         </Warning>
       )}
-      {!failed && !truncated && outputRatio >= 0.9 && (
+      {!failed && !truncated && outputRatio !== null && outputRatio >= 0.9 && (
         <Warning tone="amber">
-          输出已用到上限的 {Math.round(outputRatio * 100)}%（约{" "}
-          {call.output_chars.toLocaleString()} 字符 / {call.max_tokens ?? "?"} token
-          ），再多几条要求就可能被截断。
+          输出已用到上限的 {Math.round(outputRatio! * 100)}%（{" "}
+          {usage?.completion_tokens?.toLocaleString()} /{" "}
+          {call.max_tokens ?? "?"} token ），再多几条要求就可能被截断。
         </Warning>
       )}
 
@@ -481,7 +495,11 @@ export function ModelCallInspector({
                   value={stats.tasks_chars ?? 0}
                   budget={stats.tasks_budget ?? null}
                 />
-                <Bar label="个人画像" value={stats.profile_chars ?? 0} budget={null} />
+                <Bar
+                  label="个人画像"
+                  value={stats.profile_chars ?? 0}
+                  budget={null}
+                />
               </div>
               <Fold
                 label={`同会话历史 ${stats.history_sent ?? data?.history?.length ?? 0} 条`}
@@ -494,7 +512,9 @@ export function ModelCallInspector({
                     ))}
                   </ul>
                 ) : (
-                  <p className="text-stone-400">模型这次没有拿到任何历史消息。</p>
+                  <p className="text-stone-400">
+                    模型这次没有拿到任何历史消息。
+                  </p>
                 )}
               </Fold>
               <Fold
@@ -535,7 +555,18 @@ export function ModelCallInspector({
           <Fold label="系统指令全文" hint="决定模型判断口径">
             <Body text={system} />
           </Fold>
-          <Fold label="原始请求体（发出去的 JSON）" hint="与 user 正文逐字一致">
+          {userRaw.trim().startsWith("<") && (
+            <Fold
+              label="模型输入正文（XML）"
+              hint="与发出去的字节一致；正文里的尖括号已实体转义"
+            >
+              <Code text={userRaw} />
+            </Fold>
+          )}
+          <Fold
+            label="原始请求体（发出去的 JSON）"
+            hint="user 正文按上面两种形式之一原样保存"
+          >
             <Code text={JSON.stringify(sent, null, 2)} />
           </Fold>
         </Panel>
@@ -581,7 +612,8 @@ export function ModelCallInspector({
             </>
           ) : (
             <p className="text-stone-400">
-              没有任何返回文本：请求在拿到内容前就失败了{call.error_detail ? `（${call.error_detail}）` : ""}。
+              没有任何返回文本：请求在拿到内容前就失败了
+              {call.error_detail ? `（${call.error_detail}）` : ""}。
             </p>
           )}
           <div className="flex flex-wrap gap-x-4 gap-y-1 text-[11px] text-stone-500">
@@ -593,8 +625,8 @@ export function ModelCallInspector({
             </span>
             <span>
               输出上限 {call.max_tokens ?? "—"} token
-              {call.max_tokens
-                ? ` · 已用约 ${Math.round(outputRatio * 100)}%（按字符粗估）`
+              {outputRatio !== null
+                ? ` · 已用 ${Math.round(outputRatio * 100)}%`
                 : ""}
             </span>
           </div>
@@ -610,9 +642,10 @@ export function ModelCallInspector({
         }
         hint={
           <span>
-            模型说的 vs 业务校验后写进待办的；未返回索引{" "}
-            {missing?.length ?? 0} · 结构不符 {rejected?.length ?? 0} · 索引重复{" "}
-            {duplicates?.length ?? 0}
+            模型说的 vs 业务校验后写进待办的；未返回索引 {missing?.length ?? 0}{" "}
+            · 结构不符 {rejected?.length ?? 0} · 索引重复{" "}
+            {duplicates?.length ?? 0} · 越界 {extra?.length ?? 0} · 无索引{" "}
+            {unindexed}
           </span>
         }
       >
@@ -621,8 +654,8 @@ export function ModelCallInspector({
             {items[0]?.summary ? (
               <>
                 <p className="text-[11px] text-stone-400">
-                  摘要 {items[0].summary.length} 字符 · complete 自报为真 ·
-                  原文 {(stats.source_chars ?? 0).toLocaleString()} 字符
+                  摘要 {items[0].summary.length} 字符 · complete 自报为真 · 原文{" "}
+                  {(stats.source_chars ?? 0).toLocaleString()} 字符
                 </p>
                 <Body text={items[0].summary} />
               </>
@@ -635,12 +668,17 @@ export function ModelCallInspector({
           </div>
         ) : (
           <>
-            {indexLists && (missing?.length || rejected?.length || duplicates?.length) ? (
+            {missing?.length ||
+            rejected?.length ||
+            duplicates?.length ||
+            extra?.length ||
+            unindexed ? (
               <p className="rounded bg-stone-50 px-3 py-2 text-[11px] leading-5 text-stone-500">
-                批量索引覆盖：缺少 {JSON.stringify(missing || [])} · 结构不符拒绝{" "}
-                {JSON.stringify(rejected || [])} · 重复{" "}
-                {JSON.stringify(duplicates || [])}
-                。被拒绝或缺失的段落本轮不写库，留到下轮重新请求。
+                批量索引覆盖：缺少 {JSON.stringify(missing || [])} ·
+                结构不符拒绝 {JSON.stringify(rejected || [])} · 重复{" "}
+                {JSON.stringify(duplicates || [])} · 越界{" "}
+                {JSON.stringify(extra || [])} · 无索引 {unindexed}
+                。越界和无索引回答丢弃，有效段落独立处理。被拒绝或缺失的段落本轮不写库，留到下轮重新请求。
               </p>
             ) : null}
             <ul className="space-y-3">
@@ -652,7 +690,9 @@ export function ModelCallInspector({
                     key={item.index}
                     className={cn(
                       "rounded-lg border p-3",
-                      changed ? "border-amber-200 bg-amber-50/40" : "border-stone-100",
+                      changed
+                        ? "border-amber-200 bg-amber-50/40"
+                        : "border-stone-100",
                     )}
                   >
                     <p className="mb-2 flex flex-wrap items-center gap-2 text-[11px] text-stone-500">
@@ -682,14 +722,18 @@ export function ModelCallInspector({
                           模型返回
                         </p>
                         <ul className="space-y-1">
-                          {(item.proposed || []).map((instruction, position) => (
-                            <InstructionRow
-                              key={position}
-                              instruction={instruction}
-                            />
-                          ))}
+                          {(item.proposed || []).map(
+                            (instruction, position) => (
+                              <InstructionRow
+                                key={position}
+                                instruction={instruction}
+                              />
+                            ),
+                          )}
                           {!item.proposed && (
-                            <li className="text-stone-400">—（未通过结构校验）</li>
+                            <li className="text-stone-400">
+                              —（未通过结构校验）
+                            </li>
                           )}
                         </ul>
                       </div>
@@ -702,7 +746,9 @@ export function ModelCallInspector({
                             <InstructionRow
                               key={position}
                               instruction={instruction}
-                              tone={changed ? "text-amber-800" : "text-stone-700"}
+                              tone={
+                                changed ? "text-amber-800" : "text-stone-700"
+                              }
                             />
                           ))}
                           {!item.final && <li className="text-stone-400">—</li>}
@@ -778,13 +824,18 @@ export function ModelCallInspector({
               </p>
               <ul className="space-y-2">
                 {call.messages.map((message) => (
-                  <li key={message.id} className="rounded-lg border border-stone-100 p-3">
+                  <li
+                    key={message.id}
+                    className="rounded-lg border border-stone-100 p-3"
+                  >
                     <p className="mb-1.5 flex flex-wrap gap-x-2 text-[11px] text-stone-500">
                       <span className="font-medium text-stone-600">
                         {message.sender_name}
                       </span>
                       {message.is_self && (
-                        <span className="rounded bg-stone-100 px-1.5 py-0.5">本人</span>
+                        <span className="rounded bg-stone-100 px-1.5 py-0.5">
+                          本人
+                        </span>
                       )}
                       <span className="ml-auto tabular-nums text-stone-400">
                         #{message.id} · {dateText(message.created_at, true)} ·{" "}
@@ -805,7 +856,9 @@ export function ModelCallInspector({
                   <SegmentCard key={index} brief={brief} index={index} />
                 ))}
                 {!segments.length && (
-                  <li className="text-stone-400">请求体解析失败，只有原始 JSON 可看。</li>
+                  <li className="text-stone-400">
+                    请求体解析失败，只有原始 JSON 可看。
+                  </li>
                 )}
               </ul>
               {call.segment_summary && (

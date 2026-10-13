@@ -6,13 +6,12 @@ import json
 import logging
 import re
 import time
-from datetime import datetime
-from typing import Any, Literal
+from typing import Any
 from urllib.request import Request, urlopen
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
-
 from .prompts import COMPRESSION_POLICY, extraction_system
+from .model_context import render_compression, render_extraction
+from .instructions import Instruction, clean_instruction
 
 log = logging.getLogger(__name__)
 NEW_MESSAGE_CHARS = 2600
@@ -22,56 +21,6 @@ TASK_CHARS = 1600
 MAX_TOKENS_SINGLE = 700
 MAX_TOKENS_BATCH = 1200
 TEMPERATURE = 0.0
-CONDITIONAL_PROHIBITION = re.compile(r"(?:未|没|尚未|还没).{0,18}(?:不要|不得|不能|不必|不需要|别|不签)|如果.{0,30}(?:不要|不得|不能|不必)|安全建议|注意(?:交通|人身|旅途|饮食|自身)?安全")
-
-
-class Instruction(BaseModel):
-    model_config = ConfigDict(extra="forbid", strict=True)
-    action: Literal["CREATE", "UPDATE", "RESOLVE", "IGNORE"]
-    title: str | None = Field(default=None, max_length=120)
-    description: str | None = Field(default=None, max_length=4000)
-    owner: str | None = Field(default=None, max_length=100)
-    priority: Literal["high", "medium", "low"] | None = None
-    due_at: str | None = None
-    context_summary: str = Field(default="", max_length=4000)
-    related_task_id: int | None = Field(default=None, gt=0)
-    related_task_ref: str | None = Field(default=None, pattern=r"^\d+:\d+$")
-    resolution: Literal["completed", "cancelled"] = "completed"
-
-    @model_validator(mode="before")
-    @classmethod
-    def relevant_resolution(cls, value):
-        if isinstance(value, dict) and value.get("action") != "RESOLVE":
-            return {key: item for key, item in value.items() if key != "resolution"}
-        return value
-
-    @model_validator(mode="after")
-    def check_action(self):
-        if self.action == "CREATE" and not (self.title and self.title.strip()):
-            raise ValueError("CREATE requires a nonempty title")
-        if self.action in {"UPDATE", "RESOLVE"}:
-            if bool(self.related_task_id) == bool(self.related_task_ref):
-                raise ValueError("Specify exactly one task reference")
-        elif self.related_task_id or self.related_task_ref:
-            raise ValueError("Only UPDATE and RESOLVE reference a task")
-        if self.title is not None and not self.title.strip():
-            raise ValueError("A supplied title cannot be blank")
-        if self.due_at and datetime.fromisoformat(self.due_at.replace("Z", "+00:00")).tzinfo is None:
-            raise ValueError("due_at requires a timezone")
-        return self
-
-
-class Decision(BaseModel):
-    instructions: list[Instruction]
-
-
-class IndexedDecision(BaseModel):
-    index: int = Field(ge=0)
-    instructions: list[Instruction]
-
-
-class BatchDecision(BaseModel):
-    items: list[IndexedDecision]
 
 
 TRUNCATION_MARKER = "\n[…原文过长，完整来源保存在本地…]\n"
@@ -89,31 +38,6 @@ def clip_text(text: str, budget: int) -> str:
     head = min(budget * 2 // 3, budget - len(TRUNCATION_MARKER))
     tail = budget - head - len(TRUNCATION_MARKER)
     return text[:head] + TRUNCATION_MARKER + (text[-tail:] if tail > 0 else "")
-
-
-def guard_decisions(message, instructions, settings=None):
-    """只在引擎落库前检查本人操作权限与可配置的输出限制。"""
-    if instructions is None:
-        return None
-    settings = settings or {}
-    title_limit = settings.get("task_title_max_chars", 120)
-    task_limit = settings.get("max_tasks_per_message", 0)
-    guarded = []
-    creates = 0
-    for command in instructions:
-        reason = ""
-        if message["is_self"] and command.action in {"CREATE", "UPDATE"}:
-            reason = "本人消息不创建或修改待办"
-        elif command.action == "RESOLVE" and command.resolution == "completed" and not message["is_self"]:
-            reason = "他人声称完成不能核销本人待办"
-        elif command.action in {"CREATE", "UPDATE"} and command.title and len(command.title.strip()) > title_limit:
-            reason = f"标题超过配置上限 {title_limit} 字"
-        elif command.action == "CREATE":
-            creates += 1
-            if task_limit and creates > task_limit:
-                reason = f"新建任务超过每段配置上限 {task_limit} 项"
-        guarded.append(Instruction(action="IGNORE", context_summary=reason) if reason else command)
-    return guarded
 
 
 def _brief(message: dict[str, Any]) -> dict[str, Any]:
@@ -205,7 +129,9 @@ class LLMExtractor:
         system = policy if policy is not None else extraction_system(
             self.task_title_max_chars, self.max_tasks_per_message,
             len(data.get("new_messages", [])) if batch else None)
-        user = json.dumps(data, ensure_ascii=False)
+        # 输入用 XML 而不是单行 JSON：每条消息的边界与编号由标签给出，正文实体转义后造不出假边界。
+        render = render_compression if kind == "compress" else render_extraction
+        user = render(data)
         payload = {"model": self.model, "temperature": self.temperature,
                    "max_tokens": max_tokens if max_tokens is not None else (self.max_tokens_batch if batch else self.max_tokens_single),
                    "response_format": {"type": "json_object"},
@@ -261,31 +187,24 @@ class LLMExtractor:
         self.last_outcome = items
         if not self.trace or self.last_call_id is None:
             return
+        diagnostics = self.last_diagnostics if diagnostics is None else diagnostics
         answered = sum(1 for item in items if item.get("final") is not None or item.get("summary"))
         guard = sum(1 for item in items if item.get("proposed") != item.get("final") and item.get("final") is not None)
-        self.trace.outcome(self.last_call_id, {"items": items, "diagnostics": diagnostics or self.last_diagnostics},
+        self.trace.outcome(self.last_call_id, {"items": items, "diagnostics": diagnostics},
                            {"answered": answered, "guard": guard,
                             "rejected": sum(1 for item in items if item.get("rejected")),
-                            "missing": len(diagnostics.get("missing_indexes", [])) if diagnostics else 0})
+                            "missing": len(diagnostics.get("missing_indexes", []))})
 
     def _validate(self, values: Any, tasks: list[dict[str, Any]], index: int | None = None,
-                  decisions: dict[int, list[Instruction]] | None = None) -> list[Instruction] | None:
+                  decisions: dict[int, list[Instruction]] | None = None, session_name: str = "") -> list[Instruction] | None:
         if values == []:
             return [Instruction(action="IGNORE")]
         if not isinstance(values, list) or not values:
             return None
-        known = {task["id"] for task in tasks}
         instructions = []
         for value in values:
             try:
-                if isinstance(value, dict) and value.get("action") == "IGNORE":
-                    value = {"action": "IGNORE", **({"context_summary": value["context_summary"]}
-                             if isinstance(value.get("context_summary"), str) else {})}
-                elif isinstance(value, dict) and value.get("context_summary") is None:
-                    value = {key: item for key, item in value.items() if key != "context_summary"}
-                instruction = Instruction.model_validate(value)
-                if instruction.related_task_id and instruction.related_task_id not in known:
-                    raise ValueError("Unknown task reference")
+                instruction = Instruction.model_validate(clean_instruction(value, tasks, session_name))
                 if instruction.related_task_ref:
                     previous, command = map(int, instruction.related_task_ref.split(":"))
                     existing = (decisions or {}).get(previous, [])
@@ -293,7 +212,7 @@ class LLMExtractor:
                         raise ValueError("Invalid batch task reference")
                 instructions.append(instruction)
             except (ValueError, TypeError):
-                # Keep an item's commands together: a bad command falls back for that
+                # Keep an item's commands together: a bad command defers that
                 # item, while valid siblings in the overall batch remain usable.
                 self.last_error = "InstructionRejected"
                 return None
@@ -334,7 +253,7 @@ class LLMExtractor:
                                    "tasks_available": len(tasks), "tasks_sent": len(pending),
                                    "tasks_chars": task_size, "tasks_budget": self.budgets["tasks"],
                                    "profile_chars": len(profile or ""), "message_budget": self.budgets["new_message"]}
-        return {"now": message["created_at"], "timezone": "Asia/Shanghai",
+        return {"reference_time": message["created_at"], "timezone": "Asia/Shanghai",
                 "session": {"name": session_name, "is_group": message["session_id"].endswith("@chatroom")},
                 "user_profile": profile, "history": history[::-1],
                 "pending_tasks": pending}
@@ -348,7 +267,7 @@ class LLMExtractor:
             return None
         # Also accept the previous one-instruction contract for provider compatibility.
         values = result.get("instructions", [result] if "action" in result else None)
-        validated = self._validate(values, tasks)
+        validated = self._validate(values, data["pending_tasks"], session_name=session_name)
         self._trace_outcome([_item(0, message, result, validated, validated)])
         return validated
 
@@ -360,18 +279,27 @@ class LLMExtractor:
         if result is None:
             return {}
         entries = result.get("items", result.get("instructions", []))
-        if not isinstance(entries, list) or len(entries) > len(items):
+        if not isinstance(entries, list):
             self.last_diagnostics = {"shape_rejected": True, "input_count": len(items)}
             self._trace_outcome([])
             return {}
         indexed = {}
         raw_entries: dict[int, Any] = {}
         duplicated = set()
+        extra_indexes = []
+        unindexed = 0
         for entry in entries:
-            if not isinstance(entry, dict) or type(entry.get("index")) is not int:
+            if not isinstance(entry, dict):
+                unindexed += 1
                 continue
-            index = entry["index"]
+            index = entry.get("index")
+            if type(index) is not int:
+                unindexed += 1
+                continue
+            # 模型偶尔会给没发出去的段落也编一个索引，还会把条数凑满；只丢它自己越界的那几条，
+            # 整批真实回答不能因此作废，否则这些段落每一轮都会重新失败、永远留在队列里。
             if not 0 <= index < len(items):
+                extra_indexes.append(index)
                 continue
             if index in indexed:
                 duplicated.add(index)
@@ -383,7 +311,7 @@ class LLMExtractor:
         for index, values in sorted(indexed.items()):
             if index in duplicated:
                 continue
-            instructions = self._validate(values, tasks, index, answers)
+            instructions = self._validate(values, data["pending_tasks"], index, answers, session_name)
             if instructions is not None:
                 answers[index] = instructions
                 outcome.append(_item(index, items[index], raw_entries[index], instructions, instructions))
@@ -394,7 +322,8 @@ class LLMExtractor:
             outcome.append(_item(index, items[index], raw_entries[index], None, None, note="同一索引重复返回"))
         self.last_diagnostics = {"input_count": len(items), "returned_indexes": sorted(indexed),
                                  "accepted_indexes": sorted(answers), "rejected_indexes": rejected,
-                                 "duplicate_indexes": sorted(duplicated),
+                                 "duplicate_indexes": sorted(duplicated), "extra_indexes": sorted(extra_indexes),
+                                 "unindexed_entries": unindexed,
                                  "missing_indexes": sorted(set(range(len(items))) - set(indexed))}
         self._trace_outcome(outcome)
         return answers
@@ -409,8 +338,8 @@ class LLMExtractor:
                 item["final"] = [command.model_dump() for command in commands]
         self._trace_outcome(self.last_outcome, self.last_diagnostics)
 
-    def record_deferred(self, message) -> None:
+    def record_deferred(self, message, note="引用的同批创建未落地，本段保持未处理，下轮再请求") -> None:
         for item in self.last_outcome:
             if item["message_ids"] == message["message_ids"]:
-                item["note"] = "引用的同批创建未落地，本段保持未处理，下轮再请求"
+                item["note"] = note
         self._trace_outcome(self.last_outcome, self.last_diagnostics)

@@ -7,6 +7,7 @@ import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
+from xml.etree import ElementTree
 
 from fastapi.testclient import TestClient
 
@@ -15,6 +16,11 @@ from niannian.jobs import ExtractionJobs
 from niannian.storage import Database, utc_now
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def user_document(request_body):
+    """模型收到的 user content 是 XML，按标签读回内容本身。"""
+    return ElementTree.fromstring(request_body["messages"][1]["content"])
 
 
 def fixture():
@@ -99,7 +105,7 @@ class TraceTests(unittest.TestCase):
         self.assertNotIn("api_key", sent_text)
         self.assertNotIn("Bearer", sent_text)
         self.assertNotIn("example.invalid", sent_text)
-        self.assertEqual(json.loads(sent["messages"][1]["content"])["new_message"]["content"], self.message["content"])
+        self.assertEqual(user_document(sent).findtext("./current_messages/message/content"), self.message["content"])
         self.assertIn("只提炼微信账号本人", sent["messages"][0]["content"])
         self.assertIs(sent["enable_thinking"], False)
         self.assertIn("确认交付对象A", call["response_text"])
@@ -126,14 +132,13 @@ class TraceTests(unittest.TestCase):
         rows = self.db.model_call_rows(days=30)
         self.assertEqual([row["kind"] for row in rows][::-1], ["compress", "single"])
         compression = self.db.model_call_detail(rows[1]["id"])
-        source_text = json.loads(compression["request_json"]["messages"][1]["content"])
-        self.assertEqual(source_text["source_text"], self.message["content"])
+        self.assertEqual(user_document(compression["request_json"]).findtext("source"), self.message["content"])
         self.assertEqual(compression["outcome_json"]["items"][0]["summary"], summary)
         self.assertEqual(compression["message_ids"], [compression["messages"][0]["id"]])
         extract = self.db.model_call_detail(rows[0]["id"])
         self.assertTrue(extract["stats_json"]["compressed_segments"][0])
         self.assertEqual(extract["segment_summary"], summary)
-        self.assertEqual(json.loads(extract["request_json"]["messages"][1]["content"])["new_message"]["content"], summary)
+        self.assertEqual(user_document(extract["request_json"]).findtext("./current_messages/message/content"), summary)
 
     def test_guard_rejection_is_visible_with_reason_and_landing(self):
         message_id = self.ingest()

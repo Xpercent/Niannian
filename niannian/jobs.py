@@ -36,20 +36,45 @@ class ExtractionJobs:
 
     def start(self, force=True, session_id=None) -> dict:
         with self.lock:
-            if self.current and self.current["status"] == "running":
-                return dict(self.current)
-            if self.stop_event.is_set():
-                raise RuntimeError("服务正在退出")
-            self.cancel_event.clear()
-            self.current = {"id": uuid.uuid4().hex, "status": "running", "started_at": utc_now(),
-                            "finished_at": None, "total": 0, "done": 0, "session": None,
-                            "result": None, "error": None, "cancel_requested": False,
-                            "trigger": "manual" if force else "scheduled"}
-            self._persist(self.current)
-            self.worker = Thread(target=self._execute, args=(force, session_id, self.current["id"]),
-                                 name="extraction-worker", daemon=True)
-            self.worker.start()
+            return self._start_locked(force, session_id)
+
+    def _start_locked(self, force, session_id=None) -> dict:
+        if self.current and self.current["status"] == "running":
             return dict(self.current)
+        if self.stop_event.is_set():
+            raise RuntimeError("服务正在退出")
+        self.cancel_event.clear()
+        self.current = {"id": uuid.uuid4().hex, "status": "running", "started_at": utc_now(),
+                        "finished_at": None, "total": 0, "done": 0, "session": None,
+                        "result": None, "error": None, "cancel_requested": False,
+                        "trigger": "manual" if force else "scheduled"}
+        self._persist(self.current)
+        self.worker = Thread(target=self._execute, args=(force, session_id, self.current["id"]),
+                             name="extraction-worker", daemon=True)
+        self.worker.start()
+        return dict(self.current)
+
+    def _schedule_once(self) -> None:
+        interval = self.config.read()["batch_interval_seconds"]
+        with self.lock:
+            anchor = self.last_finished
+            if (self.current and self.current["status"] == "running") or time.monotonic() - anchor < interval:
+                return
+        try:
+            has_work = self.engine.has_work()
+        except Exception:
+            log.exception("调度失败")
+            has_work = False
+        with self.lock:
+            # 查积压期间手动轮次可能已开始甚至结束；不能覆盖它的新间隔或立即再开一轮。
+            if self.last_finished != anchor or (self.current and self.current["status"] == "running"):
+                return
+            if self.stop_event.is_set():
+                return
+            if has_work:
+                self._start_locked(False)
+            else:
+                self.last_finished = time.monotonic()
 
     def _progress(self, *args, **kwargs):
         if len(args) == 1 and isinstance(args[0], dict):
@@ -102,17 +127,10 @@ class ExtractionJobs:
 
     def _schedule(self):
         while not self.stop_event.wait(1):
-            interval = self.config.read()["batch_interval_seconds"]
-            with self.lock:
-                running = self.current and self.current["status"] == "running"
-                due = not running and time.monotonic() - self.last_finished >= interval
-            if due:
-                try:
-                    self.start(force=False)
-                except Exception:
-                    log.exception("调度失败")
-                    with self.lock:
-                        self.last_finished = time.monotonic()
+            try:
+                self._schedule_once()
+            except Exception:
+                log.exception("调度失败")
 
     def stop(self) -> None:
         self.stop_event.set()

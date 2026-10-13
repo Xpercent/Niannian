@@ -13,8 +13,9 @@ from threading import Lock
 from typing import Any
 
 from . import local_rules
-from .llm import (Instruction, LLMExtractor, HISTORY_CHARS, HISTORY_ROWS, MAX_TOKENS_BATCH,
-                  MAX_TOKENS_SINGLE, NEW_MESSAGE_CHARS, TASK_CHARS, TEMPERATURE, guard_decisions)
+from .instructions import Instruction, guard_decisions
+from .llm import (LLMExtractor, HISTORY_CHARS, HISTORY_ROWS, MAX_TOKENS_BATCH,
+                  MAX_TOKENS_SINGLE, NEW_MESSAGE_CHARS, TASK_CHARS, TEMPERATURE)
 from .media import attachment_only
 from .prompts import COMPRESSION_VERSION
 from .storage import canonical_time, parse_time, utc_now
@@ -22,6 +23,10 @@ from .storage import canonical_time, parse_time, utc_now
 log = logging.getLogger(__name__)
 BATCH_CHAR_BUDGET = 4200
 IGNORED_KEEP_PER_SESSION = 100
+
+
+class DeferredInstruction(Exception):
+    """目标已失效或版本冲突时，回滚整段并留到下一轮。"""
 
 
 class ModelCallTrace:
@@ -86,6 +91,14 @@ class Engine:
         scopes = {(row["session_id"], row["account"]) for row in rows}
         ready = {scope for scope in scopes if self._session_ready(*scope, force, values)}
         return [row for row in rows if (row["session_id"], row["account"]) in ready]
+
+    def has_work(self, values=None) -> bool:
+        """只查候选会话，不为调度预读整个积压的消息正文。"""
+        values = self._settings() if values is None else values
+        scopes = self.db.rows(
+            "SELECT DISTINCT m.session_id,m.account FROM messages m JOIN sessions s ON s.id=m.session_id "
+            "WHERE s.monitored=1 AND m.processed=0 AND m.account=s.account")
+        return any(self._session_ready(row["session_id"], row["account"], False, values) for row in scopes)
 
     def aggregate(self, messages, merge_window_seconds=None):
         window = (self._settings().get("merge_window_seconds", 60) if merge_window_seconds is None
@@ -372,34 +385,46 @@ class Engine:
                         answer = guard_decisions(item, answer, values)
                         source = "rule"
                     item_counts = defaultdict(int)
-                    with self.db.connect() as conn:
-                        conn.execute("BEGIN IMMEDIATE")
-                        active = conn.execute("SELECT monitored,account FROM sessions WHERE id=?", (scope[1],)).fetchone()
-                        ids = item["message_ids"]
-                        marks = ",".join("?" for _ in ids)
-                        unprocessed = conn.execute(f"SELECT COUNT(*) FROM messages WHERE id IN ({marks}) AND processed=0", ids).fetchone()[0]
-                        if not active or not active["monitored"] or active["account"] != scope[0] or unprocessed != len(ids):
-                            item_counts["skipped"] += 1
-                        else:
-                            for command_index, instruction in enumerate(answer):
-                                if instruction.related_task_ref:
-                                    instruction = instruction.model_copy(update={"related_task_id": references[instruction.related_task_ref],
-                                                                                 "related_task_ref": None})
-                                outcome, task_id = self._apply(conn, item, instruction, source,
-                                                              expected_versions.get(instruction.related_task_id) if source == "llm" else None)
-                                if outcome:
-                                    item_counts[outcome] += 1
-                                    version = conn.execute("SELECT version FROM tasks WHERE id=?", (task_id,)).fetchone()[0]
-                                    expected_versions[task_id] = version
-                                    if outcome in {"created", "merged"}:
-                                        references[f"{index}:{command_index}"] = task_id
-                                else:
-                                    item_counts["ignored"] += 1
-                                    reason = instruction.context_summary if instruction.action == "IGNORE" else "指令未落地：重复待办、目标失效或版本已变化"
-                                    self._ignored(conn, item, source, reason or "无需行动", ignored_keep)
-                            conn.execute(f"UPDATE messages SET processed=1 WHERE id IN ({marks})", ids)
-                            item_counts["processed"] += len(ids)
-                            item_counts[f"{source}_decided"] += 1
+                    item_versions = dict(expected_versions)
+                    item_references = {}
+                    try:
+                        with self.db.connect() as conn:
+                            conn.execute("BEGIN IMMEDIATE")
+                            active = conn.execute("SELECT monitored,account FROM sessions WHERE id=?", (scope[1],)).fetchone()
+                            ids = item["message_ids"]
+                            marks = ",".join("?" for _ in ids)
+                            unprocessed = conn.execute(f"SELECT COUNT(*) FROM messages WHERE id IN ({marks}) AND processed=0", ids).fetchone()[0]
+                            if not active or not active["monitored"] or active["account"] != scope[0] or unprocessed != len(ids):
+                                item_counts["skipped"] += 1
+                            else:
+                                for command_index, instruction in enumerate(answer):
+                                    if instruction.related_task_ref:
+                                        instruction = instruction.model_copy(update={"related_task_id": references[instruction.related_task_ref],
+                                                                                     "related_task_ref": None})
+                                    outcome, task_id = self._apply(conn, item, instruction, source,
+                                                                  item_versions.get(instruction.related_task_id) if source == "llm" else None)
+                                    if outcome:
+                                        item_counts[outcome] += 1
+                                        version = conn.execute("SELECT version FROM tasks WHERE id=?", (task_id,)).fetchone()[0]
+                                        item_versions[task_id] = version
+                                        if outcome in {"created", "merged"}:
+                                            item_references[f"{index}:{command_index}"] = task_id
+                                    elif instruction.action != "IGNORE":
+                                        raise DeferredInstruction("目标失效、版本变化或新建未落地；本段保持未处理")
+                                    else:
+                                        item_counts["ignored"] += 1
+                                        self._ignored(conn, item, source, instruction.context_summary or "无需行动", ignored_keep)
+                                conn.execute(f"UPDATE messages SET processed=1 WHERE id IN ({marks})", ids)
+                                item_counts["processed"] += len(ids)
+                                item_counts[f"{source}_decided"] += 1
+                    except DeferredInstruction as exc:
+                        item_counts = {"skipped": 1}
+                        if source == "llm":
+                            extractor.record_deferred(item, str(exc))
+                    else:
+                        # 引用与版本快照只在整段事务提交后更新，不能指向回滚的新任务。
+                        expected_versions = item_versions
+                        references.update(item_references)
                     for key, number in item_counts.items():
                         counts[key] += number
                     done += 1

@@ -5,8 +5,10 @@ from __future__ import annotations
 import re
 from datetime import timedelta
 
-from .llm import CONDITIONAL_PROHIBITION, Instruction
+from .instructions import Instruction
 from .storage import SHANGHAI, parse_time
+
+CONDITIONAL_PROHIBITION = re.compile(r"(?:未|没|尚未|还没).{0,18}(?:不要|不得|不能|不必|不需要|别|不签)|如果.{0,30}(?:不要|不得|不能|不必)|安全建议|注意(?:交通|人身|旅途|饮食|自身)?安全")
 
 CANCEL = re.compile(r"(?:已)?取消|不用(?:处理|做|提交)|无需(?:处理|做|提交)|撤销")
 COMPLETE = re.compile(r"已完成|完成了|已发送|已发给|已经发|发给你了|处理好了|搞定了")
