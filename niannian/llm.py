@@ -5,9 +5,12 @@ from __future__ import annotations
 import json
 import logging
 import re
+import ssl
 import time
 from typing import Any
 from urllib.request import Request, urlopen
+
+import certifi
 
 from .prompts import COMPRESSION_POLICY, extraction_system
 from .model_context import render_compression, render_extraction
@@ -24,6 +27,17 @@ TEMPERATURE = 0.0
 
 
 TRUNCATION_MARKER = "\n[…原文过长，完整来源保存在本地…]\n"
+
+
+def _https_context() -> ssl.SSLContext:
+    # Windows 下 Python 只加载当前用户的 ROOT 存储且不做 AIA 补链，服务商少发中间证书时
+    # 会出现“unable to get local issuer certificate”。公共 CA 包提供其余信任锚。
+    context = ssl.create_default_context()
+    context.load_verify_locations(cafile=certifi.where())
+    return context
+
+
+HTTPS_CONTEXT = _https_context()
 
 
 def clip_text(text: str, budget: int) -> str:
@@ -90,7 +104,7 @@ class LLMExtractor:
         request = Request(self.endpoint, data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
                           headers={"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"},
                           method="POST")
-        return urlopen(request, timeout=self.timeout)
+        return urlopen(request, timeout=self.timeout, context=HTTPS_CONTEXT)
 
     def probe(self) -> str | None:
         try:
