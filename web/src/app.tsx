@@ -113,7 +113,7 @@ export function App() {
           </a>
         </nav>
         <div className="mt-auto rounded-lg bg-stone-50 p-3 text-xs leading-5 text-stone-500">
-          阶段一：仅微信会话看板。
+          阶段二：微信会话看板 + 图片显示。
           {status?.account ? (
             <span className="mt-1 block break-all text-stone-400">
               账号 {status.account}

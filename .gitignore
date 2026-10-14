@@ -8,3 +8,5 @@ config.json
 web/node_modules/
 web/dist/
 .replica-backup-tmp/
+web/tsconfig.tsbuildinfo
+wechatauto_logs/

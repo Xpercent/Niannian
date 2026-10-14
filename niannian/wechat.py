@@ -27,11 +27,34 @@ from pathlib import Path
 from xml.etree import ElementTree
 
 from .config import clamp_history_limit
+from .media import ImageStore, hash_from_blob, parse_image, summarize
 from .storage import Database, now_utc
 
 log = logging.getLogger(__name__)
 
 GROUP_PREFIX = re.compile(r"^(wxid_[^:\s<>]+):\s*\n")
+PACKED_COLUMNS = "sort_seq, local_id, packed_info_data"
+
+
+def media_hash_map(conn: sqlite3.Connection, table: str, wanted: set) -> dict:
+    """{(sort_seq, local_id): 本机附件文件哈希}。
+
+    这个哈希只在 ``packed_info_data`` 里，正文 XML 的 ``md5`` 属性是另一套值，
+    拿它去 attach 目录找文件一条也找不到。
+    """
+    if not wanted:
+        return {}
+    seqs = sorted({seq for seq, _ in wanted})
+    quoted = '"%s"' % str(table).replace('"', '""')
+    marks = ",".join("?" * len(seqs))
+    cursor = conn.execute(
+        f"SELECT {PACKED_COLUMNS} FROM {quoted} WHERE sort_seq IN ({marks})", seqs)
+    found = {}
+    for sort_seq, local_id, blob in cursor:
+        key = (int(sort_seq), int(local_id))
+        if key in wanted:
+            found[key] = hash_from_blob(blob)
+    return found
 
 
 def sender_alias_map(conn: sqlite3.Connection, table: str,
@@ -104,6 +127,7 @@ def normalize_message(account: str, username: str, session_name: str,
     """把上游真实行转换成本地消息记录；不美化、不猜测内容。"""
     raw = str(message.get("content") or "")
     origin, body = split_sender(raw)
+    attachment = parse_image(body)
     resolved = str(message.get("sender_username") or "")
     sender = resolved or origin
     is_self = bool(sender) and sender == account
@@ -128,7 +152,8 @@ def normalize_message(account: str, username: str, session_name: str,
         "sender_key": sender_key_value,
         "sender_name": sender_name,
         "is_self": is_self,
-        "content": body or f"[{message.get('type') or '消息'}]",
+        "content": (summarize(attachment) if attachment
+                    else body or f"[{message.get('type') or '消息'}]"),
         "message_type": str(message.get("type") or "文本"),
         "created_at": created.isoformat(timespec="seconds"),
         "sort_seq": int(message.get("sort_seq") or 0),
@@ -140,6 +165,7 @@ def normalize_message(account: str, username: str, session_name: str,
             "sender_id": message.get("sender_id"),
             "origin_sender_username": origin,
             "resolved_sender_username": resolved,
+            "attachment": attachment,
         },
     }
 
@@ -196,25 +222,40 @@ def open_isolated_db(root: Path, settings: dict):
         def _stable_key_dirs(self):
             return [str(cache_root / "keys")]
 
-        def _fix_senders(self, user: str, rows: list) -> list:
-            """用分片内 Name2Id 覆盖上游 sender_username；解析不到的置空，回落到正文前缀。"""
-            wanted = {(int(r.get("sort_seq") or 0), int(r.get("local_id") or 0))
-                      for r in rows}
-            found = {}
+        def _each_shard(self, user: str, wanted: set, collect) -> dict:
+            """在该会话命中的每个消息分片上跑一次 collect(conn, table, wanted)。
+
+            分片级查询一律按 ``(sort_seq, local_id)`` 定位：``local_id`` 各分片
+            独立计数，跨分片不唯一。
+            """
+            found: dict = {}
+            if not wanted:
+                return found
             conns = self._msg_conns(user)
             try:
                 for conn, table in conns:
                     try:
-                        found.update(sender_alias_map(conn, table, wanted))
+                        found.update(collect(conn, table, wanted))
                     except sqlite3.Error:
                         continue
             finally:
                 for conn, _ in conns:
                     conn.close()
+            return found
+
+        def _fix_senders(self, user: str, rows: list) -> list:
+            """用分片内 Name2Id 覆盖上游 sender_username；解析不到的置空，回落到正文前缀。"""
+            wanted = {(int(r.get("sort_seq") or 0), int(r.get("local_id") or 0))
+                      for r in rows}
+            found = self._each_shard(user, wanted, sender_alias_map)
             for row in rows:
                 key = (int(row.get("sort_seq") or 0), int(row.get("local_id") or 0))
                 row["sender_username"] = found.get(key, "")
             return rows
+
+        def media_hashes(self, user: str, keys: set) -> dict:
+            """批量取图片行的本机文件哈希（只走采集线程，读上游库）。"""
+            return self._each_shard(user, keys, media_hash_map)
 
         def get_messages(self, user, limit=20, offset=0):
             return self._fix_senders(
@@ -246,8 +287,13 @@ class Collector:
             "mode": "read_only",
         }
         self._wx = None
+        self._media = None
 
     # ------------------------------------------------------------ 对外接口
+    @property
+    def media(self):
+        """图片链接解析器；未连接时为 None（此时库里已有链接仍可由 API 使用）。"""
+        return self._media
     def status(self) -> dict:
         with self._guard:
             return {**self._state,
@@ -301,6 +347,8 @@ class Collector:
             if not account:
                 raise RuntimeError("无法确定当前微信账号。")
             self._state_update(account=account)
+            from wechatauto.media import MediaDownloader
+            self._media = ImageStore(MediaDownloader(self._wx), self.root, account)
             self._sync_catalog()
             self._state_update(state="connected", error=None)
         except Exception as exc:
@@ -308,6 +356,7 @@ class Collector:
             self._state_update(state="error", error=message[:300])
             log.warning("微信连接失败：%s", message)
             self._wx = None
+            self._media = None
             self._drain_commands()
             if self._stop.is_set():
                 self._state_update(state="stopped")
@@ -334,6 +383,7 @@ class Collector:
                     log.warning("采集轮次失败：%s", exc)
         finally:
             self._wx = None
+            self._media = None
             self._drain_commands()
             self._state_update(state="stopped")
 
@@ -427,6 +477,7 @@ class Collector:
                                              int(m.get("local_id") or 0))):
             payloads.append(normalize_message(
                 account, session["username"], session.get("name", ""), message, names))
+        self._attach_media(session["username"], payloads)
         highest = max([int(watermark)] + [p["sort_seq"] for p in payloads]) if payloads \
             else int(watermark)
         checkpoint = {"account": account, "session_id": session["id"],
@@ -434,3 +485,27 @@ class Collector:
         inserted = self.db.ingest(payloads, checkpoint=checkpoint)
         self._state_update(imported=self._state["imported"] + inserted)
         return {"inserted": inserted, "read": len(payloads)}
+
+    def _attach_media(self, username: str, payloads: list[dict]) -> None:
+        """给图片行补本机文件链接。只读微信已有文件，绝不驱动界面去下载。
+
+        本机一份都没有时只写 ``media_md5``：文件可能之后才落到盘上，
+        API 读取时会凭这个哈希再补一次，不需要再碰上游库。
+        """
+        if self._media is None:
+            return
+        images = [p for p in payloads if p["metadata"].get("attachment")]
+        if not images:
+            return
+        keys = {(p["sort_seq"], int(p["metadata"].get("local_id") or 0))
+                for p in images}
+        digests = self._wx.media_hashes(username, keys)
+        for payload in images:
+            meta = payload["metadata"]
+            digest = digests.get(
+                (payload["sort_seq"], int(meta.get("local_id") or 0)), "")
+            meta["media_md5"] = digest
+            linked = self._media.attach(username, digest,
+                                        f"{username}_{payload['sort_seq']}")
+            if linked:
+                meta.update(linked)

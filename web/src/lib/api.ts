@@ -12,6 +12,25 @@ export type SessionRow = {
   message_count?: number;
 };
 
+export type AttachmentInfo = { kind: string };
+
+/** 消息 metadata：采集线程写入，图片只存本机相对链接（不存二进制）。 */
+export type MessageMeta = {
+  local_id?: number;
+  server_id?: number | string | null;
+  sort_seq?: number;
+  type?: string;
+  sender_id?: number;
+  origin_sender_username?: string;
+  resolved_sender_username?: string;
+  attachment?: AttachmentInfo;
+  media_md5?: string;
+  local_file?: string;
+  tier?: string;
+  tier_label?: string;
+  bytes?: number;
+};
+
 export type MessageRow = {
   id: number;
   session_id: string;
@@ -23,7 +42,7 @@ export type MessageRow = {
   message_type: string;
   created_at: string;
   sort_seq: number;
-  metadata: Record<string, unknown>;
+  metadata: MessageMeta;
 };
 
 export type MessagePage = {
@@ -110,3 +129,20 @@ export const clockText = (value?: string | null) => {
     hour12: false,
   }).format(date);
 };
+
+/**
+ * 库里只存 `<账号指纹>/<文件名>` 形式的本机相对链接，这里拼成 /media 可访问的 URL。
+ * 绝对路径、盘符、UNC、`..` 一律不拼（后端 safe_media_path 是最终把关）。
+ */
+export function mediaUrl(value?: string | null) {
+  if (!value) return "";
+  const stored = (value.startsWith("/media/") ? value.slice(7) : value).replace(
+    /\\/g,
+    "/",
+  );
+  if (/^(?:[a-z]:|\/\/)/i.test(stored)) return "";
+  const parts = stored.split("/").filter(Boolean);
+  if (!parts.length || parts.length > 2) return "";
+  if (parts.some((part) => part === "." || part === "..")) return "";
+  return `/media/${parts.map(encodeURIComponent).join("/")}`;
+}

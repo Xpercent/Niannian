@@ -1,39 +1,45 @@
 # HANDOFF.md — 交接
 
 ## 当前状态
-阶段一「微信会话看板」可运行：只读采集本机微信 4.x 本地库，关注会话后自动
-导入最近 `history_limit` 条并按水位增量续采，FastAPI + React 看板展示。
-`pytest` 14 项通过；服务 `python -m niannian` → http://127.0.0.1:8765。
+阶段二「图片显示」已交付并可运行：只读采集本机微信 4.x 库，关注会话后自动
+导入 + 水位增量，图片解密到工程媒体目录、**库里只存相对链接**，看板渲染缩略图
+并可点击放大。`pytest` 22 项通过；服务 `python -m niannian` → http://127.0.0.1:8765。
 
-## 最近一轮：修复微信发送者名字解析错误
-**症状**：群里出现根本不是群成员的署名（如"吴寒"），且私聊里自己发的消息
-全部署上对方的名字（`is_self` 恒为 0，王五月会话 95 条"王五月"/5 条"我"）。
+## 上一轮：修复微信发送者名字解析错误
+根因：微信 4.x 的 `Msg_*.real_sender_id` 指向**每个消息分片库自己的 `Name2Id`**，
+上游 `wechatauto` 却拿 `message_resource.db` 的全局 `SenderName2Id` 解析，两套 id
+空间互不相通。带 `wxid_x:` 前缀的群聊文本被前缀救回，无前缀的行（自己发的消息、
+emoji、图片、系统消息）全部落到错映射 → 群里冒出非群成员署名、私聊 `is_self` 恒 0。
+修法：`IsolatedDB` 按分片还原 `sender_username`，`normalize_message` 改为分片解析
+优先、前缀兜底。原项目有同一隐患，只是它只导入过"全员带前缀"的通知群没暴露。
 
-**根因**：微信 4.x 消息分片库的 `Msg_*.real_sender_id` 指向**该分片库自己的
-`Name2Id` 表**，而上游 `wechatauto` 拿 `message_resource.db` 的全局
-`SenderName2Id` 解析，两套 id 空间互不相通。正文带 `wxid_x:` 前缀的行靠前缀
-侥幸正确，无前缀的行（自己发的消息 / emoji / 图片 / 系统消息）全部落到错误映射。
+## 本轮：图片显示
+三条实测事实（细节见 `docs/REFACTOR-LOG.md` 与 `AGENTS.md`）：
+1. 磁盘文件名哈希**只在 `packed_info_data`** 里，XML 的 `md5` 属性是另一套值。
+2. 没在微信里点开过的图片只有 `_t.dat` 预览图，**能解**（单字节 XOR）：23 张里
+   8 张只有预览图。上游 `tier='best'` 本来就会回落到预览图档。
+3. 原版的真正缺口是**时机**：提取只挂在采集那一刻，而微信的预览图是翻到才落盘
+   ——它库里 28 条图片只有 8 条有链接，今天对这 32 条重跑却是 32/32 全可解。
 
-**改动**（仅 `niannian/wechat.py` + 测试，未碰子模块）：
-- 新增 `sender_alias_map()`：按 `(sort_seq, local_id)` 从分片 `Name2Id` 取真实发送者。
-- `IsolatedDB` 覆写 `get_messages` / `get_new_messages`，经 `_fix_senders` 重写
-  `sender_username`（解析不到则置空，回落到正文前缀）。
-- `normalize_message` 改为**分片解析优先、正文前缀兜底**。
+改动：新增 `niannian/media.py`（`parse_image` / `hash_from_blob` / `pick_tier` /
+`ImageStore` / `safe_media_path`），采集线程补 `media_md5` + `local_file`，
+`api.py` 加 `GET /media/{name}` 与**读取时凭哈希回填**的 `_link_media`，
+前端 `mediaUrl()` + 图片气泡与放大弹窗（标注原图/本机图/预览图）。
 
-**验证**：清库重采后，群 100 条署名全部落在真实 4 名群成员内（"吴寒"16 条
-→"我"16 条）；89 条带前缀的行前缀与分片解析**零冲突**；私聊 `is_self` 变成分
-布自然的 56/44；增量轮询路径 `get_new_messages` 单测同规则通过；浏览器实测
-群聊与私聊署名均正确。
-
-**残留**：1 条拍一拍 appmsg 的 `real_sender_id=9` 在 `Name2Id` 里 `user_name`
-为空，回落显示"群成员"（原版同场景显示成"助班学长"，已是改善）。
+验证：清库重采 200 条、23 张图片全部拿到链接（9 原图 / 6 本机图 / 8 预览图）；
+预览图 URL 返回 200 `image/jpeg`；五种越界路径全部 404；抹掉链接后重新请求能
+自动补回并持久化；浏览器 9 个图片气泡 8 个渲染、空态文案正确、弹窗 Esc/遮罩
+均可关。截图受限于内置浏览器隐藏标签（Chrome 不加载 hidden 页的懒加载图）。
 
 ## 待用户决定
 - 空 `user_name` 的系统/拍一拍类消息怎么署名（"系统"？按 `message_type` 特判？）。
-- 群成员显示名策略：当前沿用原版「备注优先于昵称」（故显示"26同"而非群内昵称
+- 群成员显示名策略：当前沿用原版「备注优先于昵称」（显示"26同"而非群内昵称
   "鱼尾巴不吃"），是否改为贴近微信界面优先群内昵称。
-- 非纯文本消息（图片/转账/卡片）的 XML 正文格式化，属阶段二候选。
+- 预览图档位要不要在气泡上就标注（现在只在放大弹窗里标）。
+- 下一阶段做哪类附件：视频/语音/文件/卡片，还是目录过滤与提炼链路。
 
 ## 环境备注
-- 旧的问题库保留为 `data/niannian.db.bad-1`（含修复前数据，可对照；确认可删）。
-- `data/diag_*.py`、`data/verify_senders.py` 是本轮排查脚本，`data/` 不入库。
+- 旧的问题库保留为 `data/niannian.db.bad-1`（发送者修复前的数据，可对照；确认可删）。
+- `data/diag_*.py`、`data/probe_media.py`、`data/verify_senders.py` 是排查脚本，
+  `data/` 不入库。
+- 图片落盘在 `data/wechat/media/<账号指纹>/`，清库不会自动清这里，需要时手动删。

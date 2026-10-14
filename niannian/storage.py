@@ -210,3 +210,9 @@ class Database:
             "before_id": rows[-1]["id"] if rows else None,
             "has_more": has_more,
         }
+
+    def update_metadata(self, message_id: int, metadata: dict) -> None:
+        """整块改写一条消息的 metadata（补媒体链接用），不动内容与水位。"""
+        with self._write_lock, self.connect() as conn:
+            conn.execute("UPDATE messages SET metadata=? WHERE id=?",
+                         (json.dumps(metadata, ensure_ascii=False), int(message_id)))
