@@ -6,7 +6,10 @@ import { Dialog, cn } from "./ui";
 export function Message({ message }: { message: MessageRow }) {
   const [zoom, setZoom] = useState(false);
   const media = mediaUrl(message.metadata?.local_file);
-  const picture = message.metadata?.attachment?.kind === "image";
+  const attachment = message.metadata?.attachment;
+  const tier = message.metadata?.tier;
+  const tierLabel = message.metadata?.tier_label;
+  const picture = attachment?.kind === "image";
   return (
     <article
       className={cn(
@@ -39,7 +42,7 @@ export function Message({ message }: { message: MessageRow }) {
               type="button"
               onClick={() => setZoom(true)}
               aria-label="放大查看图片"
-              className="mt-2 block w-fit cursor-zoom-in overflow-hidden rounded-md ring-stone-200 transition hover:ring-2 focus-visible:outline-none focus-visible:ring-2"
+              className="relative mt-2 block w-fit cursor-zoom-in overflow-hidden rounded-md ring-stone-200 transition hover:ring-2 focus-visible:outline-none focus-visible:ring-2"
             >
               <img
                 src={media}
@@ -47,15 +50,28 @@ export function Message({ message }: { message: MessageRow }) {
                 loading="lazy"
                 className="max-h-64 max-w-full object-contain"
               />
+              {tier === "thumb" && (
+                <span className="absolute left-1.5 top-1.5 rounded bg-stone-900/65 px-1.5 py-0.5 text-[10px] leading-4 text-white">
+                  预览图
+                </span>
+              )}
             </button>
-            <Dialog open={zoom} onClose={() => setZoom(false)} className="max-w-3xl">
+            <Dialog
+              open={zoom}
+              onClose={() => setZoom(false)}
+              padded={false}
+              width="w-fit max-w-[min(1200px,94vw)]"
+            >
+              {/* 不给 w-full：预览图只有几百像素，拉满弹窗宽度只会糊成一团。
+                  尺寸上限由弹窗扛，图片只用 max-w-full 保证不越界、不放大。 */}
               <img
                 src={media}
                 alt="微信图片"
-                className="max-h-[70vh] w-full rounded-md bg-stone-100 object-contain"
+                className="block h-auto max-h-[74vh] w-auto max-w-full bg-stone-100 object-contain"
               />
-              <p className="mt-2 text-center text-xs text-stone-400">
-                {message.metadata?.tier_label || "本机图片"} · 按 Esc 关闭
+              <p className="flex items-center justify-between gap-3 border-t border-stone-100 px-4 py-2 text-xs text-stone-400">
+                <span>{tierLabel || "本机图片"}</span>
+                <span>按 Esc 关闭</span>
               </p>
             </Dialog>
           </>
