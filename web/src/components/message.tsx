@@ -81,6 +81,7 @@ export function Message({
               open={zoom}
               onClose={() => setZoom(false)}
               padded={false}
+              closable={false}
               width="w-fit max-w-[min(1200px,94vw)]"
             >
               {/* 不给 w-full：预览图只有几百像素，拉满弹窗宽度只会糊成一团。

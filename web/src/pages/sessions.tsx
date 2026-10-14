@@ -59,6 +59,8 @@ export function SessionsPage({ sessions, onRefresh, notify, selectedId, onSelect
   const [catalogError, setCatalogError] = useState("");
   const requestSeq = useRef(0);
   const conversationRef = useRef<HTMLDivElement>(null);
+  const loadingOlder = useRef(false);
+  const scrollAnchor = useRef<{ height: number; top: number } | null>(null);
   const jumpToBottom = useRef(false);
   const nearBottom = useRef(true);
   const controller = useRef<AbortController | null>(null);
@@ -154,12 +156,49 @@ export function SessionsPage({ sessions, onRefresh, notify, selectedId, onSelect
     panel.scrollTop = panel.scrollHeight;
   }, [loading, messages]);
 
+  // 往上补了一屏，按新增高度把视口顶回去——读的位置不能跳。
+  useEffect(() => {
+    const panel = conversationRef.current;
+    const anchor = scrollAnchor.current;
+    if (!panel || !anchor) return;
+    scrollAnchor.current = null;
+    panel.scrollTop = anchor.top + (panel.scrollHeight - anchor.height);
+  }, [messages]);
+
+  // 一屏还没占满就没有"滚到顶部"的机会，继续补更早的，直到占满或翻到最旧。
+  useEffect(() => {
+    const panel = conversationRef.current;
+    if (!panel || loading || !hasMore) return;
+    if (panel.scrollHeight <= panel.clientHeight + 8) void loadOlder();
+  }, [loading, messages, hasMore]);
+
   // 用户翻看历史时不打断：只有贴在底部时才跟随新消息滚动。
   function trackScroll() {
     const panel = conversationRef.current;
     if (!panel) return;
     nearBottom.current =
       panel.scrollHeight - panel.scrollTop - panel.clientHeight < 120;
+    // 滚到接近顶部就自动取更早的一屏：原来那颗"加载更早消息"按钮就是干这个的，
+    // 但没人愿意连着点第二下。
+    if (panel.scrollTop < 200) void loadOlder();
+  }
+
+  /**
+   * 往上取更早的一屏。
+   *
+   * 滚动事件会连着触发几十次，所以除了 `loading`/`hasMore`，还要一把自己的锁；
+   * 同时记下当前视口，补完内容后按新增高度顶回去，否则读着读着会被跳走。
+   */
+  async function loadOlder() {
+    if (!selected || !hasMore || loading || loadingOlder.current) return;
+    loadingOlder.current = true;
+    const panel = conversationRef.current;
+    if (panel) scrollAnchor.current = { height: panel.scrollHeight, top: panel.scrollTop };
+    try {
+      await loadConversation(selected.id, true);
+    } finally {
+      loadingOlder.current = false;
+    }
   }
 
   /**
@@ -427,18 +466,6 @@ export function SessionsPage({ sessions, onRefresh, notify, selectedId, onSelect
                     aria-label="正在读取消息"
                   >
                     <Loader2 className="size-5 animate-spin motion-reduce:animate-none" />
-                  </div>
-                )}
-                {hasMore && (
-                  <div className="text-center">
-                    <Button
-                      disabled={loading}
-                      variant="ghost"
-                      size="sm"
-                      onClick={() => loadConversation(selected.id, true)}
-                    >
-                      加载更早消息
-                    </Button>
                   </div>
                 )}
                 {messages.map((message) => (

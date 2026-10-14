@@ -129,6 +129,7 @@ export function Dialog({
   className,
   width = "w-full max-w-lg",
   padded = true,
+  closable = true,
 }: {
   open: boolean;
   onClose: () => void;
@@ -137,6 +138,8 @@ export function Dialog({
   /** 整档宽度类（含 w-*）：基类不设宽度，避免与调用方传入的宽度互相打架。 */
   width?: string;
   padded?: boolean;
+  /** 右上角那颗 ×；关掉后仍可点遮罩或按 Esc 关闭（图片弹窗就这么用）。 */
+  closable?: boolean;
 }) {
   useEffect(() => {
     if (!open) return;
@@ -167,14 +170,16 @@ export function Dialog({
           className,
         )}
       >
-        <button
-          type="button"
-          aria-label="关闭"
-          className="absolute right-3 top-3 z-10 rounded-md bg-white/70 p-1 text-stone-500 hover:bg-stone-100"
-          onClick={onClose}
-        >
-          <X className="size-4" />
-        </button>
+        {closable && (
+          <button
+            type="button"
+            aria-label="关闭"
+            className="absolute right-3 top-3 z-10 rounded-md bg-white/70 p-1 text-stone-500 hover:bg-stone-100"
+            onClick={onClose}
+          >
+            <X className="size-4" />
+          </button>
+        )}
         {children}
       </div>
     </div>
