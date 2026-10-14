@@ -24,7 +24,9 @@ cd ..
 
 ## 配置
 
-`config.json`（可选，参考 `config.json.example`，该文件不入库）：
+优先用页面左侧的**设置页**改（`history_limit` / `poll_seconds` / `port` 三项，
+写入工程根目录 `config.json`，前两项即时生效、端口需重启）。
+也可直接编辑 `config.json`（可选，参考 `config.json.example`，该文件不入库）：
 
 | 键 | 默认 | 说明 |
 | --- | --- | --- |
@@ -67,6 +69,7 @@ cd ..
 | GET | `/api/wechat/catalog` | 微信实时会话目录 |
 | POST | `/api/sessions/{id}/follow` / `unfollow` | 关注 / 取消关注 |
 | POST | `/api/sessions/{id}/reimport?limit=N` | 按 N 条重新导入该会话历史（只影响该会话） |
+| GET / PUT | `/api/settings` | 读 / 存设置页的三项（返回哪些已生效、哪些需重启） |
 
 ## 目录结构
 

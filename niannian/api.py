@@ -2,14 +2,16 @@
 
 from __future__ import annotations
 
+import socket
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import Body, FastAPI, HTTPException, Query
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from .config import load_config
+from .config import (EDITABLE_KEYS, RESTART_KEYS, load_config, save_config,
+                     validate)
 from .media import media_root, safe_media_path
 from .storage import Database
 from .wechat import Collector
@@ -23,6 +25,20 @@ def session_user(session_id: str) -> str:
     """会话主键 ``wechat:<账号指纹>:<微信原始ID>`` 里的第三段。"""
     parts = str(session_id).split(":", 2)
     return parts[2] if len(parts) == 3 else ""
+
+
+def port_busy(host: str, port: int) -> bool:
+    """试绑定一下判断端口是否已被占用。
+
+    **故意不设** ``SO_REUSEADDR``：Windows 下那个选项允许重复绑定正在监听的端口，
+    探测会假成功，把用户导到一个重启后起不来的端口上。
+    """
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+        try:
+            probe.bind((host, int(port)))
+        except OSError:
+            return True
+    return False
 
 
 def create_app(root: Path | None = None) -> FastAPI:
@@ -55,6 +71,37 @@ def create_app(root: Path | None = None) -> FastAPI:
     def api_sessions():
         account = collector.status()["account"]
         return store.list_sessions(account=account, monitored_only=True)
+
+    @app.get("/api/settings")
+    def api_get_settings():
+        """设置页读当前生效值；``restart_required`` 告诉界面哪些要重启。"""
+        path = root / "config.json"
+        return {
+            "values": {key: settings.get(key) for key in EDITABLE_KEYS},
+            "restart_required": list(RESTART_KEYS),
+            "config_file": path.name,
+            "config_exists": path.is_file(),
+        }
+
+    @app.put("/api/settings")
+    def api_put_settings(payload: dict = Body(...)):
+        """保存设置：写 config.json，能热更的立刻推给采集器，其余标需重启。"""
+        try:
+            values = validate({key: payload.get(key) for key in EDITABLE_KEYS})
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        changed = {key for key, value in values.items() if settings.get(key) != value}
+        if "port" in changed and port_busy(str(settings.get("host")), values["port"]):
+            raise HTTPException(400, f"端口 {values['port']} 已被其它程序占用，换一个")
+        save_config(root, values)
+        collector.update_settings(values)
+        settings.update(values)
+        return {
+            "values": {key: settings.get(key) for key in EDITABLE_KEYS},
+            "applied": sorted(changed - set(RESTART_KEYS)),
+            "restart": sorted(changed & set(RESTART_KEYS)),
+            "unchanged": not changed,
+        }
 
     @app.get("/api/sessions/{session_id}/messages")
     def api_messages(session_id: str, limit: int = Query(40, ge=1, le=200),

@@ -88,12 +88,18 @@ export function CardContent({
 
 export function Badge({
   className,
+  tone = "default",
   ...props
-}: HTMLAttributes<HTMLSpanElement>) {
+}: HTMLAttributes<HTMLSpanElement> & { tone?: "default" | "warning" }) {
+  const tones = {
+    default: "bg-secondary text-secondary-foreground",
+    warning: "bg-amber-100 text-amber-800",
+  };
   return (
     <span
       className={cn(
-        "inline-flex items-center gap-1 rounded-full bg-secondary px-2.5 py-0.5 text-xs font-medium text-secondary-foreground",
+        "inline-flex items-center gap-1 rounded-full px-2.5 py-0.5 text-xs font-medium",
+        tones[tone],
         className,
       )}
       {...props}

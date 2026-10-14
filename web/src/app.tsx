@@ -1,8 +1,18 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Leaf, MessageCircle, Menu, RefreshCw, X } from "lucide-react";
+import { Leaf, MessageCircle, Menu, RefreshCw, Settings, X } from "lucide-react";
 import { Button, cn } from "./components/ui";
 import { SessionsPage } from "./pages/sessions";
+import { SettingsPage } from "./pages/settings";
 import { api, clockText, type SessionRow, type WechatStatus } from "./lib/api";
+
+const NAV = [
+  { hash: "#sessions", label: "微信会话", icon: MessageCircle },
+  { hash: "#settings", label: "设置", icon: Settings },
+] as const;
+
+function pageFromHash(): string {
+  return NAV.some((item) => item.hash === location.hash) ? location.hash : "#sessions";
+}
 
 const stateLabels: Record<string, { text: string; tone: string }> = {
   connected: { text: "微信已连接", tone: "bg-emerald-600" },
@@ -18,6 +28,8 @@ export function App() {
   const [loadError, setLoadError] = useState("");
   const [refreshing, setRefreshing] = useState(false);
   const [mobileNav, setMobileNav] = useState(false);
+  const [page, setPage] = useState<string>(() => pageFromHash());
+  const [selectedId, setSelectedId] = useState<string | null>(null);
   const [notice, setNotice] = useState<{ text: string; error: boolean } | null>(null);
   const noticeTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
 
@@ -55,6 +67,15 @@ export function App() {
       clearTimeout(noticeTimer.current);
     };
   }, [refresh]);
+
+  useEffect(() => {
+    const onHash = () => {
+      setPage(pageFromHash());
+      setMobileNav(false);
+    };
+    window.addEventListener("hashchange", onHash);
+    return () => window.removeEventListener("hashchange", onHash);
+  }, []);
 
   const indicator = stateLabels[status?.state || "stopped"] || {
     text: status?.state || "未知",
@@ -103,14 +124,22 @@ export function App() {
           个人工作空间
         </p>
         <nav aria-label="主导航" className="space-y-1">
-          <a
-            href="#sessions"
-            aria-current="page"
-            className="flex items-center gap-3 rounded-lg bg-emerald-50 px-3 py-3 text-sm font-medium text-emerald-800"
-          >
-            <MessageCircle className="size-[18px]" />
-            <span>微信会话</span>
-          </a>
+          {NAV.map((item) => (
+            <a
+              key={item.hash}
+              href={item.hash}
+              aria-current={page === item.hash ? "page" : undefined}
+              className={cn(
+                "flex items-center gap-3 rounded-lg px-3 py-3 text-sm font-medium",
+                page === item.hash
+                  ? "bg-emerald-50 text-emerald-800"
+                  : "text-stone-600 hover:bg-stone-100",
+              )}
+            >
+              <item.icon className="size-[18px]" />
+              <span>{item.label}</span>
+            </a>
+          ))}
         </nav>
         <div className="mt-auto rounded-lg bg-stone-50 p-3 text-xs leading-5 text-stone-500">
           阶段二：微信会话看板 + 图片显示。
@@ -164,7 +193,17 @@ export function App() {
                 : `看板数据读取失败：${loadError}`}
             </div>
           )}
-          <SessionsPage sessions={sessions} onRefresh={refresh} notify={notify} />
+          {page === "#settings" ? (
+            <SettingsPage notify={notify} />
+          ) : (
+            <SessionsPage
+              sessions={sessions}
+              onRefresh={refresh}
+              notify={notify}
+              selectedId={selectedId}
+              onSelect={setSelectedId}
+            />
+          )}
         </main>
       </div>
       {notice && (

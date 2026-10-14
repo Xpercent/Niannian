@@ -20,9 +20,11 @@ cd web && npm run dev                   # 前端热更新，/api 代理到 8765
 真机验证需要本机已登录微信 4.x（只读解密其本地库）。
 
 ## 结构
-- `niannian/`：`config` / `storage`（SQLite 三表）/ `wechat`（只读采集线程 +
-  命令队列 + 水位增量）/ `api`（FastAPI）。
-- `web/`：React + Vite + Tailwind，手写 UI 组件（无 shadcn/radix）。
+- `niannian/`：`config`（默认值/校验/落盘）/ `storage`（SQLite 三表）/
+  `wechat`（只读采集线程 + 命令队列 + 水位增量）/ `contacts`（发送者显示名与
+  群名片 protobuf）/ `media`（图片定位、解密、链接收口）/ `api`（FastAPI）。
+- `web/`：React + Vite + Tailwind，手写 UI 组件（无 shadcn/radix）；
+  `pages/` 下两页：`sessions`（微信会话）、`settings`（设置）。
 - `wechatauto-replica/`：**git submodule**，锁定上游 1.2.5.1（fbfb026）。
   视为第三方依赖，**不要改动**（改动会偏离上游且 `submodule update` 会丢）。
   需要不同行为时在本仓库 `IsolatedDB` 子类里覆写。
@@ -98,6 +100,19 @@ cd web && npm run dev                   # 前端热更新，/api 代理到 8765
   `config.history_limit` 解耦：改一个会话不能影响其它会话。
 - `INSERT OR IGNORE` 意味着已存在的行永不更新：改了入库时的解析/显示逻辑，
   必须清库重采才对存量生效。
+
+## 设置页与配置（`config.py` / `api.py`）
+- 设置页**只开放三项**：`history_limit`、`poll_seconds`、`port`。`host` 刻意不放
+  （改成非 127.0.0.1 会把本机微信数据暴露到局域网，且改错会把自己关在门外）；
+  数据目录/账号仍可手工写在 `config.json`。
+- **读宽容、写严格**：`load_config()` 遇到坏值退回默认或夹到边界，保证服务起得来；
+  `validate()` 只在保存时用，越界直接抛中文错误、不落盘。别把两者合并。
+- `save_config()` 只更新提交的键并保留文件里其它键，先写 `.tmp` 再 `os.replace`。
+- `Collector` 持有 settings 的**副本**：改 `app.state.settings` 传不进采集器，
+  必须走 `Collector.update_settings()`（只接受可热更的键）。`port` 属启动期参数，
+  界面必须标"需重启"，不能假装已应用。
+- 保存端口前用 `port_busy()` 试绑定预检；**不要**给它加 `SO_REUSEADDR`
+  （Windows 下它允许重复绑定监听中的端口，探测会假成功）。
 
 ## 约定
 - 注释与 docstring 用**中文**（公开 API 名用英文），只在"为什么"不明显处写注释。

@@ -160,3 +160,30 @@ export function mediaUrl(value?: string | null) {
   if (parts.some((part) => part === "." || part === "..")) return "";
   return `/media/${parts.map(encodeURIComponent).join("/")}`;
 }
+
+export type SettingsValues = {
+  history_limit: number;
+  poll_seconds: number;
+  port: number;
+};
+
+export type SettingsResponse = {
+  values: SettingsValues;
+  restart_required: string[];
+  config_file: string;
+  config_exists: boolean;
+};
+
+export type SettingsSaveResult = {
+  values: SettingsValues;
+  /** 已写入配置且即时生效的键。 */
+  applied: string[];
+  /** 已写入配置但要重启才生效的键。 */
+  restart: string[];
+  unchanged: boolean;
+};
+
+export const putJson = (body: unknown): RequestInit => ({
+  method: "PUT",
+  body: JSON.stringify(body),
+});

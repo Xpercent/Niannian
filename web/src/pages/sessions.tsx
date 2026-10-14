@@ -34,11 +34,13 @@ type Props = {
   sessions: SessionRow[];
   onRefresh: () => Promise<void>;
   notify: (message: string, error?: boolean) => void;
+  /** 选中会话提升到 App：切到设置页再回来不该丢掉正在看的会话。 */
+  selectedId: string | null;
+  onSelect: (id: string | null) => void;
 };
 
-export function SessionsPage({ sessions, onRefresh, notify }: Props) {
+export function SessionsPage({ sessions, onRefresh, notify, selectedId, onSelect }: Props) {
   const [query, setQuery] = useState("");
-  const [selectedId, setSelectedId] = useState<string | null>(null);
   const [messages, setMessages] = useState<MessageRow[]>([]);
   const [hasMore, setHasMore] = useState(false);
   const [beforeSeq, setBeforeSeq] = useState<number | null>(null);
@@ -139,7 +141,7 @@ export function SessionsPage({ sessions, onRefresh, notify }: Props) {
   }, [selectedId, watchedCount]);
 
   useEffect(() => {
-    if (selectedId && !selected) setSelectedId(null);
+    if (selectedId && !selected) onSelect(null);
   }, [selected, selectedId]);
 
   // 新打开的对话滚动到最新一条；加载历史时保持原位。
@@ -258,7 +260,7 @@ export function SessionsPage({ sessions, onRefresh, notify }: Props) {
                 <button
                   type="button"
                   key={session.id}
-                  onClick={() => setSelectedId(session.id)}
+                  onClick={() => onSelect(session.id)}
                   className={`flex w-full items-center gap-3 rounded-md border p-3 text-left ${
                     selectedId === session.id
                       ? "border-emerald-200 bg-emerald-50"

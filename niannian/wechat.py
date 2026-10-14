@@ -334,6 +334,19 @@ class Collector:
     def media(self):
         """图片链接解析器；未连接时为 None（此时库里已有链接仍可由 API 使用）。"""
         return self._media
+    def update_settings(self, values: dict) -> dict:
+        """把可以热更的键推进采集器自己的副本。
+
+        Collector 构造时拿的是 settings 的**副本**，所以只改 app.state.settings
+        不会传进来；轮询间隔每轮重读、导入条数每次导入重读，因此这两项能立即生效。
+        ``port`` 之类的启动期参数不在这里处理。
+        """
+        hot = {key: values[key] for key in ("history_limit", "poll_seconds")
+               if key in values}
+        with self._guard:
+            self.settings.update(hot)
+        return dict(hot)
+
     def status(self) -> dict:
         with self._guard:
             return {**self._state,
