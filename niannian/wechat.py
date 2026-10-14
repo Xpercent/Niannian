@@ -4,7 +4,8 @@
 - 只有 wechat-reader 线程触碰上游库；API 侧读取目录也经命令队列进入该线程。
 - 解密缓存固定在本工程 data/wechat/cache/<账号scope>/，避免与其它工程互相污染。
 - 消息与水位在同一事务落库；重复扫描由 source_id 唯一键兜底。
-- 阶段一不做媒体挂载与非文本消息格式化：正文按上游给出的文本原样入库。
+- 非纯文本正文交给 :mod:`niannian.describe` 解析成结构化描述 + 一行摘要，
+  认不出的仍按上游给出的文本原样入库。
 """
 
 from __future__ import annotations
@@ -28,7 +29,8 @@ from xml.etree import ElementTree
 
 from .config import clamp_history_limit
 from .contacts import group_nicknames
-from .media import ImageStore, hash_from_blob, parse_image, summarize
+from .describe import describe, summarize
+from .media import ImageStore, hash_from_blob
 from .storage import Database, now_utc
 
 log = logging.getLogger(__name__)
@@ -134,7 +136,11 @@ def normalize_message(account: str, username: str, session_name: str,
     """把上游真实行转换成本地消息记录；不美化、不猜测内容。"""
     raw = str(message.get("content") or "")
     origin, body = split_sender(raw)
-    attachment = parse_image(body)
+    detail = describe(body)
+    if not origin and detail and detail.get("kind") == "pat":
+        # 拍一拍既没有群前缀，根节点 fromusername 也是空的，动手的人只在 patinfo 里；
+        # 不补这一笔它会一直被署名成"系统消息"。
+        origin = detail.get("from") or ""
     resolved = str(message.get("sender_username") or "")
     sender = resolved or origin
     is_self = bool(sender) and sender == account
@@ -163,7 +169,7 @@ def normalize_message(account: str, username: str, session_name: str,
         "sender_key": sender_key_value,
         "sender_name": sender_name,
         "is_self": is_self,
-        "content": (summarize(attachment) if attachment
+        "content": (summarize(detail) if detail
                     else body or f"[{message.get('type') or '消息'}]"),
         "message_type": str(message.get("type") or "文本"),
         "created_at": created.isoformat(timespec="seconds"),
@@ -176,7 +182,7 @@ def normalize_message(account: str, username: str, session_name: str,
             "sender_id": message.get("sender_id"),
             "origin_sender_username": origin,
             "resolved_sender_username": resolved,
-            "attachment": attachment,
+            "attachment": detail,
         },
     }
 
@@ -581,7 +587,8 @@ class Collector:
         """
         if self._media is None:
             return
-        images = [p for p in payloads if p["metadata"].get("attachment")]
+        images = [p for p in payloads
+                  if (p["metadata"].get("attachment") or {}).get("kind") == "image"]
         if not images:
             return
         keys = {(p["sort_seq"], int(p["metadata"].get("local_id") or 0))

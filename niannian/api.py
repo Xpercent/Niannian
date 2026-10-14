@@ -127,8 +127,8 @@ def create_app(root: Path | None = None) -> FastAPI:
         user = session_user(session_id)
         for item in items:
             meta = item.get("metadata") or {}
-            if (not meta.get("attachment") or meta.get("local_file")
-                    or not meta.get("media_md5")):
+            if ((meta.get("attachment") or {}).get("kind") != "image"
+                    or meta.get("local_file") or not meta.get("media_md5")):
                 continue
             linked = media.attach(user, meta["media_md5"], f"{user}_{item['sort_seq']}")
             if linked:

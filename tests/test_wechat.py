@@ -116,6 +116,36 @@ def test_normalize_without_any_sender_is_system_message():
     assert private["sender_name"] == "系统消息"
 
 
+PAT_XML = ('<msg><appmsg><type>62</type><title>"甲" 拍了拍 "乙" 说：“家里管饭吗”</title>'
+           "<patinfo><fromusername>wxid_a</fromusername>"
+           "<pattedusername>wxid_b</pattedusername></patinfo></appmsg>"
+           "<fromusername></fromusername></msg>")
+QUOTE_XML = ('<msg><appmsg><title>记得报名</title><type>57</type>'
+             "<refermsg><displayname>甲</displayname><content>一长段通知</content>"
+             "</refermsg></appmsg><fromusername>wxid_a</fromusername></msg>")
+
+
+def test_normalize_takes_pat_sender_from_patinfo():
+    """拍一拍没有群前缀、根节点 fromusername 也是空的：动手的人只在 patinfo 里，
+    署名要认回真人，正文要落那句整话而不是 XML。"""
+    row = make_message(sender_username="", content=PAT_XML)
+    item = normalize_message(ACCOUNT, "room@chatroom", "项目群", row, {"wxid_a": "甲"})
+    assert item["sender_key"] == "wxid_a" and item["sender_name"] == "甲"
+    assert item["content"] == '"甲" 拍了拍 "乙" 说：“家里管饭吗”'
+    mine = normalize_message(ACCOUNT, "room@chatroom", "项目群",
+                             make_message(sender_username=ACCOUNT, content=PAT_XML.replace(
+                                 "wxid_a", ACCOUNT)), {ACCOUNT: "我自己"})
+    assert mine["is_self"] is True and mine["sender_name"] == "我"
+
+
+def test_normalize_keeps_quote_body_as_is():
+    """引用消息本轮不格式化：正文仍是上游 XML，不假装解析成功。"""
+    row = make_message(sender_username="wxid_a", content=QUOTE_XML)
+    item = normalize_message(ACCOUNT, "room@chatroom", "项目群", row, {"wxid_a": "甲"})
+    assert item["content"].startswith("<msg>")
+    assert item["metadata"]["attachment"] is None
+
+
 def test_normalize_uses_session_display_names():
     """显示名由采集侧按会话算好传入：备注 > 群名片 > 昵称，这里只认最终值。"""
     names = {"wxid_a": "科技委员21陈永源", "wxid_b": "26同"}

@@ -17,7 +17,6 @@ import hashlib
 import os
 import re
 from pathlib import Path
-from xml.etree import ElementTree
 
 # 与上游一致的优先级：原图 > 下发那份 > 预览图。
 TIERS = ("original", "mid", "thumb")
@@ -39,32 +38,6 @@ def hash_from_blob(blob) -> str:
         if found:
             return found.group(1).decode().lower()
     return ""
-
-
-def parse_image(content: str) -> dict | None:
-    """正文 XML 是图片附件时返回附件描述，否则 None。
-
-    只认 ``<img>``：XML 里的 ``md5`` 属性**不是**磁盘文件名（真正的哈希在
-    ``packed_info_data`` 里），所以这里不解析它，避免有人拿它去找文件。
-    """
-    text = (content or "").strip()
-    if not text.startswith("<"):
-        return None
-    try:
-        root = ElementTree.fromstring(text)
-    except ElementTree.ParseError:
-        return None
-    node = root if root.tag == "img" else root.find("img")
-    return {"kind": "image"} if node is not None else None
-
-
-def summarize(attachment: dict | None) -> str:
-    """入库正文用的一行摘要：图片不再把 XML 塞进气泡。
-
-    尺寸留在 metadata 里，不进摘要——``cdnthumb*`` 是**预览图**尺寸，标成
-    "[图片 262x576]" 会让人以为看到的就是这个分辨率。
-    """
-    return "[图片]" if attachment else ""
 
 
 def pick_tier(files: dict) -> tuple | None:

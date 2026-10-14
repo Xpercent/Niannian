@@ -1,31 +1,7 @@
 import os
 from pathlib import Path
 
-from niannian.media import (hash_from_blob, media_scope, parse_image, pick_tier,
-                            safe_media_path, summarize)
-
-IMAGE_XML = (
-    '<?xml version="1.0"?>\n<msg>\n\t<img aeskey="d427de8ff397a962a0d17fa70e5defb6" '
-    'encryver="1" cdnthumblength="9882" cdnthumbheight="210" cdnthumbwidth="118" '
-    'length="76183" md5="6793b97ea4cb8f58ba2f65086e3b761b"><live><md5 /></live>'
-    "</img>\n</msg>"
-)
-
-
-def test_parse_image_identifies_image_and_ignores_xml_md5():
-    """只认 <img>；XML 的 md5 不是磁盘文件名，故意不解析出来免得被误用。"""
-    assert parse_image(IMAGE_XML) == {"kind": "image"}
-
-
-def test_parse_image_rejects_text_and_other_attachments():
-    assert parse_image("晚上开会") is None
-    assert parse_image("<msg><voicemsg voicelength='123'/></msg>") is None
-    assert parse_image("<msg><img broken") is None
-
-
-def test_summarize_replaces_raw_xml():
-    assert summarize(parse_image(IMAGE_XML)) == "[图片]"
-    assert summarize(None) == ""
+from niannian.media import (hash_from_blob, media_scope, pick_tier, safe_media_path)
 
 
 def test_hash_from_blob_takes_packed_info_not_xml():
