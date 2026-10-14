@@ -12,9 +12,22 @@ from fastapi.staticfiles import StaticFiles
 
 from .config import (EDITABLE_KEYS, RESTART_KEYS, load_config, save_config,
                      validate)
+from .describe import KIND_LABEL
 from .media import media_root, safe_media_path
 from .storage import Database
 from .wechat import Collector
+
+
+def type_label(item: dict) -> str:
+    """气泡上的类型徽标：读取时按解析出的 kind 现算。
+
+    上游标签把文件、转账、拍一拍等 8 种东西一律叫「文件/链接/卡片」，
+    解析结果里的 kind 才是真类型。放在读取时算而不是入库时存，
+    是为了让存量行不用重采就能改过来。
+    """
+    meta = item.get("metadata") or {}
+    kind = str((meta.get("attachment") or {}).get("kind") or "")
+    return KIND_LABEL.get(kind) or str(item.get("message_type") or "消息")
 
 
 def project_root() -> Path:
@@ -111,10 +124,12 @@ def create_app(root: Path | None = None) -> FastAPI:
             raise HTTPException(404, "会话不存在")
         page = store.messages_page(session_id, limit=limit,
                                    before_seq=before_seq, before_id=before_id)
-        _link_media(session_id, page["items"])
+        for item in page["items"]:
+            _link_media(item)
+            item["type_label"] = type_label(item)
         return page
 
-    def _link_media(session_id: str, items: list[dict]) -> None:
+    def _link_media(item: dict) -> None:
         """采集时本机还没有文件的图片，读取时凭 media_md5 再补一次链接。
 
         微信会在你翻聊天记录、图片预览图落到磁盘之后才有文件；只在采集那一刻
@@ -124,16 +139,16 @@ def create_app(root: Path | None = None) -> FastAPI:
         media = collector.media
         if media is None:
             return
-        user = session_user(session_id)
-        for item in items:
-            meta = item.get("metadata") or {}
-            if ((meta.get("attachment") or {}).get("kind") != "image"
-                    or meta.get("local_file") or not meta.get("media_md5")):
-                continue
-            linked = media.attach(user, meta["media_md5"], f"{user}_{item['sort_seq']}")
-            if linked:
-                meta.update(linked)
-                store.update_metadata(item["id"], meta)
+        meta = item.get("metadata") or {}
+        if ((meta.get("attachment") or {}).get("kind") != "image"
+                or meta.get("local_file") or not meta.get("media_md5")):
+            return
+        user = session_user(item["session_id"])
+        linked = media.attach(user, meta["media_md5"],
+                              f"{user}_{item['sort_seq']}")
+        if linked:
+            meta.update(linked)
+            store.update_metadata(item["id"], meta)
 
     @app.get("/media/{name:path}")
     def api_media(name: str):

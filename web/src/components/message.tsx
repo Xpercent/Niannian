@@ -10,6 +10,8 @@ export function Message({ message }: { message: MessageRow }) {
   const tier = message.metadata?.tier;
   const tierLabel = message.metadata?.tier_label;
   const picture = attachment?.kind === "image";
+  // 上游标签把文件、转账、拍一拍等一律叫"文件/链接/卡片"，徽标用后端解析出的真类型
+  const typeLabel = message.type_label || message.message_type;
   return (
     <article
       className={cn(
@@ -24,9 +26,9 @@ export function Message({ message }: { message: MessageRow }) {
           {message.sender_name || (message.is_self ? "我" : "微信消息")}
         </strong>
         <span className="flex items-center gap-2 text-stone-400">
-          {message.message_type && message.message_type !== "文本" && (
+          {typeLabel && typeLabel !== "文本" && (
             <em className="not-italic rounded bg-stone-200/70 px-1.5 py-0.5 text-[10px] text-stone-500">
-              {message.message_type}
+              {typeLabel}
             </em>
           )}
           <time>{dateText(message.created_at, true)}</time>

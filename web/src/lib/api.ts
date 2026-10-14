@@ -49,6 +49,8 @@ export type MessageRow = {
   is_self: boolean;
   content: string;
   message_type: string;
+  /** 后端按解析出的 kind 现算的类型名，比上游粗标签准；缺省时回落到 message_type。 */
+  type_label?: string;
   created_at: string;
   sort_seq: number;
   metadata: MessageMeta;
