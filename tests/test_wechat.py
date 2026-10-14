@@ -1,5 +1,7 @@
+import sqlite3
+
 from niannian.wechat import (account_scope, normalize_message, open_isolated_db,
-                             session_key, source_id, split_sender)
+                             sender_alias_map, session_key, source_id, split_sender)
 
 ACCOUNT = "wxid_me"
 
@@ -40,6 +42,52 @@ def test_normalize_self_detection_and_display_name():
         sender_username="wxid_unknown",
         content="wxid_unknown:\n大家好"), names)
     assert stranger["sender_name"] == "群成员"
+
+
+def test_normalize_prefers_resolved_sender_over_body_prefix():
+    # 分片解析出的真实发送者优先：正文前缀只是兜底，不能盖过它。
+    names = {ACCOUNT: "我自己", "wxid_a": "甲", "wxid_b": "乙"}
+    row = make_message(sender_username=ACCOUNT, content="wxid_a:\n我自己发的")
+    item = normalize_message(ACCOUNT, "room@chatroom", "项目群", row, names)
+    assert item["is_self"] is True and item["sender_name"] == "我"
+    assert item["content"] == "我自己发的"
+
+
+def make_shard(tmp_path, aliases, rows, table="Msg_x"):
+    path = tmp_path / "message_0.db"
+    conn = sqlite3.connect(path)
+    with conn:
+        conn.execute("CREATE TABLE Name2Id (user_name TEXT, is_session INTEGER)")
+        conn.executemany("INSERT INTO Name2Id (rowid, user_name, is_session) VALUES (?,?,?)",
+                         aliases)
+        conn.execute(f"CREATE TABLE {table} (sort_seq INTEGER, local_id INTEGER, "
+                     "real_sender_id INTEGER)")
+        conn.executemany(f"INSERT INTO {table} VALUES (?,?,?)", rows)
+    return conn
+
+
+def test_sender_alias_map_uses_per_shard_id_space(tmp_path):
+    # 同一条 sort_seq+local_id 在两个分片里可能指向不同的人：解析必须跟着分片走。
+    conn = make_shard(tmp_path, [(5, ACCOUNT, 0), (6, "wxid_me2", 0), (9, "", 0)],
+                      [(100, 7, 6), (101, 8, 9), (999, 9, 5)])
+    found = sender_alias_map(conn, "Msg_x", {(100, 7), (101, 8), (200, 7)})
+    conn.close()
+    assert found[(100, 7)] == "wxid_me2"
+    assert found[(101, 8)] == ""      # 系统消息：分片里名字为空，不是"某个人"
+    assert (200, 7) not in found      # 不在本分片，交给别的分片
+
+
+def test_sender_alias_map_maps_self_rowid_not_global_index(tmp_path):
+    # real_sender_id=5 在本分片是自己；全局 SenderName2Id 的 5 是别人，绝不能混用。
+    conn = make_shard(tmp_path, [(5, ACCOUNT, 0)], [(100, 7, 5)])
+    found = sender_alias_map(conn, "Msg_x", {(100, 7)})
+    conn.close()
+    assert found[(100, 7)] == ACCOUNT
+    item = normalize_message(ACCOUNT, "wxid_friend", "老王", make_message(
+        sort_seq=100, local_id=7, sender_username=ACCOUNT, content="我来看看"),
+        {ACCOUNT: "我自己", "wxid_friend": "老王"})
+    assert item["is_self"] is True and item["sender_name"] == "我"
+
 
 
 def test_normalize_unknown_sender_keeps_type_placeholder():

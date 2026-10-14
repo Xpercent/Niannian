@@ -56,3 +56,51 @@ UI 与原版基本一致。
 - 非纯文本消息格式化（图片/视频/文件/转账/引用等）。
 - 系统/无意义会话目录过滤。
 - 提炼链路与待办看板（原版 engine/prompts/llm 等能力的全新实现）。
+
+## 修复：微信发送者名字解析错误（2026-10-14）
+
+### 症状
+
+群聊出现根本不是群成员的署名（“吴寒”16 条、“助班学长”1 条），私聊里自己发的
+消息全部署上对方名字（王五月会话 100 条只有 5 条 `is_self=1`）。原版没这个表现。
+
+### 根因
+
+微信 4.x 消息分片库中 `Msg_*.real_sender_id` 是**该分片库自身 `Name2Id` 表的
+rowid**，id 空间按分片各自编号；上游 `wechatauto.db._sender_id_index()` 却用
+`message_resource.db` 的全局 `SenderName2Id` 去解析（全库没有任何一处用到正确的
+分片 `Name2Id`），于是 `get_messages` 给出的 `sender_username` 是**另一个人的
+wxid**——实测本群 `real_sender_id=5` 分片内是“我自己”，全局表解析成“吴寒”。
+
+正文带 `wxid_x:` 前缀的行（群聊普通文本）被 `split_sender` 的前缀救回，所以看着
+是对的；**没有前缀的行全部落到错误映射**：自己发的文本、emoji、图片、系统消息。
+私聊完全没有群前缀，故 `is_self` 恒为 0、自己的话全成对方说的。
+
+原项目有同一处缺陷（同版本子模块、同样的 `origin or sender_username` 优先级），
+只是它只导入过“全员带前缀”的通知群（180 条 `is_self` 全为 0），症状未暴露。
+
+### 改动
+
+只在 `niannian/wechat.py`，**不动子模块**（子模块是 detached HEAD 的第三方锁定）：
+
+1. 新增 `sender_alias_map(conn, table, wanted)`：在指定分片内按
+   `(sort_seq, local_id)` 联合 `Name2Id` 还原真实发送者 wxid。
+2. `IsolatedDB` 新增 `_fix_senders()`，并覆写 `get_messages` / `get_new_messages`
+   套用之；分片解析不到的行把 `sender_username` 置空，避免沿用上游错值。
+3. `normalize_message` 的发送者优先级由「正文前缀优先」改为
+   「**分片解析优先、正文前缀兜底**」。
+
+### 验证
+
+- pytest 14 项通过（新增 3 项：分片 id 空间隔离、系统消息空名、自身 rowid 不被
+  全局表串号 + 前缀与分片冲突时以分片为准）。
+- 真机清库重采：群 100 条署名全部落在该群 4 名真实成员内，原 16 条“吴寒”→“我”；
+  私聊 `is_self` 由 95/5 变为分布自然的 56/44；89 条带前缀的行前缀与分片解析零冲突。
+- 增量轮询走同一 `_fix_senders`，单独取 `get_new_messages` 逐条断言发送者是群成员。
+- 浏览器实测群聊与私聊署名、气泡归属均正确。
+
+### 残留
+
+拍一拍 appmsg 的 `real_sender_id=9` 在 `Name2Id` 中 `user_name` 为空，回落显示
+“群成员”（原版同场景错显示为“助班学长”）；空名系统类消息的署名策略待用户定。
+
