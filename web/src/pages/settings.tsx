@@ -18,8 +18,62 @@ const LABELS: Record<string, string> = {
   port: "监听端口",
 };
 
+type Field = {
+  key: keyof SettingsValuesShape;
+  title: string;
+  live: boolean;
+  min: number;
+  max: number;
+  step?: number;
+  hint: React.ReactNode;
+};
+
+type SettingsValuesShape = {
+  history_limit: string;
+  poll_seconds: string;
+  port: string;
+};
+
+const FIELDS: Field[] = [
+  {
+    key: "history_limit",
+    title: "新关注会话导入条数",
+    live: true,
+    min: 1,
+    max: 1000,
+    hint: (
+      <>
+        只影响之后
+        <strong className="font-medium">新关注</strong>
+        的会话首次自动导入多少条。已经关注的会话请在会话标题栏用「重新导入」单独设置，两者互不影响。
+      </>
+    ),
+  },
+  {
+    key: "poll_seconds",
+    title: "采集轮询间隔（秒）",
+    live: true,
+    min: 1,
+    max: 3600,
+    step: 0.5,
+    hint: "每隔多久读一次微信本地库并推进目录与增量消息。太小会频繁解密读取，太大新消息出现得慢。",
+  },
+  {
+    key: "port",
+    title: "监听端口",
+    live: false,
+    min: 1024,
+    max: 65535,
+    hint: "只监听 127.0.0.1，不会对外提供访问。保存时会检查端口是否被占用；改完需重启服务，之后用新端口访问。",
+  },
+];
+
 export function SettingsPage({ notify }: Props) {
-  const [values, setValues] = useState({ history_limit: "100", poll_seconds: "3", port: "8765" });
+  const [values, setValues] = useState<SettingsValuesShape>({
+    history_limit: "100",
+    poll_seconds: "3",
+    port: "8765",
+  });
   const [meta, setMeta] = useState<SettingsResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -45,10 +99,6 @@ export function SettingsPage({ notify }: Props) {
       active = false;
     };
   }, []);
-
-  function field(key: string, value: string) {
-    setValues((old) => ({ ...old, [key]: value }));
-  }
 
   async function save() {
     setSaving(true);
@@ -115,96 +165,46 @@ export function SettingsPage({ notify }: Props) {
 
       <Card>
         <CardHeader>
-          <CardTitle>微信采集</CardTitle>
-        </CardHeader>
-        <CardContent className="space-y-5">
-          <label className="block max-w-sm">
-            <span className="flex items-center gap-2 text-sm font-medium text-stone-700">
-              新关注会话导入条数
-              <Badge>即时生效</Badge>
-            </span>
-            <Input
-              type="number"
-              min={1}
-              max={1000}
-              className="mt-2"
-              value={values.history_limit}
-              onChange={(event) => field("history_limit", event.target.value)}
-            />
-            <span className="mt-1 block text-xs leading-5 text-stone-500">
-              只影响之后<strong className="font-medium">新关注</strong>的会话首次自动导入多少条。
-              已经关注的会话请在会话标题栏用「重新导入」单独设置，两者互不影响。
-            </span>
-          </label>
-
-          <label className="block max-w-sm">
-            <span className="flex items-center gap-2 text-sm font-medium text-stone-700">
-              采集轮询间隔（秒）
-              <Badge>即时生效</Badge>
-            </span>
-            <Input
-              type="number"
-              min={1}
-              max={3600}
-              step={0.5}
-              className="mt-2"
-              value={values.poll_seconds}
-              onChange={(event) => field("poll_seconds", event.target.value)}
-            />
-            <span className="mt-1 block text-xs leading-5 text-stone-500">
-              每隔多久读一次微信本地库并推进目录与增量消息。太小会频繁解密读取，太大新消息出现得慢。
-            </span>
-          </label>
-        </CardContent>
-      </Card>
-
-      <Card>
-        <CardHeader>
-          <CardTitle>服务</CardTitle>
-        </CardHeader>
-        <CardContent className="space-y-5">
-          <label className="block max-w-sm">
-            <span className="flex items-center gap-2 text-sm font-medium text-stone-700">
-              监听端口
-              <Badge tone="warning">需重启</Badge>
-            </span>
-            <Input
-              type="number"
-              min={1024}
-              max={65535}
-              className="mt-2"
-              value={values.port}
-              onChange={(event) => field("port", event.target.value)}
-            />
-            <span className="mt-1 block text-xs leading-5 text-stone-500">
-              只监听 127.0.0.1，不会对外提供访问。保存时会检查端口是否被占用；
-              改完需重启服务，之后用新端口访问。
-            </span>
-          </label>
-
-          <Button disabled={saving} onClick={() => void save()}>
-            {saving ? (
-              <Loader2 className="size-4 animate-spin motion-reduce:animate-none" />
-            ) : (
-              <Save className="size-4" />
-            )}
-            {saving ? "正在保存" : "保存设置"}
-          </Button>
-        </CardContent>
-      </Card>
-
-      <Card>
-        <CardHeader>
-          <CardTitle>未开放项</CardTitle>
+          <CardTitle>采集与服务</CardTitle>
         </CardHeader>
         <CardContent>
-          <p className="text-sm leading-6 text-stone-500">
-            监听地址、微信数据目录、微信账号仍可手工写在配置文件里，
-            但不在本页开放：前两项改错会让服务连不上或把本机微信数据暴露到局域网，
-            属于启动期参数，重启时才生效。
-          </p>
+          <div className="grid gap-6 sm:grid-cols-2 xl:grid-cols-3">
+            {FIELDS.map((item) => (
+              <label key={item.key} className="block">
+                <span className="flex flex-wrap items-center gap-2 text-sm font-medium text-stone-700">
+                  {item.title}
+                  <Badge tone={item.live ? "default" : "warning"}>
+                    {item.live ? "即时生效" : "需重启"}
+                  </Badge>
+                </span>
+                <Input
+                  type="number"
+                  min={item.min}
+                  max={item.max}
+                  step={item.step}
+                  className="mt-2"
+                  value={values[item.key]}
+                  onChange={(event) =>
+                    setValues((old) => ({ ...old, [item.key]: event.target.value }))
+                  }
+                />
+                <span className="mt-1 block text-xs leading-5 text-stone-500">{item.hint}</span>
+              </label>
+            ))}
+          </div>
         </CardContent>
       </Card>
+
+      <div className="flex justify-end">
+        <Button disabled={saving} onClick={() => void save()}>
+          {saving ? (
+            <Loader2 className="size-4 animate-spin motion-reduce:animate-none" />
+          ) : (
+            <Save className="size-4" />
+          )}
+          {saving ? "正在保存" : "保存设置"}
+        </Button>
+      </div>
     </div>
   );
 }
