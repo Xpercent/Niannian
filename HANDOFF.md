@@ -35,6 +35,13 @@
 现算**（复用 `describe.KIND_LABEL`，不入库所以存量行不用重采就能改过来，没有 kind 的
 回落上游标签）；左下角那句阶段号换成「只读采集本机微信记录，不发消息、不改动微信数据」。
 
+追加：转账摘要带上目标对象，措辞由用户定 —— `向影 [转账] ￥10.00`（发送者付钱）、
+`收到(=°Д°=) [转账] ￥10.00`（发送者收钱）。方向只能拿**发送者**去比
+`payer_username`/`receiver_username`：同一笔钱微信发两条卡片，双方 wxid 完全一样，
+只有 `paysubtype` 和发送者变了。认不出对方显示名就不加前缀，不贴 wxid。
+存量 10 条已删掉重导（备份 `data/backup-pre-transfer/`）。细节与原始 XML 见
+`docs/REFACTOR-LOG.md` 与 `data/_transfer_two.txt`。
+
 ## 上一轮：设置页（只开放三项）
 用户从候选里只挑 `history_limit` / `poll_seconds` / `port`。`host` 刻意不放
 （暴露局域网 + 改错锁死自己），数据目录/账号仍可手工写文件。

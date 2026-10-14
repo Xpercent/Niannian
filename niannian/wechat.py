@@ -121,6 +121,27 @@ def split_sender(content: str) -> tuple[str, str]:
     return "", content
 
 
+def transfer_target(desc: dict, sender: str, names: dict) -> None:
+    """给转账描述补上"跟谁转"：付款/收款双方里跟发送者相反的那一方。
+
+    微信在群里会为同一笔钱发两条卡片（``paysubtype`` 1 发起、3 已到账），两条的
+    ``payer_username``/``receiver_username`` 完全相同，只有发送者换了人，所以方向
+    只能拿发送者去比。认不出对方显示名时什么都不加——宁可只显示金额，也不把
+    ``wxid_`` 贴进气泡。
+    """
+    payer = desc.get("payer_username") or ""
+    receiver = desc.get("receiver_username") or ""
+    if sender and sender == payer:
+        desc["direction"], other = "out", receiver
+    elif sender and sender == receiver:
+        desc["direction"], other = "in", payer
+    else:
+        return
+    nick = str(names.get(other) or "") if other else ""
+    if nick and not nick.isdigit() and not nick.startswith("wxid_"):
+        desc["target"] = nick
+
+
 def source_id(account: str, username: str, message: dict, raw: str) -> str:
     """源去重键：有服务器 ID 用它，否则用排序号+本地 ID+时间+原文。"""
     server_id = message.get("server_id")
@@ -143,6 +164,8 @@ def normalize_message(account: str, username: str, session_name: str,
         origin = detail.get("from") or ""
     resolved = str(message.get("sender_username") or "")
     sender = resolved or origin
+    if detail and detail.get("kind") == "transfer":
+        transfer_target(detail, sender, names)
     is_self = bool(sender) and sender == account
     group = username.endswith("@chatroom")
     if is_self:

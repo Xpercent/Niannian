@@ -210,7 +210,8 @@ def summarize(desc: dict | None) -> str:
     """进气泡的一行摘要；没有描述返回空串，由调用方回落到上游文本。
 
     方括号里只放类型标签，能读的信息（文件名、来源、时长、金额）都放在括号外，
-    长标题被包进 ``[…]`` 会整行都像代码。
+    长标题被包进 ``[…]`` 会整行都像代码。唯一的例外是转账：方向和对象在标签前
+    （``向影 [转账] ￥10.00``），那是用户定的措辞。
     """
     if not desc:
         return ""
@@ -234,7 +235,11 @@ def summarize(desc: dict | None) -> str:
         tail = f"{desc.get('count')} 条" if desc.get("count") else ""
     elif kind not in ("image", "emoji"):
         tail = desc.get("source") or ""
-    parts = [f"[{label}]"]
+    label_part = f"[{label}]"
+    if kind == "transfer" and desc.get("target"):
+        direction = "向" if desc.get("direction") == "out" else "收到"
+        label_part = f"{direction}{desc['target']} {label_part}"
+    parts = [label_part]
     if name:
         parts.append(name)
     if tail:

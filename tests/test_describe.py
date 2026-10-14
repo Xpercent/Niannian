@@ -147,6 +147,15 @@ def test_transfer_amount_and_ids():
     assert desc["payer_username"] == "wxid_a" and desc["receiver_username"] == "wxid_me"
 
 
+def test_transfer_summary_names_the_counterpart():
+    """措辞由用户定：发送者付钱写"向X"、收钱写"收到X"，方向和对象都在标签前面。"""
+    desc = describe(TRANSFER_XML)
+    desc["direction"], desc["target"] = "out", "影"
+    assert summarize(desc) == "向影 [转账] ￥8.00"
+    desc["direction"], desc["target"] = "in", "(=°Д°=)"
+    assert summarize(desc) == "收到(=°Д°=) [转账] ￥8.00"
+
+
 def test_emoji_and_video_fields():
     emoji = describe(EMOJI_XML)
     assert emoji["kind"] == "emoji" and emoji["bytes"] == 26287

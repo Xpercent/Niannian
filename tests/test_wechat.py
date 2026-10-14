@@ -146,6 +146,36 @@ def test_normalize_keeps_quote_body_as_is():
     assert item["metadata"]["attachment"] is None
 
 
+TRANSFER_XML = ('<msg><appmsg><title>微信转账</title><type>2000</type><wcpayinfo>'
+                "<paysubtype>1</paysubtype><feedesc>￥10.00</feedesc>"
+                "<payer_username>wxid_a</payer_username>"
+                "<receiver_username>wxid_b</receiver_username>"
+                "</wcpayinfo></appmsg></msg>")
+
+
+def test_normalize_transfer_direction_and_target():
+    """同一笔钱微信发两条卡片，双方 wxid 一模一样：方向只能拿发送者去比。"""
+    names = {ACCOUNT: "我自己", "wxid_a": "(=°Д°=)", "wxid_b": "影"}
+    room = "room@chatroom"
+    paid = normalize_message(ACCOUNT, room, "宿舍群", make_message(
+        sender_username="wxid_a", content=TRANSFER_XML), names)
+    assert paid["content"] == "向影 [转账] ￥10.00"
+    received = normalize_message(ACCOUNT, room, "宿舍群", make_message(
+        sender_username="wxid_b", content=TRANSFER_XML), names)
+    assert received["content"] == "收到(=°Д°=) [转账] ￥10.00"
+    assert received["metadata"]["attachment"] == {
+        **received["metadata"]["attachment"], "direction": "in", "target": "(=°Д°=)"}
+    # 第三方视角的行（发送者既不是付款也不是收款）不加方向，也不贴 wxid
+    stranger = normalize_message(ACCOUNT, room, "宿舍群", make_message(
+        sender_username="wxid_c", content=TRANSFER_XML), names)
+    assert stranger["content"] == "[转账] ￥10.00"
+    # 自己付钱时同样成立：对象仍是收款方
+    mine = normalize_message(ACCOUNT, room, "宿舍群", make_message(
+        sender_username=ACCOUNT,
+        content=TRANSFER_XML.replace("wxid_a", ACCOUNT)), names)
+    assert mine["is_self"] is True and mine["content"] == "向影 [转账] ￥10.00"
+
+
 def test_normalize_uses_session_display_names():
     """显示名由采集侧按会话算好传入：备注 > 群名片 > 昵称，这里只认最终值。"""
     names = {"wxid_a": "科技委员21陈永源", "wxid_b": "26同"}
