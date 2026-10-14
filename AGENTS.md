@@ -59,6 +59,24 @@ cd web && npm run dev                   # 前端热更新，/api 代理到 8765
   是这里复用的三个私有方法（定位、解密、按文件头判格式落盘 + wxgf→jpg）。
 
 
+## 发送者显示名（`niannian/contacts.py`）
+- 微信群聊气泡上的名字是**三档**：`备注 > 群名片 > 昵称`。上游
+  `nickname_map()` 只有「备注或昵称」两档，**中间那档是缺的**。
+- **群名片没有独立表列**：`chatroom_member` 只有 `room_id + member_id`，群名片
+  藏在 `chat_room.ext_buffer` 的 protobuf 里（字段 1=成员wxid、2=群名片、
+  4=邀请人）。上游 `get_group_members()` 不解析它。用 `contacts.protobuf_fields`
+  扫描（只支持 wire 0/2，遇到别的类型就停，不猜偏移量）。
+- 优先级是**实测**出来的，不是猜的：拿微信自己算好的
+  `session.db.SessionTable.last_sender_display_name` 与三方比对，
+  7 例「群名片/备注/昵称互不相同」的样本里 6 例（无备注）跟随群名片、
+  1 例（有备注）跟随备注。改显示规则前先用这条通道复核。
+- 每会话的显示名由 `IsolatedDB.display_names(user)` 现算后传给
+  `normalize_message`，**不要**再把全局 `nickname_map()` 当发送者表用。
+- 解析不出发送者的行（`Name2Id.user_name` 为空：拍一拍、撤回、进群提示）
+  署名 `系统消息`、`sender_key` 置空，不参与按人归组。
+- 群自己发的系统行正文前缀是**群 ID**（`45948752706@chatroom:`）而不是
+  `wxid_`，`split_sender` 要剥掉但**不能**当成某个人的发送者。
+
 ## 前端约定（`web/`）
 - `components/ui.tsx` 的 `cn()` 是**纯字符串拼接**，没有 tailwind-merge：同一个
   样式槽位出现两个类（如 `max-w-lg` + `max-w-3xl`）时谁生效取决于样式表顺序。

@@ -27,12 +27,15 @@ from pathlib import Path
 from xml.etree import ElementTree
 
 from .config import clamp_history_limit
+from .contacts import group_nicknames
 from .media import ImageStore, hash_from_blob, parse_image, summarize
 from .storage import Database, now_utc
 
 log = logging.getLogger(__name__)
 
 GROUP_PREFIX = re.compile(r"^(wxid_[^:\s<>]+):\s*\n")
+# 群自己发的系统行（进群提示等）用群 ID 当前缀，它不是"某个人"，只剥不认。
+ROOM_PREFIX = re.compile(r"^\d+@chatroom:\s*\n")
 PACKED_COLUMNS = "sort_seq, local_id, packed_info_data"
 
 
@@ -94,13 +97,17 @@ def session_key(account: str, username: str) -> str:
 
 
 def split_sender(content: str) -> tuple[str, str]:
-    """提取权威发送者：群消息正文前缀优先，其次附件 XML 根节点 fromusername。
+    """剥离正文封装并给出发送者线索：群前缀优先，其次附件 XML 根节点 fromusername。
 
-    群前缀属于封装而非正文，返回的正文会去掉它；XML 场景保留原文。
+    群前缀属于封装而非正文，返回的正文一律去掉它；XML 场景保留原文。
+    前缀是群自己 ID 的（进群提示等系统行）只剥不认，返回空发送者。
     """
     match = GROUP_PREFIX.match(content)
     if match:
         return match.group(1), content[match.end():]
+    match = ROOM_PREFIX.match(content)
+    if match:
+        return "", content[match.end():]
     if content.lstrip().startswith("<"):
         try:
             root = ElementTree.fromstring(content)
@@ -134,11 +141,15 @@ def normalize_message(account: str, username: str, session_name: str,
     group = username.endswith("@chatroom")
     if is_self:
         sender_key_value, sender_name = account, "我"
+    elif not sender:
+        # 微信自己也没给这条消息发送者（拍一拍、撤回、进群提示这类系统行）：
+        # 不硬套到某个人头上，也不参与按人归组。
+        sender_key_value, sender_name = "", "系统消息"
     elif not group:
         sender_key_value = username
         sender_name = session_name or names.get(username) or "会话成员"
     else:
-        sender_key_value = sender or f"unknown:{message.get('sender_id')}"
+        sender_key_value = sender
         nick = str(names.get(sender) or "")
         is_placeholder = (not nick) or nick.isdigit() or nick.startswith("wxid_")
         sender_name = "群成员" if is_placeholder else nick
@@ -256,6 +267,35 @@ def open_isolated_db(root: Path, settings: dict):
         def media_hashes(self, user: str, keys: set) -> dict:
             """批量取图片行的本机文件哈希（只走采集线程，读上游库）。"""
             return self._each_shard(user, keys, media_hash_map)
+
+        def room_nicknames(self, room: str) -> dict:
+            """群成员在这个群里设的群名片：``{wxid: 群名片}``。"""
+            conn = self._contact_conn()
+            if not conn:
+                return {}
+            try:
+                row = conn.execute("SELECT ext_buffer FROM chat_room WHERE username=?",
+                                   (room,)).fetchone()
+            except sqlite3.Error:
+                return {}
+            finally:
+                conn.close()
+            return group_nicknames(row["ext_buffer"]) if row else {}
+
+        def display_names(self, user: str) -> dict:
+            """该会话发送者的显示名，补上上游缺的群名片一档（备注 > 群名片 > 昵称）。"""
+            names = dict(self.nickname_map())
+            if not user.endswith("@chatroom"):
+                return names
+            group = self.room_nicknames(user)
+            if not group:
+                return names
+            for member in self.get_group_members(user):
+                wxid = str(member.get("username") or "")
+                # 有备注时备注赢，这里不动；只有没备注的成员才换成群名片。
+                if group.get(wxid) and not str(member.get("remark") or ""):
+                    names[wxid] = group[wxid]
+            return names
 
         def get_messages(self, user, limit=20, offset=0):
             return self._fix_senders(
@@ -470,7 +510,7 @@ class Collector:
     def _store(self, session: dict, messages: list[dict], watermark: int) -> dict:
         assert self._wx is not None
         account = self._state["account"]
-        names = self._wx.nickname_map()
+        names = self._wx.display_names(session["username"])
         payloads = []
         for message in sorted(messages,
                               key=lambda m: (int(m.get("sort_seq") or 0),

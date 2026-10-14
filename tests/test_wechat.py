@@ -26,7 +26,15 @@ def test_split_sender_plain_text_and_xml_root():
     xml = '<msg><fromusername>wxid_root</fromusername><title>邀请</title></msg>'
     origin, body = split_sender(xml)
     assert origin == "wxid_root"
-    assert body == xml  # XML 保留原文，阶段一不做格式化
+    assert body == xml  # XML 保留原文，阶段二不做格式化
+
+
+def test_split_sender_strips_room_prefix_without_naming_a_sender():
+    """群自己发的系统行以群 ID 作前缀：要剥掉，但不能把群当成"某个人"。"""
+    raw = '45948752706@chatroom:\n<sysmsg type="sysmsgtemplate"><a/></sysmsg>'
+    origin, body = split_sender(raw)
+    assert origin == ""
+    assert body == '<sysmsg type="sysmsgtemplate"><a/></sysmsg>'
 
 
 def test_normalize_self_detection_and_display_name():
@@ -95,6 +103,26 @@ def test_normalize_unknown_sender_keeps_type_placeholder():
     item = normalize_message(ACCOUNT, "room@chatroom", "群", row, {})
     assert item["message_type"] == "图片"
     assert item["content"] == "[图片]"
+
+
+def test_normalize_without_any_sender_is_system_message():
+    """微信自己也没给发送者的行（拍一拍/撤回）不套到具体人头上，也不参与归组。"""
+    row = make_message(sender_username="", sender_id=9,
+                       content="<msg><appmsg><title>\"影\" 拍了拍 \"YX\"</title></appmsg></msg>")
+    item = normalize_message(ACCOUNT, "room@chatroom", "项目群", row, {"wxid_a": "甲"})
+    assert item["sender_name"] == "系统消息" and item["sender_key"] == ""
+    assert item["is_self"] is False
+    private = normalize_message(ACCOUNT, "wxid_friend", "老王", row, {})
+    assert private["sender_name"] == "系统消息"
+
+
+def test_normalize_uses_session_display_names():
+    """显示名由采集侧按会话算好传入：备注 > 群名片 > 昵称，这里只认最终值。"""
+    names = {"wxid_a": "科技委员21陈永源", "wxid_b": "26同"}
+    first = normalize_message(ACCOUNT, "room@chatroom", "班级群", make_message(
+        sender_username="wxid_a", content="交作业"), names)
+    assert first["sender_name"] == "科技委员21陈永源"
+    assert first["sender_key"] == "wxid_a"
 
 
 def test_source_id_stability_and_dedup_key():
