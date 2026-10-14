@@ -1,7 +1,8 @@
 import sqlite3
 
-from niannian.wechat import (account_scope, normalize_message, open_isolated_db,
-                             sender_alias_map, session_key, source_id, split_sender)
+from niannian.wechat import (Collector, account_scope, normalize_message,
+                             open_isolated_db, quote_name, sender_alias_map,
+                             server_seq_map, session_key, source_id, split_sender)
 
 ACCOUNT = "wxid_me"
 
@@ -138,12 +139,32 @@ def test_normalize_takes_pat_sender_from_patinfo():
     assert mine["is_self"] is True and mine["sender_name"] == "我"
 
 
-def test_normalize_keeps_quote_body_as_is():
-    """引用消息本轮不格式化：正文仍是上游 XML，不假装解析成功。"""
+def test_quote_name_resolved_from_author_when_wechat_gives_none():
+    """私聊里微信不给 displayname：作者是自己写"我"，否则走显示名表，再落到会话名。"""
+    names = {ACCOUNT: "我自己", "wxid_friend": "老王"}
+    mine = {"author": ACCOUNT}
+    quote_name(mine, ACCOUNT, "老王", names, False)
+    assert mine["name"] == "我"
+    friend = {"author": "wxid_friend"}
+    quote_name(friend, ACCOUNT, "老王", names, False)
+    assert friend["name"] == "老王"
+    # 会话名兜底只给私聊：群聊里认不出的人不猜，宁可只显示被引内容
+    group = {"author": "wxid_unknown"}
+    quote_name(group, ACCOUNT, "班级群", names, True)
+    assert "name" not in group
+    kept = {"author": ACCOUNT, "name": "微信给的名字"}
+    quote_name(kept, ACCOUNT, "老王", names, False)
+    assert kept["name"] == "微信给的名字"
+
+
+def test_normalize_quote_body_is_the_reply_only():
+    """引用消息：正文只留回复那句话，被引内容以短标签进 metadata，全文不入库。"""
     row = make_message(sender_username="wxid_a", content=QUOTE_XML)
     item = normalize_message(ACCOUNT, "room@chatroom", "项目群", row, {"wxid_a": "甲"})
-    assert item["content"].startswith("<msg>")
-    assert item["metadata"]["attachment"] is None
+    assert item["content"] == "记得报名"
+    quoted = item["metadata"]["attachment"]["quoted"]
+    assert quoted["label"] == "一长段通知" and "<" not in quoted["label"]
+    assert item["metadata"]["attachment"]["kind"] == "quote"
 
 
 TRANSFER_XML = ('<msg><appmsg><title>微信转账</title><type>2000</type><wcpayinfo>'
@@ -195,6 +216,32 @@ def test_source_id_stability_and_dedup_key():
     # 有服务器 ID 时优先用它去重，正文变化不影响
     with_srv = {**row, "server_id": 987}
     assert source_id(ACCOUNT, "u", with_srv, "x") == source_id(ACCOUNT, "u", with_srv, "y")
+
+
+def test_server_seq_map_resolves_quoted_locator(tmp_path):
+    """引用定位：按 server_id 反查 sort_seq；查不到的键不出现，调用方按 0 处理。"""
+    conn = sqlite3.connect(tmp_path / "message_0.db")
+    with conn:
+        conn.execute("CREATE TABLE Msg_x (server_id INTEGER, sort_seq INTEGER)")
+        conn.executemany("INSERT INTO Msg_x VALUES (?,?)",
+                         [(1802656594381821731, 100), (0, 101)])
+    found = server_seq_map(conn, "Msg_x",
+                           {"1802656594381821731", "5147842299794484807"})
+    conn.close()
+    assert found == {"1802656594381821731": 100}
+
+
+def test_attach_quotes_fills_locator_and_defaults_to_zero():
+    class Stub:
+        _wx = type("WX", (), {"quote_seqs": lambda self, user, ids: {"7": 42}})()
+
+    quote = {"metadata": {"attachment": {"kind": "quote", "quoted": {"svrid": "7"}}}}
+    missed = {"metadata": {"attachment": {"kind": "quote", "quoted": {"svrid": "9"}}}}
+    image = {"metadata": {"attachment": {"kind": "image"}}}
+    Collector._attach_quotes(Stub(), "room@chatroom", [quote, missed, image])
+    assert quote["metadata"]["attachment"]["quoted"]["sort_seq"] == 42
+    assert missed["metadata"]["attachment"]["quoted"]["sort_seq"] == 0
+    assert "sort_seq" not in image["metadata"]["attachment"]
 
 
 def test_session_key_isolation(tmp_path):

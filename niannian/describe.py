@@ -1,7 +1,7 @@
 """非纯文本消息：把正文 XML 解析成结构化描述 + 进气泡的一行中文摘要。
 
-只处理本机实测出现过的形状（659 条里那 156 条 XML 全过了一遍），认不出的一律
-返回 ``None``，由调用方按上游文本原样入库——不猜结构，也不把 XML 伪装成摘要。
+只处理本机实测出现过的形状，认不出的一律返回 ``None``，由调用方按上游文本原样
+入库——不猜结构，也不把 XML 伪装成摘要。
 
 上游给的类型标签很粗：``local_type`` 49 一律叫「文件/链接/卡片」，真正区分靠
 ``<appmsg>`` 里的 ``<type>``；系统消息则整条是 ``<sysmsg>``，``type`` 属性才是子类。
@@ -13,19 +13,21 @@
 
 from __future__ import annotations
 
+import re
 from xml.etree import ElementTree
 
 # <appmsg><type> → 我们的 kind；没列出的 type 落到 card 兜底（只认标题，不编内容）
 APPMSG_KIND = {4: "link", 5: "link", 6: "file", 19: "merged", 33: "miniapp",
-               62: "pat", 2000: "transfer"}
-# 引用/回复消息里嵌着被引原文（实测最长 2311 字），本轮按用户要求不动，正文留 XML。
-QUOTE_TYPE = 57
+               57: "quote", 62: "pat", 2000: "transfer"}
 KIND_LABEL = {"image": "图片", "emoji": "动画表情", "video": "视频", "file": "文件",
               "link": "链接", "miniapp": "小程序", "merged": "聊天记录",
-              "transfer": "转账", "card": "卡片", "pat": "拍一拍",
+              "transfer": "转账", "card": "卡片", "pat": "拍一拍", "quote": "引用",
               "recall": "撤回", "notice": "群动态"}
 # 这几类微信自己已经把话说成整句了，正文直接用那句话，不再套方括号。
 SENTENCE_KINDS = ("pat", "recall", "notice")
+# 引用行上那行小字只是"提示你点下去看"，全文一律不入库（实测被引原文最长 2311 字）。
+QUOTE_LABEL_LIMIT = 40
+TAGS = re.compile(r"<[^>]+>")
 
 
 def parse_xml(text: str):
@@ -115,8 +117,8 @@ def _video(node: ElementTree.Element) -> dict:
 
 def _appmsg(node: ElementTree.Element) -> dict | None:
     msg_type = _int(_child(node, "type"))
-    if msg_type == QUOTE_TYPE:
-        return None
+    if msg_type == 57:
+        return _quote(node)
     kind = APPMSG_KIND.get(msg_type, "card")
     # 没列出的 type 里，只有真带了小程序标识的才认成小程序；外链卡片也常挂着
     # 一个字段全空的 <weappinfo>，看结构不看标签才不会被空壳骗到。
@@ -157,6 +159,41 @@ def _appmsg(node: ElementTree.Element) -> dict | None:
         desc["page_path"] = _child(app, "pagepath")
         desc["source"] = desc["source"] or _child(app, "username")
     return desc
+
+
+def _quote(node: ElementTree.Element) -> dict | None:
+    """引用/回复消息：正文是回复那句话，被引的那条只留定位和一行短标签，全文不入库。"""
+    ref = node.find("refermsg")
+    if ref is None:
+        return None
+    return {"kind": "quote", "text": _child(node, "title"),
+            "quoted": {"type": _int(_child(ref, "type")),
+                       "svrid": _child(ref, "svrid"),
+                       # 作者只认 chatusr：fromusr 在群里是会话 ID，但有些客户端填的是
+                       # 被引作者本人（实测 27 条里有 5 条），拿它当作者会认错人。
+                       "author": _child(ref, "chatusr") or _child(ref, "fromusr"),
+                       "name": _child(ref, "displayname"),
+                       "at": _int(_child(ref, "createtime")),
+                       "label": _quote_label(_child(ref, "content")
+                                             or _child(ref, "partialtext"))}}
+
+
+def _quote_label(raw: str) -> str:
+    """被引消息的一行小字。
+
+    引用卡片/图片时 ``refermsg/content`` 是**整段转义后的 XML**（实测最长 2311 字），
+    必须递归换成摘要，否则引用行会把 XML 贴进气泡；递归也认不出时剥掉标签取纯文本。
+    """
+    text = (raw or "").strip()
+    if not text:
+        return ""
+    if text.startswith("<"):
+        label = summarize(describe(text)) or " ".join(TAGS.sub(" ", text).split())
+    else:
+        label = " ".join(text.split())
+    if len(label) > QUOTE_LABEL_LIMIT:
+        label = label[:QUOTE_LABEL_LIMIT] + "…"
+    return label
 
 
 def _record_items(node: ElementTree.Element) -> list[dict]:
@@ -217,6 +254,15 @@ def summarize(desc: dict | None) -> str:
         return ""
     kind = desc.get("kind") or ""
     label = KIND_LABEL.get(kind) or "消息"
+    if kind == "quote":
+        # 正文只放"这个人说的话"；引用是上下文，不该冒充本句，将来喂模型也一样。
+        text = (desc.get("text") or "").strip()
+        if text:
+            return text
+        quoted = desc.get("quoted") or {}
+        detail = "：".join(part for part in (quoted.get("name") or "",
+                                            quoted.get("label") or "") if part)
+        return f"[{label}] {detail}" if detail else f"[{label}]"
     if kind in SENTENCE_KINDS:
         return desc.get("text") or f"[{label}]"
     name = desc.get("name") or ""

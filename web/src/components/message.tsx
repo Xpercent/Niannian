@@ -1,9 +1,17 @@
 import { useState } from "react";
-import type { MessageRow } from "../lib/api";
+import type { MessageRow, QuoteTarget } from "../lib/api";
 import { dateText, mediaUrl } from "../lib/api";
 import { Dialog, cn } from "./ui";
 
-export function Message({ message }: { message: MessageRow }) {
+export function Message({
+  message,
+  flash = false,
+  onJump,
+}: {
+  message: MessageRow;
+  flash?: boolean;
+  onJump?: (target: QuoteTarget) => void;
+}) {
   const [zoom, setZoom] = useState(false);
   const media = mediaUrl(message.metadata?.local_file);
   const attachment = message.metadata?.attachment;
@@ -14,11 +22,14 @@ export function Message({ message }: { message: MessageRow }) {
   const typeLabel = message.type_label || message.message_type;
   return (
     <article
+      id={`message-${message.id}`}
       className={cn(
         "rounded-lg border p-4",
         message.is_self
           ? "border-emerald-100 bg-emerald-50/50"
           : "border-stone-100 bg-stone-50/70",
+        // 跳转落点：短暂加一圈描边，滚动位置本身已经够说明"就是这条"
+        flash && "ring-2 ring-emerald-300",
       )}
     >
       <div className="mb-2 flex flex-wrap items-center justify-between gap-2 text-xs">
@@ -37,6 +48,14 @@ export function Message({ message }: { message: MessageRow }) {
       <p className="break-words whitespace-pre-wrap text-sm leading-7 text-stone-700">
         {message.content}
       </p>
+      {attachment?.kind === "quote" && (
+        <QuoteLine
+          name={attachment.quoted?.name}
+          label={attachment.quoted?.label}
+          target={message.quote_target}
+          onJump={onJump}
+        />
+      )}
       {picture &&
         (media ? (
           <>
@@ -83,5 +102,44 @@ export function Message({ message }: { message: MessageRow }) {
           </p>
         ))}
     </article>
+  );
+}
+
+/**
+ * 引用行：微信把被引内容显示成一小段，我们只留一行小字 + 跳转，全文不入库。
+ * 目标没导入时照样显示这行字，只是不可点——读得到是谁说的、跳不过去。
+ */
+function QuoteLine({
+  name,
+  label,
+  target,
+  onJump,
+}: {
+  name?: string;
+  label?: string;
+  target?: QuoteTarget | null;
+  onJump?: (target: QuoteTarget) => void;
+}) {
+  const text = `${name ? `${name}：` : ""}${label || "（无内容）"}`;
+  const base =
+    "mt-2 rounded-r-md border-l-2 px-2.5 py-1.5 text-left text-xs leading-5 " +
+    "break-words text-stone-500";
+  if (!target || !onJump) {
+    return (
+      <p className={cn(base, "border-stone-300 bg-stone-100/80")}>
+        {text}
+        <span className="ml-1.5 text-stone-400">· 原文未导入</span>
+      </p>
+    );
+  }
+  return (
+    <button
+      type="button"
+      onClick={() => onJump(target)}
+      aria-label={`跳到 ${name || "被引消息"} 的原文`}
+      className={cn(base, "block w-full cursor-pointer border-stone-300 bg-stone-100/80 hover:bg-stone-200/80 focus-visible:outline focus-visible:outline-2 focus-visible:outline-emerald-400")}
+    >
+      {text}
+    </button>
   );
 }

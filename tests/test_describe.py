@@ -91,9 +91,23 @@ GROUP_RENAME_XML = (
 
 QUOTE_XML = (
     '<msg><appmsg><title>忘记说了——想要报名的私信我</title><type>57</type>'
-    "<refermsg><type>1</type><displayname>甲</displayname>"
-    "<content>一整段很长的通知正文</content><createtime>1791470865</createtime></refermsg>"
+    "<refermsg><type>1</type><svrid>1802656594381821731</svrid>"
+    "<fromusr>123@chatroom</fromusr><chatusr>wxid_a</chatusr>"
+    "<displayname>甲</displayname><content>一整段很长的通知正文</content>"
+    "<createtime>1791470865</createtime></refermsg>"
     "</appmsg><fromusername>wxid_a</fromusername></msg>"
+)
+
+# 引用卡片/图片时，refermsg/content 是整段转义后的 XML，必须递归换成摘要
+QUOTE_CARD_XML = (
+    '<msg><appmsg><title>第一组填这个</title><type>57</type><refermsg>'
+    "<type>49</type><svrid>3096977283805072190</svrid>"
+    "<fromusr>wxid_a</fromusr><chatusr></chatusr><displayname>甲</displayname>"
+    "<content>&lt;msg&gt;&lt;appmsg&gt;&lt;title&gt;第一组&lt;/title&gt;"
+    "&lt;type&gt;33&lt;/type&gt;"
+    "&lt;sourcedisplayname&gt;金山文档&lt;/sourcedisplayname&gt;"
+    "&lt;/appmsg&gt;&lt;/msg&gt;</content>"
+    "<createtime>1791468240</createtime></refermsg></appmsg></msg>"
 )
 
 
@@ -176,10 +190,35 @@ def test_system_messages_render_as_sentences():
     assert summarize(rename) == '"甲"修改群名为“新群名”'
 
 
-def test_quote_messages_left_untouched_this_round():
-    """引用消息按用户要求本轮不动：认不出来，正文保持上游原样。"""
-    assert describe(QUOTE_XML) is None
-    assert summarize(None) == ""
+def test_quote_keeps_reply_text_and_locator_only():
+    desc = describe(QUOTE_XML)
+    assert desc["kind"] == "quote" and desc["text"] == "忘记说了——想要报名的私信我"
+    quoted = desc["quoted"]
+    assert quoted["svrid"] == "1802656594381821731"
+    assert quoted["author"] == "wxid_a" and quoted["name"] == "甲"
+    assert quoted["at"] == 1791470865 and quoted["type"] == 1
+    assert quoted["label"] == "一整段很长的通知正文"
+    # 正文只有回复那句话，被引全文不进正文
+    assert summarize(desc) == "忘记说了——想要报名的私信我"
+
+
+def test_quote_with_nested_xml_label_is_summarized_not_raw():
+    quoted = describe(QUOTE_CARD_XML)["quoted"]
+    assert "<" not in quoted["label"]
+    assert quoted["label"] == "[小程序] 第一组 · 金山文档"
+    # chatusr 为空时作者回落到 fromusr：微信自己这两个字段语义就不统一
+    assert quoted["author"] == "wxid_a"
+
+
+def test_quote_without_reply_text_falls_back_to_summary_line():
+    empty = QUOTE_XML.replace("<title>忘记说了——想要报名的私信我</title>", "<title/>")
+    assert summarize(describe(empty)) == "[引用] 甲：一整段很长的通知正文"
+
+
+def test_quote_label_is_truncated():
+    long = QUOTE_XML.replace("一整段很长的通知正文", "通知" * 60)
+    label = describe(long)["quoted"]["label"]
+    assert len(label) == 41 and label.endswith("…") and label.count("…") == 1
 
 
 def test_text_broken_and_unknown_bodies_are_none():

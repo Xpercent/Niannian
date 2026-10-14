@@ -26,6 +26,7 @@ import {
   post,
   type MessageRow,
   type MessagePage,
+  type QuoteTarget,
   type ReimportResult,
   type SessionRow,
 } from "../lib/api";
@@ -48,6 +49,7 @@ export function SessionsPage({ sessions, onRefresh, notify, selectedId, onSelect
   const [reimporting, setReimporting] = useState(false);
   const [historyCount, setHistoryCount] = useState("100");
   const [loading, setLoading] = useState(false);
+  const [flashId, setFlashId] = useState<number | null>(null);
   const [loadError, setLoadError] = useState("");
   const [busy, setBusy] = useState("");
   const [catalogOpen, setCatalogOpen] = useState(false);
@@ -159,6 +161,40 @@ export function SessionsPage({ sessions, onRefresh, notify, selectedId, onSelect
     nearBottom.current =
       panel.scrollHeight - panel.scrollTop - panel.clientHeight < 120;
   }
+
+  /**
+   * 点引用跳到被引那条。
+   *
+   * 目标不在当前这一屏时，用**现有**游标参数取"包含它的那一屏"就够了：`sort_seq`
+   * 在会话内唯一，`before_seq = 目标 + 1, before_id = 1` 会把目标本身带进来
+   * （它是这一屏最新的一条），不需要为跳转再加一个新接口。
+   * `before_id` 不能给 0 —— 接口的校验是 `ge=1`。
+   */
+  async function jumpToQuote(target: QuoteTarget) {
+    if (!selected) return;
+    if (!messages.some((item) => item.id === target.message_id)) {
+      const page = await api<MessagePage>(
+        `/api/sessions/${encodeURIComponent(selected.id)}/messages?limit=40` +
+          `&before_seq=${target.sort_seq + 1}&before_id=1`,
+      );
+      setMessages(page.items.slice().reverse());
+      setBeforeSeq(page.before_seq);
+      setBeforeId(page.before_id);
+      setHasMore(page.has_more);
+      nearBottom.current = false;
+    }
+    setFlashId(target.message_id);
+  }
+
+  // 跳转落点：滚到那条消息并短暂描边一下。
+  useEffect(() => {
+    if (flashId == null) return;
+    document
+      .getElementById(`message-${flashId}`)
+      ?.scrollIntoView({ block: "center" });
+    const timer = setTimeout(() => setFlashId(null), 1800);
+    return () => clearTimeout(timer);
+  }, [flashId, messages]);
 
   async function toggleFollow(session: SessionRow) {
     setBusy(session.id);
@@ -406,7 +442,12 @@ export function SessionsPage({ sessions, onRefresh, notify, selectedId, onSelect
                   </div>
                 )}
                 {messages.map((message) => (
-                  <Message key={message.id} message={message} />
+                  <Message
+                    key={message.id}
+                    message={message}
+                    flash={flashId === message.id}
+                    onJump={jumpToQuote}
+                  />
                 ))}
                 {!loading && !loadError && !messages.length && (
                   <p className="py-10 text-center text-sm text-stone-400">

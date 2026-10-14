@@ -89,6 +89,23 @@ def sender_alias_map(conn: sqlite3.Connection, table: str,
     return found
 
 
+def server_seq_map(conn: sqlite3.Connection, table: str, wanted: set) -> dict:
+    """``{svrid: sort_seq}``——按 ``server_id`` 反查被引那条消息在本会话的排序号。
+
+    引用消息只带被引那条的 ``svrid``，而跳转要的是 ``sort_seq``（会话内唯一，
+    也正是我们的翻页游标）。查的是微信的分片库而不是本工程库，所以原文还在
+    导入窗口外时同样查得到，等它被导入后同一个 sort_seq 自然对上。
+    """
+    if not wanted:
+        return {}
+    keys = [int(s) if str(s).isdigit() else str(s) for s in wanted]
+    quoted = '"%s"' % str(table).replace('"', '""')
+    marks = ",".join("?" * len(keys))
+    cursor = conn.execute(
+        f"SELECT server_id, sort_seq FROM {quoted} WHERE server_id IN ({marks})", keys)
+    return {str(row[0]): int(row[1]) for row in cursor}
+
+
 def account_scope(account: str) -> str:
     """账号目录指纹：用于隔离解密缓存与会话主键，避免路径含非法字符。"""
     return hashlib.sha256(str(account).encode("utf-8")).hexdigest()[:16]
@@ -152,6 +169,28 @@ def source_id(account: str, username: str, message: dict, raw: str) -> str:
     return f"wechat:{digest.hexdigest()}"
 
 
+def quote_name(quoted: dict, account: str, session_name: str, names: dict,
+               group: bool) -> None:
+    """给引用行补"谁说的"：私聊里微信压根不给 ``displayname``。
+
+    拿被引作者 wxid 走同一张显示名表（备注 > 群名片 > 昵称）。私聊会话里作者不是
+    自己就是对方，所以可以落到会话名；**群聊里认不出就不猜**，宁可只显示被引内容。
+    """
+    if quoted.get("name"):
+        return
+    author = quoted.get("author") or ""
+    if not author:
+        return
+    if author == account:
+        quoted["name"] = "我"
+        return
+    nick = str(names.get(author) or "")
+    if nick and not nick.isdigit() and not nick.startswith("wxid_"):
+        quoted["name"] = nick
+    elif not group and session_name:
+        quoted["name"] = session_name
+
+
 def normalize_message(account: str, username: str, session_name: str,
                       message: dict, names: dict) -> dict:
     """把上游真实行转换成本地消息记录；不美化、不猜测内容。"""
@@ -164,10 +203,12 @@ def normalize_message(account: str, username: str, session_name: str,
         origin = detail.get("from") or ""
     resolved = str(message.get("sender_username") or "")
     sender = resolved or origin
-    if detail and detail.get("kind") == "transfer":
-        transfer_target(detail, sender, names)
     is_self = bool(sender) and sender == account
     group = username.endswith("@chatroom")
+    if detail and detail.get("kind") == "transfer":
+        transfer_target(detail, sender, names)
+    if detail and detail.get("kind") == "quote":
+        quote_name(detail["quoted"], account, session_name, names, group)
     if is_self:
         sender_key_value, sender_name = account, "我"
     elif not sender:
@@ -296,6 +337,10 @@ def open_isolated_db(root: Path, settings: dict):
         def media_hashes(self, user: str, keys: set) -> dict:
             """批量取图片行的本机文件哈希（只走采集线程，读上游库）。"""
             return self._each_shard(user, keys, media_hash_map)
+
+        def quote_seqs(self, user: str, svrids: set) -> dict:
+            """引用消息的定位：被引那条在本会话分片里的 ``sort_seq``。"""
+            return self._each_shard(user, svrids, server_seq_map)
 
         def room_nicknames(self, room: str) -> dict:
             """群成员在这个群里设的群名片：``{wxid: 群名片}``。"""
@@ -594,6 +639,7 @@ class Collector:
             payloads.append(normalize_message(
                 account, session["username"], session.get("name", ""), message, names))
         self._attach_media(session["username"], payloads)
+        self._attach_quotes(session["username"], payloads)
         highest = max([int(watermark)] + [p["sort_seq"] for p in payloads]) if payloads \
             else int(watermark)
         checkpoint = {"account": account, "session_id": session["id"],
@@ -626,3 +672,21 @@ class Collector:
                                         f"{username}_{payload['sort_seq']}")
             if linked:
                 meta.update(linked)
+
+    def _attach_quotes(self, username: str, payloads: list[dict]) -> None:
+        """给引用消息补上被引那条的 ``sort_seq``，前端据此决定能不能跳。
+
+        查不到就留 0：跨会话引用（实测本机 0 条）与本机已不存在的原文都走这条路，
+        前端显示成不可点的灰色引用行，不会跳错位置。
+        """
+        quotes = [p for p in payloads
+                  if (p["metadata"].get("attachment") or {}).get("kind") == "quote"]
+        if not quotes:
+            return
+        wanted = {str(p["metadata"]["attachment"]["quoted"].get("svrid") or "")
+                  for p in quotes}
+        wanted.discard("")
+        found = self._wx.quote_seqs(username, wanted) if wanted else {}
+        for payload in quotes:
+            quoted = payload["metadata"]["attachment"]["quoted"]
+            quoted["sort_seq"] = int(found.get(str(quoted.get("svrid") or ""), 0))

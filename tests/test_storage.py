@@ -20,6 +20,21 @@ def seed(db, sid="wechat:sc:u1", account="wxid_me"):
     return sid
 
 
+def test_quoted_targets_maps_sort_seq_to_row_and_skips_missing(tmp_path):
+    """引用跳转：只有本库里真有那行才给目标，没导入的不能出现（否则前端会跳空）。"""
+    db = make_db(tmp_path)
+    sid = seed(db)
+    db.ingest([payload(sid, "wechat:1", sort=100), payload(sid, "wechat:2", sort=200)])
+    page = db.messages_page(sid, limit=10)["items"]
+    row_id = next(item["id"] for item in page if item["sort_seq"] == 100)
+    assert db.quoted_targets(sid, {100, 999, 0}) == {100: row_id}
+    assert db.quoted_targets(sid, {999}) == {}
+    # 别的会话里同 sort_seq 的行不能算命中
+    other = seed(db, sid="wechat:sc:u2", account="wxid_me")
+    db.ingest([payload(other, "wechat:9", sort=100)])
+    assert db.quoted_targets(other, {100})[100] != db.quoted_targets(sid, {100})[100]
+
+
 def test_catalog_upsert_preserves_monitored(tmp_path):
     db = make_db(tmp_path)
     sid = seed(db)

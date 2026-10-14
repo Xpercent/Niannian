@@ -30,6 +30,12 @@ def type_label(item: dict) -> str:
     return KIND_LABEL.get(kind) or str(item.get("message_type") or "消息")
 
 
+def quoted_of(item: dict) -> dict:
+    """取引用行的被引定位；不是引用消息时返回空 dict。"""
+    attachment = (item.get("metadata") or {}).get("attachment") or {}
+    return attachment.get("quoted") or {}
+
+
 def project_root() -> Path:
     return Path(__file__).resolve().parent.parent
 
@@ -127,7 +133,25 @@ def create_app(root: Path | None = None) -> FastAPI:
         for item in page["items"]:
             _link_media(item)
             item["type_label"] = type_label(item)
+        _attach_quote_targets(session_id, page["items"])
         return page
+
+    def _attach_quote_targets(session_id: str, items: list[dict]) -> None:
+        """给引用行挂 ``quote_target``：被引那条在本库里存在才给，否则为 None。
+
+        跳转用的是 ``quoted.sort_seq``（会话内唯一，也是翻页游标），所以前端拿到
+        target 就滚过去、拿不到就把引用行显示成不可点。
+        """
+        seqs = {int(quoted_of(item).get("sort_seq") or 0) for item in items}
+        found = store.quoted_targets(session_id, seqs)
+        for item in items:
+            quoted = quoted_of(item)
+            if not quoted:
+                continue
+            seq = int(quoted.get("sort_seq") or 0)
+            target = found.get(seq)
+            item["quote_target"] = ({"message_id": target, "sort_seq": seq}
+                                    if target else None)
 
     def _link_media(item: dict) -> None:
         """采集时本机还没有文件的图片，读取时凭 media_md5 再补一次链接。

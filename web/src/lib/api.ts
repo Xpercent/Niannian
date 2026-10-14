@@ -21,7 +21,20 @@ export type ReimportResult = {
   monitored: boolean;
 };
 
-export type AttachmentInfo = { kind: string };
+export type AttachmentInfo = { kind: string; text?: string; quoted?: QuotedRef };
+
+/** 引用消息的被引定位：全文不入库，只留一行小字和跳转用的 sort_seq。 */
+export type QuotedRef = {
+  type?: number;
+  svrid?: string;
+  author?: string;
+  name?: string;
+  at?: number;
+  label?: string;
+  sort_seq?: number;
+};
+
+export type QuoteTarget = { message_id: number; sort_seq: number };
 
 /** 消息 metadata：采集线程写入，图片只存本机相对链接（不存二进制）。 */
 export type MessageMeta = {
@@ -54,6 +67,8 @@ export type MessageRow = {
   created_at: string;
   sort_seq: number;
   metadata: MessageMeta;
+  /** 引用行的跳转目标；被引那条没导入时为 null（前端显示成不可点）。 */
+  quote_target?: QuoteTarget | null;
 };
 
 export type MessagePage = {

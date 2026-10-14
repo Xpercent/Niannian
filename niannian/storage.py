@@ -239,6 +239,18 @@ class Database:
             "has_more": has_more,
         }
 
+    def quoted_targets(self, session_id: str, seqs: set) -> dict:
+        """被引消息在本库里的行号 ``{sort_seq: id}``；没导入的不会出现，前端据此判可点。"""
+        wanted = sorted({int(s) for s in seqs if int(s)})
+        if not wanted:
+            return {}
+        marks = ",".join("?" * len(wanted))
+        with self.connect() as conn:
+            rows = conn.execute(
+                f"SELECT sort_seq, id FROM messages WHERE session_id=? "
+                f"AND sort_seq IN ({marks})", [session_id, *wanted]).fetchall()
+        return {int(row["sort_seq"]): int(row["id"]) for row in rows}
+
     def update_metadata(self, message_id: int, metadata: dict) -> None:
         """整块改写一条消息的 metadata（补媒体链接用），不动内容与水位。"""
         with self._write_lock, self.connect() as conn:

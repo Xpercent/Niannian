@@ -43,7 +43,7 @@ def rows():
 
 
 def is_quote(content: str) -> bool:
-    """引用/回复消息（appmsg type=57）：本轮按用户要求不格式化，允许留 XML。"""
+    """引用/回复消息（appmsg type=57）：引用消息现在已解析，这里只用来挑样本。"""
     root = parse_xml(content)
     app = root.find("appmsg") if root is not None and root.tag == "msg" else None
     return app is not None and (app.findtext("type") or "").strip() == "57"
@@ -55,14 +55,34 @@ def test_capture_has_replayable_sessions():
     assert all(message["content"] for _, _, _, message, _ in captured)
 
 
-def test_only_quote_messages_stay_raw_xml():
-    """除引用消息外，任何真机正文都不该以 XML 形态进气泡。"""
+# 本机暂无样本、因此刻意没写解析的类型：真机捕获里出现它们，正文留 XML 是预期行为。
+UNIMPLEMENTED_TYPES = {"语音", "位置", "音视频通话", "名片", "笔记/收藏", "群公告"}
+
+
+def test_only_unimplemented_kinds_stay_raw_xml():
+    """任何已实现过的形状都不该再把 XML 贴进气泡；没实现的类型才允许留原文。"""
     for account, username, name, message, names in rows():
         body = normalize_message(account, username, name, message, names)["content"]
         if body.lstrip().startswith("<"):
-            # 判断前先剥群前缀：产品侧看到的正文是 split_sender 之后的那一段
-            assert is_quote(split_sender(message["content"])[1]), \
+            assert message["type"] in UNIMPLEMENTED_TYPES, \
                 f"{message['type']} 的正文漏了没解析：{body[:80]}"
+
+
+def test_quote_rows_carry_locator_and_a_clean_label():
+    """引用行：正文只留回复那句话，被引内容以定位 + 一行小字存在，绝不出现 XML。"""
+    checked = 0
+    for account, username, name, message, names in rows():
+        if not is_quote(split_sender(message["content"])[1]):
+            continue
+        checked += 1
+        item = normalize_message(account, username, name, message, names)
+        quoted = item["metadata"]["attachment"]["quoted"]
+        assert quoted["svrid"], quoted
+        assert "<" not in quoted["label"], quoted["label"]
+        assert not item["content"].lstrip().startswith("<")
+        assert quoted["author"], quoted
+    if not checked:
+        pytest.skip("这批捕获里没有引用消息，关注一个有引用的会话再跑")
 
 
 def test_every_row_has_content_and_a_sender():
