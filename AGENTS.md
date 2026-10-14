@@ -7,6 +7,8 @@
 ## 工作方式（用户明确要求）
 - 每次任务以**交付最小可运行代码**为基准，一次只跑通一个功能闭环。
 - 遇到问题**先汇报，不要自己替用户做决定**（含技术选型、语义取舍）。
+- **涉及入库解析/库结构的改动，直接删库重建（清库重采）让改动对存量生效，不用再问**
+  （用户 2026-10-14 明确授权；重建前把关注清单与每会话导入条数存下来，旧库留一份备份）。
 - 每轮自行 `git` 提交，并同步维护 `docs/REFACTOR-LOG.md`、`HANDOFF.md`。
 - Web UI 需与原项目**基本一致**（配色 token、布局、交互流）。
 - 服务可由 agent 自行启停（`python -m niannian`，端口 8765）。
@@ -22,9 +24,14 @@ cd web && npm run dev                   # 前端热更新，/api 代理到 8765
 ## 结构
 - `niannian/`：`config`（默认值/校验/落盘）/ `storage`（SQLite 三表）/
   `wechat`（只读采集线程 + 命令队列 + 水位增量）/ `contacts`（发送者显示名与
-  群名片 protobuf）/ `media`（图片定位、解密、链接收口）/ `api`（FastAPI）。
+  群名片 protobuf）/ `describe`（正文 XML → 结构化描述 + 一行摘要）/
+  `media`（图片定位、解密、链接收口）/ `api`（FastAPI）。
 - `web/`：React + Vite + Tailwind，手写 UI 组件（无 shadcn/radix）；
   `pages/` 下两页：`sessions`（微信会话）、`settings`（设置）。
+- `scripts/capture_fixtures.py`：把关注会话的**原始正文**（未解析的 XML 也在内）导成
+  `data/fixtures/capture.db`，供 `tests/test_capture_replay.py` 离线回放。跑它要**先停服务**
+  （同一份解密缓存不该被两个读取方同时开）；产物是真实聊天，落在 `data/`（已 gitignore）。
+  测试只断言"任何一次重新捕获都成立"的不变式，fixture 缺失就 skip，不造数据刷绿。
 - `wechatauto-replica/`：**git submodule**，锁定上游 1.2.5.1（fbfb026）。
   视为第三方依赖，**不要改动**（改动会偏离上游且 `submodule update` 会丢）。
   需要不同行为时在本仓库 `IsolatedDB` 子类里覆写。

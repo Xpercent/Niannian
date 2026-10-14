@@ -42,6 +42,15 @@
 存量 10 条已删掉重导（备份 `data/backup-pre-transfer/`）。细节与原始 XML 见
 `docs/REFACTOR-LOG.md` 与 `data/_transfer_two.txt`。
 
+再追加：`scripts/capture_fixtures.py` 把关注会话各最多 100 条**原始正文**导成
+`data/fixtures/capture.db`（含每会话的显示名表，跑前先停服务），
+`tests/test_capture_replay.py` 拿它离线回放 5 项不变式（只有引用消息允许留 XML、
+摘要不重复套方括号、转账摘要里绝不出现 `wxid_` …），fixture 缺失就 skip。
+pytest 现在 70 项。
+
+**授权更新**：涉及入库解析/库结构的改动，直接删库重建让改动对存量生效，不用再问
+（已写进 AGENTS.md 工作方式）。
+
 ## 上一轮：设置页（只开放三项）
 用户从候选里只挑 `history_limit` / `poll_seconds` / `port`。`host` 刻意不放
 （暴露局域网 + 改错锁死自己），数据目录/账号仍可手工写文件。
