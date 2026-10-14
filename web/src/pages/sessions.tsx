@@ -310,7 +310,37 @@ export function SessionsPage({ sessions, onRefresh, notify }: Props) {
                     {selected.message_count ?? 0} 条真实消息 · 正在关注
                   </p>
                 </div>
-                <div className="flex flex-wrap gap-2">
+                <div className="flex flex-wrap items-center gap-2">
+                  <form
+                    className="flex items-center gap-2"
+                    onSubmit={(event) => {
+                      event.preventDefault();
+                      void reimportHistory(selected);
+                    }}
+                  >
+                    <label className="flex items-center gap-2 text-xs text-stone-500">
+                      最近
+                      <span className="inline-block w-20 align-middle">
+                        <Input
+                          type="number"
+                          min={1}
+                          max={1000}
+                          aria-label="重新导入的最近条数"
+                          value={historyCount}
+                          onChange={(event) => setHistoryCount(event.target.value)}
+                        />
+                      </span>
+                      条
+                    </label>
+                    <Button type="submit" variant="ghost" disabled={reimporting}>
+                      {reimporting ? (
+                        <Loader2 className="size-4 animate-spin motion-reduce:animate-none" />
+                      ) : (
+                        <History className="size-4" />
+                      )}
+                      {reimporting ? "正在导入" : "重新导入"}
+                    </Button>
+                  </form>
                   <Button
                     disabled={Boolean(busy)}
                     variant="secondary"
@@ -372,42 +402,6 @@ export function SessionsPage({ sessions, onRefresh, notify }: Props) {
                       加载更早消息
                     </Button>
                   </div>
-                )}
-                {!hasMore && !loading && !!messages.length && (
-                  <form
-                    className="flex flex-wrap items-center justify-center gap-2 pt-1 text-sm text-stone-500"
-                    onSubmit={(event) => {
-                      event.preventDefault();
-                      void reimportHistory(selected);
-                    }}
-                  >
-                    <label className="flex items-center gap-2">
-                      本地已翻到底，重新导入最近
-                      <Input
-                        type="number"
-                        min={1}
-                        max={1000}
-                        aria-label="重新导入条数"
-                        className="w-24"
-                        value={historyCount}
-                        onChange={(event) => setHistoryCount(event.target.value)}
-                      />
-                      条
-                    </label>
-                    <Button
-                      type="submit"
-                      size="sm"
-                      variant="secondary"
-                      disabled={reimporting}
-                    >
-                      {reimporting ? (
-                        <Loader2 className="size-4 animate-spin motion-reduce:animate-none" />
-                      ) : (
-                        <History className="size-4" />
-                      )}
-                      {reimporting ? "正在导入" : "重新导入历史"}
-                    </Button>
-                  </form>
                 )}
                 {messages.map((message) => (
                   <Message key={message.id} message={message} />

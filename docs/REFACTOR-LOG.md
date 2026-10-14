@@ -278,8 +278,10 @@ p-6 + Esc 可关，基类改动无回归。`tsc -b` 与 `npm run build` 通过�
 - `Collector.reimport` 走已有命令队列进采集线程（只有它碰上游库），
   `_reimport` = 记下条数 → 清水位 → 复用现成的 `_import_recent`。
   **不删任何已入库消息**，重复行由 `source_id` 唯一键跳过。
-- `POST /api/sessions/{id}/reimport?limit=N`；前端在"本地已翻到底"处放
-  条数输入 + 按钮，输入框默认值取该会话自己存的条数，结果用 notify 播报。
+- `POST /api/sessions/{id}/reimport?limit=N`；前端控件放在**会话标题栏**
+  （与"取消关注"同一栏），条数输入默认值取该会话自己存的条数，结果用 notify 播报。
+  输入框与按钮都用 h-10（`Input` 基类写死了 `h-10 w-full`，按 AGENTS.md 那条
+  "不要用冲突类覆盖"的规矩，宽度由外层 `w-20` 容器控、按钮配同高的 default 尺寸）。
 - 请求超时：后端命令等 300 秒，前端 `LONG_REQUEST_MS` 310 秒要等得比它久。
 
 ### 验证
