@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   Check,
+  History,
   Loader2,
   MessageSquare,
   Plus,
@@ -21,9 +22,11 @@ import { Message } from "../components/message";
 import {
   api,
   dateText,
+  LONG_REQUEST_MS,
   post,
   type MessageRow,
   type MessagePage,
+  type ReimportResult,
   type SessionRow,
 } from "../lib/api";
 
@@ -38,7 +41,10 @@ export function SessionsPage({ sessions, onRefresh, notify }: Props) {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [messages, setMessages] = useState<MessageRow[]>([]);
   const [hasMore, setHasMore] = useState(false);
+  const [beforeSeq, setBeforeSeq] = useState<number | null>(null);
   const [beforeId, setBeforeId] = useState<number | null>(null);
+  const [reimporting, setReimporting] = useState(false);
+  const [historyCount, setHistoryCount] = useState("100");
   const [loading, setLoading] = useState(false);
   const [loadError, setLoadError] = useState("");
   const [busy, setBusy] = useState("");
@@ -74,7 +80,10 @@ export function SessionsPage({ sessions, onRefresh, notify }: Props) {
         if (nearBottom.current) jumpToBottom.current = true;
       }
       try {
-        const cursor = older && beforeId != null ? `&before_id=${beforeId}` : "";
+        const cursor =
+          older && beforeSeq != null
+            ? `&before_seq=${beforeSeq}&before_id=${beforeId ?? 0}`
+            : "";
         const page = await api<MessagePage>(
           `/api/sessions/${encodeURIComponent(id)}/messages?limit=40${cursor}`,
           { signal: abort.signal },
@@ -86,6 +95,7 @@ export function SessionsPage({ sessions, onRefresh, notify }: Props) {
           const seen = new Set(old.map((item) => item.id));
           return [...fresh.filter((item) => !seen.has(item.id)), ...old];
         });
+        setBeforeSeq(page.before_seq);
         setBeforeId(page.before_id);
         setHasMore(page.has_more);
       } catch (error) {
@@ -98,12 +108,15 @@ export function SessionsPage({ sessions, onRefresh, notify }: Props) {
         if (seq === requestSeq.current) setLoading(false);
       }
     },
-    [beforeId],
+    [beforeSeq, beforeId],
   );
 
   useEffect(() => {
-    if (selectedId) void loadConversation(selectedId);
-    else setMessages([]);
+    if (selectedId) {
+      // 条数输入跟随该会话自己上次导入的量，不跟全局配置串味。
+      setHistoryCount(String(selected?.history_limit || 100));
+      void loadConversation(selectedId);
+    } else setMessages([]);
     nearBottom.current = true;
     return () => {
       requestSeq.current++;
@@ -165,6 +178,28 @@ export function SessionsPage({ sessions, onRefresh, notify }: Props) {
       notify((error as Error).message || "操作失败", true);
     } finally {
       setBusy("");
+    }
+  }
+
+  async function reimportHistory(session: SessionRow) {
+    const count = Math.max(0, Math.min(1000, Number(historyCount) || 0));
+    setReimporting(true);
+    try {
+      const result = await api<ReimportResult>(
+        `/api/sessions/${encodeURIComponent(session.id)}/reimport?limit=${count}`,
+        post(),
+        LONG_REQUEST_MS,
+      );
+      // 重新导入会把更旧的消息以更大的自增 id 插进来，必须整页重读而不是增量合并。
+      await Promise.all([loadConversation(session.id), onRefresh()]);
+      notify(
+        `已按最近 ${result.limit} 条重新导入：读到 ${result.read} 条，` +
+          `新增 ${result.inserted} 条（重复的自动跳过，原有消息未删除）`,
+      );
+    } catch (error) {
+      notify((error as Error).message || "重新导入失败", true);
+    } finally {
+      setReimporting(false);
     }
   }
 
@@ -337,6 +372,42 @@ export function SessionsPage({ sessions, onRefresh, notify }: Props) {
                       加载更早消息
                     </Button>
                   </div>
+                )}
+                {!hasMore && !loading && !!messages.length && (
+                  <form
+                    className="flex flex-wrap items-center justify-center gap-2 pt-1 text-sm text-stone-500"
+                    onSubmit={(event) => {
+                      event.preventDefault();
+                      void reimportHistory(selected);
+                    }}
+                  >
+                    <label className="flex items-center gap-2">
+                      本地已翻到底，重新导入最近
+                      <Input
+                        type="number"
+                        min={1}
+                        max={1000}
+                        aria-label="重新导入条数"
+                        className="w-24"
+                        value={historyCount}
+                        onChange={(event) => setHistoryCount(event.target.value)}
+                      />
+                      条
+                    </label>
+                    <Button
+                      type="submit"
+                      size="sm"
+                      variant="secondary"
+                      disabled={reimporting}
+                    >
+                      {reimporting ? (
+                        <Loader2 className="size-4 animate-spin motion-reduce:animate-none" />
+                      ) : (
+                        <History className="size-4" />
+                      )}
+                      {reimporting ? "正在导入" : "重新导入历史"}
+                    </Button>
+                  </form>
                 )}
                 {messages.map((message) => (
                   <Message key={message.id} message={message} />

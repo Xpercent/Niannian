@@ -85,6 +85,20 @@ cd web && npm run dev                   # 前端热更新，/api 代理到 8765
 - 图片一律不放大显示：`<img>` 用 `w-auto max-w-full max-h-[…vh]`，不用 `w-full`，
   否则低分辨率预览图会被插值拉糊。
 
+## 消息顺序与重新导入（易踩）
+- **翻页排序键必须是 `sort_seq`，不能是自增 `id`**。id 只代表入库先后；会话一旦
+  被"重新导入"过，更旧的消息会带着**更大**的 id 插进来，按 id 排就翻了。
+  游标是 `(before_seq, before_id)` 复合，索引 `(session_id, sort_seq, id)`。
+- 同 `sort_seq` 并列用 id 稳定破并列（跨分片 `local_id` 本身重复，没有更可靠的列），
+  即"同秒内按入库先后"——这是已知且接受的行为，`test_storage` 里固定住了。
+- 重新导入 = 记下该会话条数 → `clear_watermark` → 复用 `_import_recent`。
+  **不删消息**，重复行靠 `source_id` UNIQUE 跳过；水位取 `max`，所以回填更旧的
+  消息不会把增量轮询游标拉回去。
+- 导入条数是**按会话存**的（`sessions.history_limit`，0=跟随全局），刻意与全局
+  `config.history_limit` 解耦：改一个会话不能影响其它会话。
+- `INSERT OR IGNORE` 意味着已存在的行永不更新：改了入库时的解析/显示逻辑，
+  必须清库重采才对存量生效。
+
 ## 约定
 - 注释与 docstring 用**中文**（公开 API 名用英文），只在"为什么"不明显处写注释。
 - 采集**只读**：不驱动 GUI、不发消息、不触发微信下载附件。

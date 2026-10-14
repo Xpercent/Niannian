@@ -367,6 +367,16 @@ class Collector:
             return future.result(timeout=90)
         return self.db.list_sessions(account=self._state["account"])
 
+    def reimport(self, session_id: str, limit: int) -> dict:
+        """按指定条数重新导入某个会话的历史（界面"重新导入"按钮走这里）。
+
+        必须在采集线程上跑：只有它碰上游库。深历史可能读很久，超时给到 300 秒。
+        """
+        if not (self._thread and self._thread.is_alive()):
+            raise RuntimeError("微信采集器未运行。")
+        future = self._request("reimport", session_id, int(limit))
+        return future.result(timeout=300)
+
     # ------------------------------------------------------------ 内部
     def _state_update(self, **values):
         with self._guard:
@@ -431,6 +441,8 @@ class Collector:
         try:
             if operation == "catalog":
                 future.set_result(self._sync_catalog())
+            elif operation == "reimport":
+                future.set_result(self._reimport(*args))
             else:
                 future.set_exception(RuntimeError(f"未知命令：{operation}"))
         except Exception as exc:
@@ -473,8 +485,7 @@ class Collector:
                 return
             watermark = self.db.watermark(account, session["id"])
             if watermark is None:
-                self._import_recent(session, clamp_history_limit(
-                    self.settings.get("history_limit")))
+                self._import_recent(session, self._history_limit(session))
                 continue
             collected: list[dict] = []
             since = watermark
@@ -490,8 +501,13 @@ class Collector:
             if collected and not self._stop.is_set():
                 self._store(session, collected, watermark)
 
+    def _history_limit(self, session: dict) -> int:
+        """这个会话该导多少条：会话自己设过的优先，没设过才跟随全局默认。"""
+        return clamp_history_limit(session.get("history_limit")
+                                   or self.settings.get("history_limit"))
+
     def _import_recent(self, session: dict, limit: int) -> dict:
-        """首次关注自动导入：从最新往旧翻页取满 limit 条（阶段一无手动导入）。"""
+        """从最新往旧翻页取满 limit 条；首次关注和手动重新导入共用这一条路径。"""
         assert self._wx is not None
         account = self._state["account"]
         collected: list[dict] = []
@@ -506,6 +522,24 @@ class Collector:
             return {"inserted": 0, "read": 0}
         watermark = self.db.watermark(account, session["id"]) or 0
         return self._store(session, collected, watermark)
+
+    def _reimport(self, session_id: str, limit: int) -> dict:
+        """按 limit 重新导入该会话历史：记下条数 → 清水位 → 立刻导。
+
+        不删任何已有消息：水位清空后 _import_recent 会把最新 limit 条重读一遍，
+        重复行由 source_id 唯一键跳过，只有更旧的那段真正入库。
+        水位取 max，所以重新导入不会把增量轮询的游标拉回去。
+        """
+        assert self._wx is not None
+        session = self.db.session(session_id)
+        if not session:
+            raise ValueError("会话不存在")
+        effective = clamp_history_limit(limit or self.settings.get("history_limit"))
+        self.db.set_history_limit(session_id, effective)
+        self.db.clear_watermark(self._state["account"], session_id)
+        session["history_limit"] = effective
+        result = self._import_recent(session, effective)
+        return {"limit": effective, "monitored": bool(session["monitored"]), **result}
 
     def _store(self, session: dict, messages: list[dict], watermark: int) -> dict:
         assert self._wx is not None

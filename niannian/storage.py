@@ -17,7 +17,8 @@ CREATE TABLE IF NOT EXISTS sessions (
   monitored INTEGER NOT NULL DEFAULT 0,
   unread INTEGER NOT NULL DEFAULT 0,
   last_message_at TEXT,
-  updated_at TEXT NOT NULL DEFAULT ''
+  updated_at TEXT NOT NULL DEFAULT '',
+  history_limit INTEGER NOT NULL DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS messages (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -32,7 +33,7 @@ CREATE TABLE IF NOT EXISTS messages (
   sort_seq INTEGER NOT NULL DEFAULT 0,
   metadata TEXT NOT NULL DEFAULT '{}'
 );
-CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id, id);
+CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id, sort_seq, id);
 CREATE TABLE IF NOT EXISTS checkpoints (
   account TEXT NOT NULL,
   session_id TEXT NOT NULL,
@@ -97,6 +98,16 @@ class Database:
         item["monitored"] = bool(item["monitored"])
         return item
 
+    def set_history_limit(self, session_id: str, limit: int) -> bool:
+        """记下这个会话自己要导入的条数（0 表示跟随全局默认）。
+
+        刻意与全局 ``history_limit`` 分开：调某一个会话的条数不该影响其它会话。
+        """
+        with self._write_lock, self.connect() as conn:
+            cur = conn.execute("UPDATE sessions SET history_limit=? WHERE id=?",
+                               (int(limit), session_id))
+        return cur.rowcount > 0
+
     def set_monitored(self, session_id: str, monitored: bool) -> bool:
         """关注/取关。返回 False 表示会话不存在。"""
         with self._write_lock, self.connect() as conn:
@@ -146,6 +157,14 @@ class Database:
                 (account, session_id)).fetchone()
         return int(row["sort_seq"]) if row else None
 
+    def clear_watermark(self, account: str, session_id: str) -> None:
+        """只清采集水位，**不删任何已入库消息**：下一轮会当作没导过重新导入，
+        重复行由 messages.source_id 唯一键自动跳过。
+        """
+        with self._write_lock, self.connect() as conn:
+            conn.execute("DELETE FROM checkpoints WHERE account=? AND session_id=?",
+                         (account, session_id))
+
     # ------------------------------------------------------------------ 消息
     def ingest(self, payloads: list[dict], checkpoint: dict | None = None) -> int:
         """同事务插入消息并推进水位；水位只前进不后退。返回新插入条数。"""
@@ -180,17 +199,24 @@ class Database:
         return inserted
 
     def messages_page(self, session_id: str, limit: int = 40,
+                      before_seq: int | None = None,
                       before_id: int | None = None) -> dict:
-        """按插入 id 倒序翻页；items 保持“新→旧”，前端自行反转为阅读顺序。"""
+        """按消息时间倒序翻页；items 保持“新→旧”，前端自行反转为阅读顺序。
+
+        排序键必须是 ``sort_seq`` 而不是自增 ``id``：id 只代表入库先后。会话一旦
+        重新导入过历史，更旧的消息会带着**更大**的 id 插进来，按 id 排顺序就翻了。
+        同一 sort_seq 并列时用 id 做稳定 tiebreak——跨分片 local_id 本身会重复，
+        没有更可靠的列能破并列，接受同秒内按入库先后。
+        """
         limit = max(1, min(int(limit), 500))
         sql = """SELECT id, session_id, source_id, sender_key, sender_name, is_self,
                         content, message_type, created_at, sort_seq, metadata
                  FROM messages WHERE session_id=?"""
         args: list = [session_id]
-        if before_id is not None:
-            sql += " AND id<?"
-            args.append(int(before_id))
-        sql += " ORDER BY id DESC LIMIT ?"
+        if before_seq is not None:
+            sql += " AND (sort_seq<? OR (sort_seq=? AND id<?))"
+            args += [int(before_seq), int(before_seq), int(before_id or 0)]
+        sql += " ORDER BY sort_seq DESC, id DESC LIMIT ?"
         args.append(limit + 1)
         with self.connect() as conn:
             rows = conn.execute(sql, args).fetchall()
@@ -205,9 +231,11 @@ class Database:
             except json.JSONDecodeError:
                 item["metadata"] = {}
             items.append(item)
+        tail = rows[-1] if rows else None
         return {
             "items": items,
-            "before_id": rows[-1]["id"] if rows else None,
+            "before_seq": tail["sort_seq"] if tail else None,
+            "before_id": tail["id"] if tail else None,
             "has_more": has_more,
         }
 

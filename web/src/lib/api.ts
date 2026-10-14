@@ -10,6 +10,15 @@ export type SessionRow = {
   last_message_at: string | null;
   updated_at: string;
   message_count?: number;
+  /** 该会话自己设的导入条数；0 表示跟随全局默认。 */
+  history_limit?: number;
+};
+
+export type ReimportResult = {
+  limit: number;
+  inserted: number;
+  read: number;
+  monitored: boolean;
 };
 
 export type AttachmentInfo = { kind: string };
@@ -47,6 +56,7 @@ export type MessageRow = {
 
 export type MessagePage = {
   items: MessageRow[];
+  before_seq: number | null;
   before_id: number | null;
   has_more: boolean;
 };
@@ -65,12 +75,16 @@ export type WechatStatus = {
 
 const REQUEST_TIMEOUT_MS = 120000;
 
+/** 重新导入深历史会同步读上游库，后端超时 300 秒，前端要等得比它久。 */
+export const LONG_REQUEST_MS = 310000;
+
 export async function api<T = unknown>(
   path: string,
   init: RequestInit = {},
+  timeoutMs = REQUEST_TIMEOUT_MS,
 ): Promise<T> {
   const timeout = new AbortController();
-  const timer = setTimeout(() => timeout.abort(), REQUEST_TIMEOUT_MS);
+  const timer = setTimeout(() => timeout.abort(), timeoutMs);
   try {
     const response = await fetch(path, {
       ...init,

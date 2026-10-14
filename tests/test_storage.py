@@ -55,11 +55,75 @@ def test_messages_page_cursor(tmp_path):
     page = db.messages_page(sid, limit=2)
     assert [m["content"] for m in page["items"]] == ["m5", "m4"]
     assert page["has_more"] is True
-    older = db.messages_page(sid, limit=2, before_id=page["before_id"])
+    older = db.messages_page(sid, limit=2, before_seq=page["before_seq"],
+                             before_id=page["before_id"])
     assert [m["content"] for m in older["items"]] == ["m3", "m2"]
-    tail = db.messages_page(sid, limit=2, before_id=older["before_id"])
+    tail = db.messages_page(sid, limit=2, before_seq=older["before_seq"],
+                            before_id=older["before_id"])
     assert [m["content"] for m in tail["items"]] == ["m1"]
     assert tail["has_more"] is False
+
+
+def test_messages_page_orders_by_time_not_by_insertion(tmp_path):
+    """重新导入历史会把更旧的消息以**更大**的自增 id 插进来；翻页仍必须按时间倒序。
+
+    这条就是"按 id 排"会翻车的情形。
+    """
+    db = make_db(tmp_path)
+    sid = seed(db)
+    db.ingest([payload(sid, f"new:{i}", content=f"新{i}", sort=100 + i) for i in (1, 2)])
+    db.ingest([payload(sid, f"old:{i}", content=f"旧{i}", sort=10 + i) for i in (1, 2)])
+    first = db.messages_page(sid, limit=3)
+    assert [m["content"] for m in first["items"]] == ["新2", "新1", "旧2"]
+    rest = db.messages_page(sid, limit=3, before_seq=first["before_seq"],
+                            before_id=first["before_id"])
+    assert [m["content"] for m in rest["items"]] == ["旧1"]
+    assert rest["has_more"] is False
+
+
+def test_messages_page_same_sort_seq_tiebreak_is_stable(tmp_path):
+    """同一 sort_seq 并列时按 id 倒序破并列：可复现，且不重复、不漏条。"""
+    db = make_db(tmp_path)
+    sid = seed(db)
+    db.ingest([payload(sid, "a", content="甲", sort=50),
+               payload(sid, "b", content="乙", sort=50)])
+    page = db.messages_page(sid, limit=5)
+    assert [m["content"] for m in page["items"]] == ["乙", "甲"]
+    again = db.messages_page(sid, limit=5, before_seq=page["before_seq"],
+                             before_id=page["before_id"])
+    assert again["items"] == []
+
+
+def test_history_limit_is_per_session(tmp_path):
+    """会话自己的条数与全局配置解耦：改一个不该影响其它会话。"""
+    db = make_db(tmp_path)
+    sid = seed(db)
+    other = seed(db, sid="wechat:sc:u2")
+    assert db.session(sid)["history_limit"] == 0        # 0 = 未设过，跟随全局
+    assert db.set_history_limit(sid, 500) is True
+    assert db.session(sid)["history_limit"] == 500
+    assert db.session(other)["history_limit"] == 0
+    assert db.set_history_limit("wechat:sc:missing", 500) is False
+    # 目录快照刷新不能把会话自己设的条数冲掉
+    db.sync_catalog("wxid_me", [{"id": sid, "username": "u1", "name": "改名",
+                                 "unread": 1, "last_message_at": None}])
+    assert db.session(sid)["history_limit"] == 500
+
+
+def test_clear_watermark_keeps_messages(tmp_path):
+    """重新导入只清水位：已入库消息一条都不能少，水位清掉后才会重新导。"""
+    db = make_db(tmp_path)
+    sid = seed(db)
+    db.ingest([payload(sid, "wechat:1", sort=9)],
+              checkpoint={"account": "wxid_me", "session_id": sid, "sort_seq": 9})
+    assert db.watermark("wxid_me", sid) == 9
+    db.clear_watermark("wxid_me", sid)
+    assert db.watermark("wxid_me", sid) is None
+    assert db.counts()["message_count"] == 1
+    # 水位重新建立时不会被旧的更小的值拉回去
+    db.ingest([payload(sid, "wechat:1", sort=9)],
+              checkpoint={"account": "wxid_me", "session_id": sid, "sort_seq": 12})
+    assert db.watermark("wxid_me", sid) == 12
 
 
 def test_monitored_filter_and_counts(tmp_path):

@@ -58,10 +58,12 @@ def create_app(root: Path | None = None) -> FastAPI:
 
     @app.get("/api/sessions/{session_id}/messages")
     def api_messages(session_id: str, limit: int = Query(40, ge=1, le=200),
+                     before_seq: int | None = Query(None, ge=0),
                      before_id: int | None = Query(None, ge=1)):
         if not store.session(session_id):
             raise HTTPException(404, "会话不存在")
-        page = store.messages_page(session_id, limit=limit, before_id=before_id)
+        page = store.messages_page(session_id, limit=limit,
+                                   before_seq=before_seq, before_id=before_id)
         _link_media(session_id, page["items"])
         return page
 
@@ -115,6 +117,16 @@ def create_app(root: Path | None = None) -> FastAPI:
     @app.post("/api/sessions/{session_id}/unfollow")
     def api_unfollow(session_id: str):
         return _set_follow(session_id, False)
+
+    @app.post("/api/sessions/{session_id}/reimport")
+    def api_reimport(session_id: str, limit: int = Query(0, ge=0, le=1000)):
+        """按 limit 重新导入该会话历史（limit=0 用全局默认）；只影响这一个会话。"""
+        try:
+            return collector.reimport(session_id, limit)
+        except RuntimeError as exc:
+            raise HTTPException(503, str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(404, str(exc)) from exc
 
     dist = root / "web" / "dist"
     if (dist / "assets").is_dir():
