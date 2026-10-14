@@ -1,0 +1,180 @@
+/** 极简 UI 组件集：沿用原版亮色绿色调的等价样式，全部本地实现。 */
+
+import { useEffect } from "react";
+import type {
+  ButtonHTMLAttributes,
+  HTMLAttributes,
+  InputHTMLAttributes,
+  ReactNode,
+} from "react";
+import type { Ref } from "react";
+import { X } from "lucide-react";
+
+export function cn(...parts: Array<string | false | null | undefined>) {
+  return parts.filter(Boolean).join(" ");
+}
+
+type ButtonProps = ButtonHTMLAttributes<HTMLButtonElement> & {
+  variant?: "default" | "secondary" | "ghost" | "danger";
+  size?: "default" | "sm" | "icon";
+};
+
+export function Button({
+  variant = "default",
+  size = "default",
+  className,
+  ...props
+}: ButtonProps) {
+  const base =
+    "inline-flex items-center justify-center gap-2 rounded-lg text-sm font-medium outline-none transition focus-visible:ring-2 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50";
+  const sizes = { default: "h-10 px-4", sm: "h-8 px-3 text-xs", icon: "size-9" };
+  const variants = {
+    default: "bg-primary text-primary-foreground hover:bg-primary/90",
+    secondary: "bg-secondary text-secondary-foreground hover:bg-accent",
+    ghost: "text-stone-600 hover:bg-stone-100",
+    danger: "bg-destructive text-white hover:bg-destructive/90",
+  };
+  return (
+    <button
+      type="button"
+      className={cn(base, sizes[size], variants[variant], className)}
+      {...props}
+    />
+  );
+}
+
+export function Card({ className, ...props }: HTMLAttributes<HTMLDivElement>) {
+  return (
+    <div
+      className={cn("rounded-xl border bg-card shadow-sm", className)}
+      {...props}
+    />
+  );
+}
+
+export function CardHeader({
+  className,
+  ...props
+}: HTMLAttributes<HTMLDivElement>) {
+  return (
+    <div
+      className={cn(
+        "flex flex-wrap items-center justify-between gap-3 border-b p-4",
+        className,
+      )}
+      {...props}
+    />
+  );
+}
+
+export function CardTitle({
+  className,
+  ...props
+}: HTMLAttributes<HTMLHeadingElement>) {
+  return (
+    <h2
+      className={cn("text-base font-semibold tracking-tight", className)}
+      {...props}
+    />
+  );
+}
+
+export function CardContent({
+  className,
+  ...props
+}: HTMLAttributes<HTMLDivElement> & { ref?: Ref<HTMLDivElement> }) {
+  return <div className={cn("p-4", className)} {...props} />;
+}
+
+export function Badge({
+  className,
+  ...props
+}: HTMLAttributes<HTMLSpanElement>) {
+  return (
+    <span
+      className={cn(
+        "inline-flex items-center gap-1 rounded-full bg-secondary px-2.5 py-0.5 text-xs font-medium text-secondary-foreground",
+        className,
+      )}
+      {...props}
+    />
+  );
+}
+
+export function Input({
+  className,
+  ...props
+}: InputHTMLAttributes<HTMLInputElement>) {
+  return (
+    <input
+      className={cn(
+        "h-10 w-full rounded-lg border bg-white px-3 text-sm outline-none transition placeholder:text-muted-foreground focus-visible:ring-2 focus-visible:ring-ring",
+        className,
+      )}
+      {...props}
+    />
+  );
+}
+
+export function Dialog({
+  open,
+  onClose,
+  children,
+  className,
+}: {
+  open: boolean;
+  onClose: () => void;
+  children: ReactNode;
+  className?: string;
+}) {
+  useEffect(() => {
+    if (!open) return;
+    const key = (event: KeyboardEvent) => {
+      if (event.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", key);
+    return () => window.removeEventListener("keydown", key);
+  }, [open, onClose]);
+  if (!open) return null;
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+      <button
+        type="button"
+        aria-label="关闭弹窗"
+        className="absolute inset-0 bg-stone-900/30"
+        onClick={onClose}
+      />
+      <div
+        role="dialog"
+        aria-modal="true"
+        className={cn(
+          "relative max-h-[85vh] w-full max-w-lg overflow-hidden rounded-xl border bg-card p-6 shadow-xl",
+          className,
+        )}
+      >
+        <button
+          type="button"
+          aria-label="关闭"
+          className="absolute right-4 top-4 rounded-md p-1 text-stone-400 hover:bg-stone-100"
+          onClick={onClose}
+        >
+          <X className="size-4" />
+        </button>
+        {children}
+      </div>
+    </div>
+  );
+}
+
+export function Spinner({ className }: { className?: string }) {
+  return (
+    <span
+      role="status"
+      aria-label="加载中"
+      className={cn(
+        "inline-block size-4 animate-spin rounded-full border-2 border-stone-300 border-t-primary",
+        className,
+      )}
+    />
+  );
+}

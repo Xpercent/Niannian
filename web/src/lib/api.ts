@@ -1,0 +1,112 @@
+/** 轻量请求层：统一错误文案、超时与 FastAPI detail 解析。 */
+
+export type SessionRow = {
+  id: string;
+  account: string;
+  username: string;
+  name: string;
+  monitored: boolean;
+  unread: number;
+  last_message_at: string | null;
+  updated_at: string;
+  message_count?: number;
+};
+
+export type MessageRow = {
+  id: number;
+  session_id: string;
+  source_id: string;
+  sender_key: string;
+  sender_name: string;
+  is_self: boolean;
+  content: string;
+  message_type: string;
+  created_at: string;
+  sort_seq: number;
+  metadata: Record<string, unknown>;
+};
+
+export type MessagePage = {
+  items: MessageRow[];
+  before_id: number | null;
+  has_more: boolean;
+};
+
+export type WechatStatus = {
+  state: string;
+  account: string;
+  error: string | null;
+  running: boolean;
+  last_sync_at: string | null;
+  sessions: number;
+  imported: number;
+  message_count?: number;
+  monitored_count?: number;
+};
+
+const REQUEST_TIMEOUT_MS = 120000;
+
+export async function api<T = unknown>(
+  path: string,
+  init: RequestInit = {},
+): Promise<T> {
+  const timeout = new AbortController();
+  const timer = setTimeout(() => timeout.abort(), REQUEST_TIMEOUT_MS);
+  try {
+    const response = await fetch(path, {
+      ...init,
+      signal: init.signal
+        ? AbortSignal.any([init.signal, timeout.signal])
+        : timeout.signal,
+      headers: {
+        ...(init.body ? { "Content-Type": "application/json" } : {}),
+        ...init.headers,
+      },
+    });
+    const contentType = response.headers.get("content-type") || "";
+    const data = contentType.includes("json")
+      ? await response.json()
+      : await response.text();
+    if (!response.ok) {
+      const raw = (data as { detail?: unknown })?.detail ?? data;
+      const message = Array.isArray(raw)
+        ? raw.map((item) => String(item)).join("；")
+        : String(raw || `请求失败 (${response.status})`);
+      throw new Error(message);
+    }
+    return data as T;
+  } catch (error) {
+    if (timeout.signal.aborted && !init.signal?.aborted)
+      throw new Error("请求超时，请稍后刷新确认结果");
+    throw error;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+export const post = (): RequestInit => ({ method: "POST" });
+
+export const dateText = (value?: string | null, full = false) => {
+  if (!value) return "";
+  const date = new Date(value);
+  if (Number.isNaN(date.valueOf())) return "";
+  return new Intl.DateTimeFormat("zh-CN", {
+    timeZone: "Asia/Shanghai",
+    month: "2-digit",
+    day: "2-digit",
+    ...(full ? { hour: "2-digit", minute: "2-digit", hour12: false } : {}),
+  }).format(date);
+};
+
+export const clockText = (value?: string | null) => {
+  if (!value) return "";
+  const date = new Date(value);
+  if (Number.isNaN(date.valueOf())) return "";
+  return new Intl.DateTimeFormat("zh-CN", {
+    timeZone: "Asia/Shanghai",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false,
+  }).format(date);
+};
