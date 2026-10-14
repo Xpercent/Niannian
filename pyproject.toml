@@ -1,0 +1,22 @@
+[project]
+name = "niannian"
+version = "0.1.0"
+description = "念念（Niannian 重构版）：本机微信只读采集 + 个人工作空间看板"
+requires-python = ">=3.13"
+dependencies = [
+  "fastapi>=0.115",
+  "uvicorn>=0.30",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["niannian"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
