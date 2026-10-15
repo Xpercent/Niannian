@@ -1,7 +1,8 @@
 import os
 from pathlib import Path
 
-from niannian.media import (hash_from_blob, media_scope, pick_tier, safe_media_path,
+from niannian.ids import account_scope
+from niannian.media import (hash_from_blob, pick_tier, safe_media_path,
                             tier_rank)
 
 
@@ -38,10 +39,10 @@ def test_safe_media_path_blocks_traversal_and_absolute(tmp_path):
         assert safe_media_path(base, bad) is None, bad
 
 
-def test_media_scope_is_stable_and_short():
-    assert media_scope("wxid_me") == media_scope("wxid_me")
-    assert len(media_scope("wxid_me")) == 16
-    assert media_scope("wxid_me") != media_scope("wxid_you")
+def test_account_scope_names_the_media_directory():
+    assert account_scope("wxid_me") == account_scope("wxid_me")
+    assert len(account_scope("wxid_me")) == 16
+    assert account_scope("wxid_me") != account_scope("wxid_you")
 
 
 def test_image_store_writes_inside_its_directory(tmp_path, monkeypatch):
@@ -77,7 +78,7 @@ def test_image_store_writes_inside_its_directory(tmp_path, monkeypatch):
     assert store.key_ready is True
     linked = store.attach("room@chatroom", "ab" * 16, "room@chatroom_123")
     assert linked["tier"] == "thumb" and linked["tier_label"] == "预览图"
-    assert linked["local_file"].startswith(f"{media_scope('wxid_me')}/")
+    assert linked["local_file"].startswith(f"{account_scope('wxid_me')}/")
     assert (tmp_path / "data" / "wechat" / "media" / linked["local_file"]).is_file()
     assert store.resolve(linked["local_file"]) is not None
     assert store.attach("room@chatroom", "", "x") is None

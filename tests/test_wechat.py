@@ -2,9 +2,10 @@ import sqlite3
 import sys
 from pathlib import Path
 
-from niannian.wechat import (Collector, account_scope, normalize_message,
-                             open_isolated_db, quote_name,
-                             server_seq_map, session_key, source_id, split_sender)
+from niannian.ids import account_scope, session_key
+from niannian.normalize import normalize_message, quote_name, source_id, split_sender
+from niannian.wechat import Collector
+from niannian.wechat_db import open_isolated_db, server_seq_map
 
 ROOT = Path(__file__).resolve().parent.parent
 

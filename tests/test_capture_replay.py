@@ -13,7 +13,7 @@ from pathlib import Path
 import pytest
 
 from niannian.describe import parse_xml, summarize
-from niannian.wechat import normalize_message, split_sender
+from niannian.normalize import normalize_message, split_sender
 
 CAPTURE = Path(__file__).resolve().parent.parent / "data" / "fixtures" / "capture.db"
 

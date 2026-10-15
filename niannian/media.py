@@ -13,10 +13,11 @@
 
 from __future__ import annotations
 
-import hashlib
 import os
 import re
 from pathlib import Path
+
+from .ids import account_scope
 
 # 与上游一致的优先级：原图 > 下发那份 > 预览图。
 TIERS = ("original", "mid", "thumb")
@@ -24,11 +25,6 @@ TIER_SUFFIX = {"original": "_h", "mid": "", "thumb": "_thumb"}
 TIER_LABEL = {"original": "原图", "mid": "本机图", "thumb": "预览图"}
 # packed_info_data 是 protobuf，文件哈希以可见 ASCII 十六进制串躺在里面。
 HASH_IN_BLOB = re.compile(rb"([0-9a-fA-F]{32})")
-
-
-def media_scope(account: str) -> str:
-    """账号媒体目录名，防止不同账号的同号会话同名文件互相覆盖。"""
-    return hashlib.sha256(str(account).encode("utf-8")).hexdigest()[:16]
 
 
 def hash_from_blob(blob) -> str:
@@ -89,7 +85,8 @@ class ImageStore:
     def __init__(self, downloader, root: Path, account: str):
         self._media = downloader
         self.account = account
-        self.directory = media_root(root) / media_scope(account)
+        # 账号指纹当目录名：不同账号的同号会话不会互相覆盖
+        self.directory = media_root(root) / account_scope(account)
         self.directory.mkdir(parents=True, exist_ok=True)
         self._key_ready = self._adopt(self._free_key())
 

@@ -1,4 +1,9 @@
-"""只读微信采集：单线程串行读取本机微信数据库，水位增量 + 关注即自动导入历史。
+"""只读微信采集线程：单线程串行读本机微信库，水位增量 + 关注即自动导入历史。
+
+本文件只剩 :class:`Collector`（状态机 + 命令队列 + 每轮的活）。上下游各归各位：
+建读取器与分片补查在 :mod:`niannian.wechat_db`，上游行转成本地记录在
+:mod:`niannian.normalize`，标识与目录命名在 :mod:`niannian.ids`，图片落盘在
+:mod:`niannian.media`。
 
 设计要点（借鉴原项目思路，代码全新）：
 - 只有 wechat-reader 线程触碰上游库；API 侧读取目录也经命令队列进入该线程。
@@ -10,36 +15,24 @@
 
 from __future__ import annotations
 
-import hashlib
-import json
 import logging
-import os
 import queue
-import re
-import shutil
-import sqlite3
 import subprocess
-import sys
-import tempfile
 import threading
 import time
 from concurrent.futures import Future
 from datetime import datetime, timezone
 from pathlib import Path
-from xml.etree import ElementTree
 
 from .config import clamp_history_limit
-from .contacts import display_name, group_nicknames
-from .describe import describe, summarize
-from .media import ImageStore, hash_from_blob, tier_rank
+from .ids import session_user
+from .media import ImageStore, tier_rank
+from .normalize import normalize_message
 from .storage import Database, now_utc
+from .wechat_db import open_isolated_db
 
 log = logging.getLogger(__name__)
 
-GROUP_PREFIX = re.compile(r"^(wxid_[^:\s<>]+):\s*\n")
-# 群自己发的系统行（进群提示等）用群 ID 当前缀，它不是"某个人"，只剥不认。
-ROOM_PREFIX = re.compile(r"^\d+@chatroom:\s*\n")
-PACKED_COLUMNS = "sort_seq, local_id, packed_info_data"
 # 每轮补图片的行数上限：一条图片行要走"扫目录 + 解密 + 落盘"，几万条历史不能一口气做完。
 IMAGE_CATCHUP_LIMIT = 30
 # 重扫预览图的行数上限与冷却：一次全树目录遍历是实打实的开销，而用户没点开过的那些
@@ -73,313 +66,6 @@ def wechat_running() -> bool:
         if len(parts) >= 2 and parts[1].isdigit():
             return True
     return False
-
-
-def session_user(session_id: str) -> str:
-    """会话主键 ``wechat:<账号指纹>:<微信原始ID>`` 里的第三段。"""
-    parts = str(session_id).split(":", 2)
-    return parts[2] if len(parts) == 3 else ""
-
-
-def media_hash_map(conn: sqlite3.Connection, table: str, wanted: set) -> dict:
-    """{(sort_seq, local_id): 本机附件文件哈希}。
-
-    这个哈希只在 ``packed_info_data`` 里，正文 XML 的 ``md5`` 属性是另一套值，
-    拿它去 attach 目录找文件一条也找不到。
-    """
-    if not wanted:
-        return {}
-    seqs = sorted({seq for seq, _ in wanted})
-    quoted = '"%s"' % str(table).replace('"', '""')
-    marks = ",".join("?" * len(seqs))
-    cursor = conn.execute(
-        f"SELECT {PACKED_COLUMNS} FROM {quoted} WHERE sort_seq IN ({marks})", seqs)
-    found = {}
-    for sort_seq, local_id, blob in cursor:
-        key = (int(sort_seq), int(local_id))
-        if key in wanted:
-            found[key] = hash_from_blob(blob)
-    return found
-
-
-def server_seq_map(conn: sqlite3.Connection, table: str, wanted: set) -> dict:
-    """``{svrid: sort_seq}``——按 ``server_id`` 反查被引那条消息在本会话的排序号。
-
-    引用消息只带被引那条的 ``svrid``，而跳转要的是 ``sort_seq``（会话内唯一，
-    也正是我们的翻页游标）。查的是微信的分片库而不是本工程库，所以原文还在
-    导入窗口外时同样查得到，等它被导入后同一个 sort_seq 自然对上。
-    """
-    if not wanted:
-        return {}
-    keys = [int(s) if str(s).isdigit() else str(s) for s in wanted]
-    quoted = '"%s"' % str(table).replace('"', '""')
-    marks = ",".join("?" * len(keys))
-    cursor = conn.execute(
-        f"SELECT server_id, sort_seq FROM {quoted} WHERE server_id IN ({marks})", keys)
-    return {str(row[0]): int(row[1]) for row in cursor}
-
-
-def account_scope(account: str) -> str:
-    """账号目录指纹：用于隔离解密缓存与会话主键，避免路径含非法字符。"""
-    return hashlib.sha256(str(account).encode("utf-8")).hexdigest()[:16]
-
-
-def session_key(account: str, username: str) -> str:
-    return f"wechat:{account_scope(account)}:{username}"
-
-
-def split_sender(content: str) -> tuple[str, str]:
-    """剥离正文封装并给出发送者线索：群前缀优先，其次附件 XML 根节点 fromusername。
-
-    群前缀属于封装而非正文，返回的正文一律去掉它；XML 场景保留原文。
-    前缀是群自己 ID 的（进群提示等系统行）只剥不认，返回空发送者。
-    """
-    match = GROUP_PREFIX.match(content)
-    if match:
-        return match.group(1), content[match.end():]
-    match = ROOM_PREFIX.match(content)
-    if match:
-        return "", content[match.end():]
-    if content.lstrip().startswith("<"):
-        try:
-            root = ElementTree.fromstring(content)
-            name = (root.findtext("fromusername") or "").strip()
-            if name:
-                return name, content
-        except ElementTree.ParseError:
-            pass
-    return "", content
-
-
-def transfer_target(desc: dict, sender: str, names: dict) -> None:
-    """给转账描述补上"跟谁转"：付款/收款双方里跟发送者相反的那一方。
-
-    微信在群里会为同一笔钱发两条卡片（``paysubtype`` 1 发起、3 已到账），两条的
-    ``payer_username``/``receiver_username`` 完全相同，只有发送者换了人，所以方向
-    只能拿发送者去比。认不出对方显示名时什么都不加——宁可只显示金额，也不把
-    ``wxid_`` 贴进气泡。
-    """
-    payer = desc.get("payer_username") or ""
-    receiver = desc.get("receiver_username") or ""
-    if sender and sender == payer:
-        desc["direction"], other = "out", receiver
-    elif sender and sender == receiver:
-        desc["direction"], other = "in", payer
-    else:
-        return
-    nick = str(names.get(other) or "") if other else ""
-    if nick and not nick.isdigit() and not nick.startswith("wxid_"):
-        desc["target"] = nick
-
-
-def source_id(account: str, username: str, message: dict, raw: str) -> str:
-    """源去重键：有服务器 ID 用它，否则用排序号+本地 ID+时间+原文。"""
-    server_id = message.get("server_id")
-    parts = ([account, username, "srv", str(server_id)] if server_id else
-             [account, username, message.get("sort_seq"), message.get("local_id"),
-              message.get("create_time"), raw])
-    digest = hashlib.sha256(json.dumps(parts, ensure_ascii=False).encode("utf-8"))
-    return f"wechat:{digest.hexdigest()}"
-
-
-def quote_name(quoted: dict, account: str, session_name: str, names: dict,
-               group: bool) -> None:
-    """给引用行补"谁说的"：私聊里微信压根不给 ``displayname``。
-
-    拿被引作者 wxid 走同一张显示名表（备注 > 群名片 > 昵称）。私聊会话里作者不是
-    自己就是对方，所以可以落到会话名；**群聊里认不出就不猜**，宁可只显示被引内容。
-    """
-    if quoted.get("name"):
-        return
-    author = quoted.get("author") or ""
-    if not author:
-        return
-    if author == account:
-        quoted["name"] = "我"
-        return
-    nick = str(names.get(author) or "")
-    if nick and not nick.isdigit() and not nick.startswith("wxid_"):
-        quoted["name"] = nick
-    elif not group and session_name:
-        quoted["name"] = session_name
-
-
-def normalize_message(account: str, username: str, session_name: str,
-                      message: dict, names: dict) -> dict:
-    """把上游真实行转换成本地消息记录；不美化、不猜测内容。"""
-    raw = str(message.get("content") or "")
-    origin, body = split_sender(raw)
-    detail = describe(body)
-    if not origin and detail and detail.get("kind") == "pat":
-        # 拍一拍既没有群前缀，根节点 fromusername 也是空的，动手的人只在 patinfo 里；
-        # 不补这一笔它会一直被署名成"系统消息"。
-        origin = detail.get("from") or ""
-    resolved = str(message.get("sender_username") or "")
-    sender = resolved or origin
-    is_self = bool(sender) and sender == account
-    group = username.endswith("@chatroom")
-    if detail and detail.get("kind") == "transfer":
-        transfer_target(detail, sender, names)
-    if detail and detail.get("kind") == "quote":
-        quote_name(detail["quoted"], account, session_name, names, group)
-    if is_self:
-        sender_key_value, sender_name = account, "我"
-    elif not sender:
-        # 微信自己也没给这条消息发送者（拍一拍、撤回、进群提示这类系统行）：
-        # 不硬套到某个人头上，也不参与按人归组。
-        sender_key_value, sender_name = "", "系统消息"
-    elif not group:
-        sender_key_value = username
-        sender_name = session_name or names.get(username) or "会话成员"
-    else:
-        sender_key_value = sender
-        nick = str(names.get(sender) or "")
-        is_placeholder = (not nick) or nick.isdigit() or nick.startswith("wxid_")
-        sender_name = "群成员" if is_placeholder else nick
-    try:
-        created = datetime.fromtimestamp(int(message["create_time"]), timezone.utc)
-    except (KeyError, TypeError, ValueError, OSError):
-        created = datetime.now(timezone.utc)
-    return {
-        "session_id": session_key(account, username),
-        "source_id": source_id(account, username, message, raw),
-        "sender_key": sender_key_value,
-        "sender_name": sender_name,
-        "is_self": is_self,
-        "content": (summarize(detail) if detail
-                    else body or f"[{message.get('type') or '消息'}]"),
-        "message_type": str(message.get("type") or "文本"),
-        "created_at": created.isoformat(timespec="seconds"),
-        "sort_seq": int(message.get("sort_seq") or 0),
-        "metadata": {
-            "local_id": message.get("local_id"),
-            "server_id": message.get("server_id"),
-            "sort_seq": message.get("sort_seq"),
-            "type": message.get("type"),
-            "sender_id": message.get("sender_id"),
-            "origin_sender_username": origin,
-            "resolved_sender_username": resolved,
-            "attachment": detail,
-        },
-    }
-
-
-def open_isolated_db(root: Path, settings: dict):
-    """按上游库建立工程内隔离缓存的读取器；可复用本机已有的同账号密钥副本。"""
-    candidate = root / "wechatauto-replica"
-    if str(candidate) not in sys.path and candidate.is_dir():
-        sys.path.insert(0, str(candidate))
-    from wechatauto.db import WeChatDB, list_accounts
-
-    cache_root = Path(root) / "data" / "wechat" / "cache"
-    cache_root.mkdir(parents=True, exist_ok=True)
-    accounts = list_accounts(settings.get("wechat_db_dir") or None)
-    if not accounts:
-        raise RuntimeError("未找到本机微信数据目录，请先登录微信。")
-    for item in accounts:
-        target = cache_root / account_scope(item["account"]) / "keys.json"
-        if target.exists():
-            continue
-        # 只从"别处已经拿到过钥匙"的两个位置抄一份过来。
-        guesses = [
-            Path(tempfile.gettempdir()) / "wechatauto_db" / item["account"] / "keys.json",
-        ]
-        local = os.environ.get("LOCALAPPDATA")
-        if local:
-            guesses.append(Path(local) / "wechatauto_keys" / f"{item['account']}.json")
-        for guess in guesses:
-            if guess.is_file():
-                target.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copyfile(guess, target)
-                break
-
-    class IsolatedDB(WeChatDB):
-        """workdir 始终跟随当前账号落在工程缓存内，密钥不许被上游改写位置。"""
-
-        @property
-        def workdir(self):
-            return str(cache_root / account_scope(self.account))
-
-        @workdir.setter
-        def workdir(self, value):
-            Path(self.workdir).mkdir(parents=True, exist_ok=True)
-
-        @property
-        def keys_file(self):
-            return str(Path(self.workdir) / "keys.json")
-
-        @keys_file.setter
-        def keys_file(self, value):
-            pass
-
-        def _stable_key_dirs(self):
-            return [str(cache_root / "keys")]
-
-        def _each_shard(self, user: str, wanted: set, collect) -> dict:
-            """在该会话命中的每个消息分片上跑一次 collect(conn, table, wanted)。
-
-            分片级查询一律按 ``(sort_seq, local_id)`` 定位：``local_id`` 各分片
-            独立计数，跨分片不唯一。
-            """
-            found: dict = {}
-            if not wanted:
-                return found
-            conns = self._msg_conns(user)
-            try:
-                for conn, table in conns:
-                    try:
-                        found.update(collect(conn, table, wanted))
-                    except sqlite3.Error:
-                        continue
-            finally:
-                for conn, _ in conns:
-                    conn.close()
-            return found
-
-        def media_hashes(self, user: str, keys: set) -> dict:
-            """批量取图片行的本机文件哈希（只走采集线程，读上游库）。"""
-            return self._each_shard(user, keys, media_hash_map)
-
-        def quote_seqs(self, user: str, svrids: set) -> dict:
-            """引用消息的定位：被引那条在本会话分片里的 ``sort_seq``。"""
-            return self._each_shard(user, svrids, server_seq_map)
-
-        def room_nicknames(self, room: str) -> dict:
-            """群成员在这个群里设的群名片：``{wxid: 群名片}``。"""
-            conn = self._contact_conn()
-            if not conn:
-                return {}
-            try:
-                row = conn.execute("SELECT ext_buffer FROM chat_room WHERE username=?",
-                                   (room,)).fetchone()
-            except sqlite3.Error:
-                return {}
-            finally:
-                conn.close()
-            return group_nicknames(row["ext_buffer"]) if row else {}
-
-        def display_names(self, user: str) -> dict:
-            """该会话发送者的显示名，补上上游缺的群名片一档（备注 > 群名片 > 昵称）。"""
-            names = dict(self.nickname_map())
-            if not user.endswith("@chatroom"):
-                return names
-            group = self.room_nicknames(user)
-            if not group:
-                return names
-            for member in self.get_group_members(user):
-                wxid = str(member.get("username") or "")
-                nick = group.get(wxid)
-                if not nick:
-                    continue
-                # 定序交给 contacts.display_name，别在这里再写一遍"谁赢"：
-                # 那条优先级是拿微信自己算好的显示名实测反推出来的。
-                names[wxid] = display_name(str(member.get("remark") or ""), nick,
-                                           str(member.get("nick_name") or ""), wxid)
-            return names
-
-    return IsolatedDB(db_dir=settings.get("wechat_db_dir") or None,
-                      account=settings.get("wechat_account") or None,
-                      workdir=str(cache_root))
 
 
 class Collector:

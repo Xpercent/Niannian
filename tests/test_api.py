@@ -1,5 +1,5 @@
 from niannian.api import create_app, type_label
-from niannian.wechat import session_key
+from niannian.ids import session_key
 
 
 def test_type_label_prefers_parsed_kind_over_upstream_label():
