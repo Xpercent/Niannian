@@ -20,6 +20,12 @@ def seed(db, sid="wechat:sc:u1", account="wxid_me"):
     return sid
 
 
+def count(db, sql):
+    """断言用的裸计数：库层不再为界面提供全局计数汇总（界面一个都没读）。"""
+    with db.connect() as conn:
+        return conn.execute(sql).fetchone()[0]
+
+
 def test_quoted_targets_maps_sort_seq_to_row_and_skips_missing(tmp_path):
     """引用跳转：只有本库里真有那行才给目标，没导入的不能出现（否则前端会跳空）。"""
     db = make_db(tmp_path)
@@ -59,7 +65,7 @@ def test_ingest_dedupes_and_checkpoint_never_regresses(tmp_path):
     assert db.watermark("wxid_me", sid) == 7
     db.ingest([], {"account": "wxid_me", "session_id": sid, "sort_seq": 9})
     assert db.watermark("wxid_me", sid) == 9
-    assert db.counts()["message_count"] == 2
+    assert count(db, "SELECT COUNT(*) FROM messages") == 2
 
 
 def test_messages_page_cursor(tmp_path):
@@ -134,7 +140,7 @@ def test_clear_watermark_keeps_messages(tmp_path):
     assert db.watermark("wxid_me", sid) == 9
     db.clear_watermark("wxid_me", sid)
     assert db.watermark("wxid_me", sid) is None
-    assert db.counts()["message_count"] == 1
+    assert count(db, "SELECT COUNT(*) FROM messages") == 1
     # 水位重新建立时不会被旧的更小的值拉回去
     db.ingest([payload(sid, "wechat:1", sort=9)],
               checkpoint={"account": "wxid_me", "session_id": sid, "sort_seq": 12})
@@ -148,7 +154,7 @@ def test_monitored_filter_and_counts(tmp_path):
     db.set_monitored("wechat:sc:u2", True)
     rows = db.list_sessions(monitored_only=True)
     assert [r["id"] for r in rows] == ["wechat:sc:u2"]
-    assert db.counts()["monitored_count"] == 1
+    assert count(db, "SELECT COUNT(*) FROM sessions WHERE monitored=1") == 1
 
 
 def image_row(sid, source, seq, digest, linked=False, tier=None):

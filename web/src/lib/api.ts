@@ -89,8 +89,6 @@ export type WechatStatus = {
   last_sync_at: string | null;
   sessions: number;
   imported: number;
-  message_count?: number;
-  monitored_count?: number;
 };
 
 /** 普通请求都是纯读自己的库，毫秒级返回：等不到就该早点说话，别转圈两分钟。 */

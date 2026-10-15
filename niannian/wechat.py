@@ -29,7 +29,7 @@ from pathlib import Path
 from xml.etree import ElementTree
 
 from .config import clamp_history_limit
-from .contacts import group_nicknames
+from .contacts import display_name, group_nicknames
 from .describe import describe, summarize
 from .media import ImageStore, hash_from_blob, tier_rank
 from .storage import Database, now_utc
@@ -266,9 +266,9 @@ def normalize_message(account: str, username: str, session_name: str,
 
 def open_isolated_db(root: Path, settings: dict):
     """按上游库建立工程内隔离缓存的读取器；可复用本机已有的同账号密钥副本。"""
-    for candidate in (root / "wechatauto-replica",):
-        if str(candidate) not in sys.path and candidate.is_dir():
-            sys.path.insert(0, str(candidate))
+    candidate = root / "wechatauto-replica"
+    if str(candidate) not in sys.path and candidate.is_dir():
+        sys.path.insert(0, str(candidate))
     from wechatauto.db import WeChatDB, list_accounts
 
     cache_root = Path(root) / "data" / "wechat" / "cache"
@@ -280,14 +280,13 @@ def open_isolated_db(root: Path, settings: dict):
         target = cache_root / account_scope(item["account"]) / "keys.json"
         if target.exists():
             continue
+        # 只从"别处已经拿到过钥匙"的两个位置抄一份过来。
         guesses = [
             Path(tempfile.gettempdir()) / "wechatauto_db" / item["account"] / "keys.json",
         ]
         local = os.environ.get("LOCALAPPDATA")
         if local:
             guesses.append(Path(local) / "wechatauto_keys" / f"{item['account']}.json")
-        guesses.append(cache_root.parent.parent / "wechat" / "cache"
-                       / account_scope(item["account"]) / "keys.json")
         for guess in guesses:
             if guess.is_file():
                 target.parent.mkdir(parents=True, exist_ok=True)
@@ -369,9 +368,13 @@ def open_isolated_db(root: Path, settings: dict):
                 return names
             for member in self.get_group_members(user):
                 wxid = str(member.get("username") or "")
-                # 有备注时备注赢，这里不动；只有没备注的成员才换成群名片。
-                if group.get(wxid) and not str(member.get("remark") or ""):
-                    names[wxid] = group[wxid]
+                nick = group.get(wxid)
+                if not nick:
+                    continue
+                # 定序交给 contacts.display_name，别在这里再写一遍"谁赢"：
+                # 那条优先级是拿微信自己算好的显示名实测反推出来的。
+                names[wxid] = display_name(str(member.get("remark") or ""), nick,
+                                           str(member.get("nick_name") or ""), wxid)
             return names
 
     return IsolatedDB(db_dir=settings.get("wechat_db_dir") or None,

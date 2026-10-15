@@ -60,6 +60,26 @@ def like_pattern(text: str) -> str:
     return "%" + LIKE_SPECIAL.sub(r"\\\1", text) + "%"
 
 
+def load_metadata(text) -> dict | None:
+    """metadata 是文本列：坏 JSON 返回 None，由调用方决定当空对象还是跳过这一行。
+
+    非 dict 的合法 JSON（``[]``、``"x"``）同样算坏：调用方一律按 dict 用。
+    """
+    try:
+        value = json.loads(text or "{}")
+    except json.JSONDecodeError:
+        return None
+    return value if isinstance(value, dict) else None
+
+
+def as_message(row) -> dict:
+    """消息行 → 接口返回的记录：``is_self`` 转 bool，metadata 解析成 dict。"""
+    item = dict(row)
+    item["is_self"] = bool(item["is_self"])
+    item["metadata"] = load_metadata(item.get("metadata")) or {}
+    return item
+
+
 class Database:
     """一个文件库；连接按次创建（WAL），写事务由进程内锁保护。"""
 
@@ -152,15 +172,6 @@ class Database:
             out.append(item)
         return out
 
-    def counts(self) -> dict:
-        with self.connect() as conn:
-            return {
-                "session_count": conn.execute("SELECT COUNT(*) FROM sessions").fetchone()[0],
-                "monitored_count": conn.execute(
-                    "SELECT COUNT(*) FROM sessions WHERE monitored=1").fetchone()[0],
-                "message_count": conn.execute("SELECT COUNT(*) FROM messages").fetchone()[0],
-            }
-
     # ------------------------------------------------------------------ 水位
     def watermark(self, account: str, session_id: str) -> int | None:
         with self.connect() as conn:
@@ -234,15 +245,7 @@ class Database:
             rows = conn.execute(sql, args).fetchall()
         has_more = len(rows) > limit
         rows = rows[:limit]
-        items = []
-        for row in rows:
-            item = dict(row)
-            item["is_self"] = bool(item["is_self"])
-            try:
-                item["metadata"] = json.loads(item["metadata"] or "{}")
-            except json.JSONDecodeError:
-                item["metadata"] = {}
-            items.append(item)
+        items = [as_message(row) for row in rows]
         tail = rows[-1] if rows else None
         return {
             "items": items,
@@ -281,16 +284,7 @@ class Database:
                    FROM messages WHERE session_id=? AND content LIKE ? ESCAPE '\\'
                    ORDER BY sort_seq DESC, id DESC LIMIT ?""",
                 (session_id, like_pattern(text), limit)).fetchall()
-        out = []
-        for row in rows:
-            item = dict(row)
-            item["is_self"] = bool(item["is_self"])
-            try:
-                item["metadata"] = json.loads(item["metadata"] or "{}")
-            except json.JSONDecodeError:
-                item["metadata"] = {}
-            out.append(item)
-        return out
+        return [as_message(row) for row in rows]
 
     def pending_images(self, limit: int = 30) -> list[dict]:
         """关注会话里还缺本机链接的图片行（采集那一刻文件还没落盘的那些），新→旧。

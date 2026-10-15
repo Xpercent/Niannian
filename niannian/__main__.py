@@ -2,9 +2,8 @@
 
 import uvicorn
 
-from .api import create_app
+from .api import create_app, project_root
 from .config import load_config
-from .api import project_root
 
 
 def main() -> None:

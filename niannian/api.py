@@ -76,13 +76,15 @@ def create_app(root: Path | None = None) -> FastAPI:
 
     @app.get("/api/status")
     def api_status():
-        status = collector.status()
-        status.update(store.counts())
-        return status
+        return collector.status()
 
     @app.get("/api/sessions")
     def api_sessions():
         account = collector.status()["account"]
+        if not account:
+            # 服务先启动、微信后开：账号还不知道，此时不过滤会把别的账号的会话
+            # 当成当前账号的列出来（list_sessions 空 account = 不加条件）。
+            return []
         return store.list_sessions(account=account, monitored_only=True)
 
     @app.get("/api/settings")
@@ -178,9 +180,7 @@ def create_app(root: Path | None = None) -> FastAPI:
             raise HTTPException(503, str(exc)) from exc
 
     def _set_follow(session_id: str, monitored: bool):
-        session = store.session(session_id)
-        if not session:
-            raise HTTPException(404, "会话不存在")
+        # set_monitored 靠 rowcount 认会话存不存在，不用再先查一遍
         if not store.set_monitored(session_id, monitored):
             raise HTTPException(404, "会话不存在")
         return {"id": session_id, "monitored": monitored}
