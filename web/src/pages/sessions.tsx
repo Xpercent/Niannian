@@ -21,6 +21,7 @@ import {
 import { Message } from "../components/message";
 import {
   api,
+  CATALOG_REQUEST_MS,
   dateText,
   LONG_REQUEST_MS,
   post,
@@ -285,7 +286,7 @@ export function SessionsPage({ sessions, onRefresh, notify, selectedId, onSelect
     setCatalogLoading(true);
     setCatalogError("");
     try {
-      setCatalog(await api<SessionRow[]>("/api/wechat/catalog"));
+      setCatalog(await api<SessionRow[]>("/api/wechat/catalog", {}, CATALOG_REQUEST_MS));
     } catch (error) {
       setCatalogError((error as Error).message || "读取微信会话失败");
     } finally {

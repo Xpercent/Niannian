@@ -90,7 +90,11 @@ export type WechatStatus = {
   monitored_count?: number;
 };
 
-const REQUEST_TIMEOUT_MS = 120000;
+/** 普通请求都是纯读自己的库，毫秒级返回：等不到就该早点说话，别转圈两分钟。 */
+const REQUEST_TIMEOUT_MS = 20000;
+
+/** 会话目录要在采集线程上现场同步微信库，后端给 90 秒，前端要等得比它久。 */
+export const CATALOG_REQUEST_MS = 100000;
 
 /** 重新导入深历史会同步读上游库，后端超时 300 秒，前端要等得比它久。 */
 export const LONG_REQUEST_MS = 310000;

@@ -99,7 +99,7 @@ export function Message({
           </>
         ) : (
           <p className="mt-2 text-xs text-stone-400">
-            本机暂无该图片文件，在微信里翻到这条记录后会自动补上
+            这张图片还没准备好：打开微信、并在微信里翻到这条记录后会自动补上
           </p>
         ))}
     </article>
