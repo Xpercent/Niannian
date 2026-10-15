@@ -421,6 +421,33 @@ def bare_collector(tmp_path):
     return Collector(store, {"poll_seconds": 1.0}, tmp_path)
 
 
+def test_sync_catalog_turns_upstream_rows_into_local_ids(tmp_path):
+    """目录同步的循环体要真的跑一遍：上游会话行 → 本地主键 + 显示名 + 时间。
+
+    以前 FakeWX.get_sessions 一律返回空表，这个循环从没执行过，于是"拆模块时漏了
+    session_key 导入"这种错只有真机才能发现（实测就是清库重采时它把服务打进
+    state=error 才暴露的）。所以这里给真的目录行。
+    """
+    class CatalogWX(FakeWX):
+        def get_sessions(self, limit=100):
+            return [{"username": "wxid_other", "unread": 3, "last_time": 1760000000},
+                    {"username": "45948752706@chatroom", "unread": 0, "last_time": 0}]
+
+    collector = bare_collector(tmp_path)
+    collector._wx = CatalogWX()
+    collector._state["account"] = ACCOUNT
+    rows = collector._sync_catalog()
+
+    assert [row["id"] for row in rows] == [
+        session_key(ACCOUNT, "wxid_other"),
+        session_key(ACCOUNT, "45948752706@chatroom")]   # 有最后消息时间的排前面
+    assert rows[0]["name"] == "老王"                    # nickname_map 给的名字
+    assert rows[0]["unread"] == 3
+    assert rows[0]["last_message_at"].startswith("2025-10-")
+    assert rows[1]["last_message_at"] is None
+    assert collector.status()["sessions"] == 2
+
+
 def test_attach_failure_waits_for_wechat_and_can_recover(tmp_path, monkeypatch):
     """连不上不再退出线程：置 waiting_wechat，等微信打开后自己接上。"""
     import niannian.wechat as wxmod

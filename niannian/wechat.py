@@ -25,7 +25,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from .config import clamp_history_limit
-from .ids import session_user
+from .ids import session_key, session_user
 from .media import ImageStore, tier_rank
 from .normalize import normalize_message
 from .storage import Database, now_utc
