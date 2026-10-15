@@ -78,6 +78,9 @@ export type MessagePage = {
   has_more: boolean;
 };
 
+/** 会话内正文搜索结果：items 新→旧，query 是后端 strip 过的关键词。 */
+export type MessageSearch = { items: MessageRow[]; query: string };
+
 export type WechatStatus = {
   state: string;
   account: string;

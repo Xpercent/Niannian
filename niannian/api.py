@@ -129,6 +129,20 @@ def create_app(root: Path | None = None) -> FastAPI:
         _attach_quote_targets(session_id, page["items"])
         return page
 
+    @app.get("/api/sessions/{session_id}/search")
+    def api_search(session_id: str, q: str = Query(""),
+                   limit: int = Query(50, ge=1, le=200)):
+        """在该会话**已入库**的消息正文里找关键词（纯读，毫秒级）。
+
+        只搜得到导进来的那部分：默认每会话最近 100 条，更早的要先用"重新导入"拉进来。
+        """
+        if not store.session(session_id):
+            raise HTTPException(404, "会话不存在")
+        items = store.search_messages(session_id, q, limit=limit)
+        for item in items:
+            item["type_label"] = type_label(item)
+        return {"items": items, "query": str(q or "").strip()}
+
     def _attach_quote_targets(session_id: str, items: list[dict]) -> None:
         """给引用行挂 ``quote_target``：被引那条在本库里存在才给，否则为 None。
 

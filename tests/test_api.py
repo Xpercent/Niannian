@@ -45,9 +45,13 @@ class NoMediaCollector:
         raise AssertionError("消息列表是纯读：请求线程不许碰图片解密")
 
 
-def messages_endpoint(app):
+def route_endpoint(app, path):
     return next(route.endpoint for route in app.routes
-                if getattr(route, "path", "") == "/api/sessions/{session_id}/messages")
+                if getattr(route, "path", "") == path)
+
+
+def messages_endpoint(app):
+    return route_endpoint(app, "/api/sessions/{session_id}/messages")
 
 
 def test_messages_endpoint_never_touches_media(tmp_path, monkeypatch):
@@ -75,3 +79,38 @@ def test_messages_endpoint_never_touches_media(tmp_path, monkeypatch):
     assert "local_file" not in item["metadata"]      # 没被请求线程动过
     assert item["metadata"]["media_md5"] == "a" * 32
     assert item["type_label"] == "图片"
+
+
+def test_search_endpoint_finds_messages_of_one_session(tmp_path, monkeypatch):
+    """搜索接口：按会话搜正文，带 type_label 与跳转用的 sort_seq；空关键词不查库。"""
+    from fastapi import HTTPException
+
+    monkeypatch.setattr("niannian.api.Collector", NoMediaCollector)
+    app = create_app(tmp_path)
+    store = app.state.store
+    sid = session_key("wxid_me", "wxid_other")
+    store.sync_catalog("wxid_me", [{"id": sid, "username": "wxid_other", "name": "老王",
+                                    "unread": 0, "last_message_at": None}])
+    rows = [{"session_id": sid, "source_id": f"wechat:{n}", "sender_key": "wxid_other",
+             "sender_name": "老王", "is_self": False, "content": text,
+             "message_type": "图片" if n == "b" else "文本",
+             "created_at": "2026-10-15T00:00:00+00:00", "sort_seq": seq,
+             "metadata": {"attachment": {"kind": "image"}} if n == "b" else {}}
+            for n, text, seq in (("a", "赛希带什么装备", 300), ("b", "[图片]", 400),
+                                 ("c", "说实话赛希我也不知道", 500))]
+    store.ingest(rows)
+    search = route_endpoint(app, "/api/sessions/{session_id}/search")
+
+    got = search(sid, q=" 赛希 ", limit=50)
+    assert got["query"] == "赛希"
+    assert [(i["sort_seq"], i["content"]) for i in got["items"]] == [
+        (500, "说实话赛希我也不知道"), (300, "赛希带什么装备")]
+    assert [i["type_label"] for i in got["items"]] == ["文本", "文本"]
+
+    assert search(sid, q="", limit=50)["items"] == []
+    assert [i["type_label"] for i in search(sid, q="[图片]", limit=50)["items"]] == ["图片"]
+    try:
+        search(session_key("wxid_me", "wxid_none"), q="赛希", limit=50)
+        raise AssertionError("会话不存在应当 404")
+    except HTTPException as exc:
+        assert exc.status_code == 404

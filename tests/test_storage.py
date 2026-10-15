@@ -201,3 +201,44 @@ def test_pending_images_survives_broken_metadata(tmp_path):
     assert [row["sort_seq"] for row in rows] == [400, 300]
     broken = next(row for row in rows if row["sort_seq"] == 300)
     assert broken["metadata"] is None
+
+
+def test_search_messages_matches_substring_newest_first(tmp_path):
+    """搜正文：子串命中，新→旧，返回跳转要用的 sort_seq。"""
+    db = make_db(tmp_path)
+    sid = seed(db)
+    db.ingest([payload(sid, "wechat:s1", content="赛希带什么装备", sort=300),
+               payload(sid, "wechat:s2", content="说实话赛希我也不知道", sort=500),
+               payload(sid, "wechat:s3", content="别的都不相关", sort=400)])
+    hits = db.search_messages(sid, "赛希")
+    assert [h["sort_seq"] for h in hits] == [500, 300]
+    assert hits[0]["content"] == "说实话赛希我也不知道"
+    assert hits[0]["id"] and hits[0]["created_at"]
+    assert db.search_messages(sid, "赛希", limit=1)[0]["sort_seq"] == 500
+
+
+def test_search_messages_treats_wildcards_as_literal_text(tmp_path):
+    """关键词里的 % 和 _ 必须当字面量：否则搜「100%」会捞出一堆不相干的。"""
+    db = make_db(tmp_path)
+    sid = seed(db)
+    db.ingest([payload(sid, "wechat:w1", content="7天内充多少赠送多少hh", sort=100),
+               payload(sid, "wechat:w2", content="进度 100% 了", sort=200),
+               payload(sid, "wechat:w3", content="进度 100x 了", sort=300),
+               payload(sid, "wechat:w4", content="a_b 下划线", sort=400),
+               payload(sid, "wechat:w5", content="axb 下划线", sort=500)])
+    assert [h["sort_seq"] for h in db.search_messages(sid, "100%")] == [200]
+    assert [h["sort_seq"] for h in db.search_messages(sid, "a_b")] == [400]
+    # 「1_0」不该把 _ 当单字通配符去匹配 "100"：不转义时这条会命中 200/300 两行
+    assert db.search_messages(sid, "1_0") == []
+
+
+def test_search_messages_is_scoped_to_the_session(tmp_path):
+    """只搜这一个会话；空白关键词不查库。"""
+    db = make_db(tmp_path)
+    sid = seed(db)
+    other = seed(db, sid="wechat:sc:u2")
+    db.ingest([payload(sid, "wechat:c1", content="中转站ds享福了", sort=100),
+               payload(other, "wechat:c2", content="中转站ds享福了", sort=900)])
+    assert [h["session_id"] for h in db.search_messages(sid, "中转站")] == [sid]
+    assert db.search_messages(sid, "") == []
+    assert db.search_messages(sid, "   ") == []

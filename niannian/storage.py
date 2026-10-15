@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 import threading
 from datetime import datetime, timezone
@@ -46,6 +47,17 @@ CREATE TABLE IF NOT EXISTS checkpoints (
 
 def now_utc() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+LIKE_SPECIAL = re.compile(r"([%_\\])")
+
+
+def like_pattern(text: str) -> str:
+    """把关键词包成 LIKE 的 ``%子串%``，并转义 ``%``、``_`` 和反斜杠本身。
+
+    不转义的话搜「100%」会把 ``%`` 当通配符，捞出一堆不相干的行；``_`` 同理是单字通配。
+    """
+    return "%" + LIKE_SPECIAL.sub(r"\\\1", text) + "%"
 
 
 class Database:
@@ -250,6 +262,35 @@ class Database:
                 f"SELECT sort_seq, id FROM messages WHERE session_id=? "
                 f"AND sort_seq IN ({marks})", [session_id, *wanted]).fetchall()
         return {int(row["sort_seq"]): int(row["id"]) for row in rows}
+
+    def search_messages(self, session_id: str, query: str, limit: int = 50) -> list[dict]:
+        """在该会话**已入库**的消息正文里找子串，新→旧。
+
+        只做子串匹配：本机消息量不大，上 FTS 要先决定分词（中文按字还是按词），
+        等真有需要再说。``content`` 存的已经是解析后的中文摘要，所以搜"图片"
+        "转账"这类标签天然也能命中，不需要额外匹配 metadata。
+        """
+        text = str(query or "").strip()
+        if not text:
+            return []
+        limit = max(1, min(int(limit), 200))
+        with self.connect() as conn:
+            rows = conn.execute(
+                """SELECT id, session_id, sender_key, sender_name, is_self, content,
+                          message_type, created_at, sort_seq, metadata
+                   FROM messages WHERE session_id=? AND content LIKE ? ESCAPE '\\'
+                   ORDER BY sort_seq DESC, id DESC LIMIT ?""",
+                (session_id, like_pattern(text), limit)).fetchall()
+        out = []
+        for row in rows:
+            item = dict(row)
+            item["is_self"] = bool(item["is_self"])
+            try:
+                item["metadata"] = json.loads(item["metadata"] or "{}")
+            except json.JSONDecodeError:
+                item["metadata"] = {}
+            out.append(item)
+        return out
 
     def pending_images(self, limit: int = 30) -> list[dict]:
         """关注会话里还缺本机链接的图片行（采集那一刻文件还没落盘的那些），新→旧。

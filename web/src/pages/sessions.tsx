@@ -27,6 +27,7 @@ import {
   post,
   type MessageRow,
   type MessagePage,
+  type MessageSearch,
   type QuoteTarget,
   type ReimportResult,
   type SessionRow,
@@ -58,6 +59,12 @@ export function SessionsPage({ sessions, onRefresh, notify, selectedId, onSelect
   const [catalogSearch, setCatalogSearch] = useState("");
   const [catalogLoading, setCatalogLoading] = useState(false);
   const [catalogError, setCatalogError] = useState("");
+  /** 消息搜索：`hits` 为 null 表示不在搜索态（正常看对话），空数组是"搜了没搜到"。 */
+  const [searchTerm, setSearchTerm] = useState("");
+  const [hits, setHits] = useState<MessageRow[] | null>(null);
+  const [hitsLoading, setHitsLoading] = useState(false);
+  const [hitsError, setHitsError] = useState("");
+  const searchController = useRef<AbortController | null>(null);
   const requestSeq = useRef(0);
   const conversationRef = useRef<HTMLDivElement>(null);
   const loadingOlder = useRef(false);
@@ -119,6 +126,10 @@ export function SessionsPage({ sessions, onRefresh, notify, selectedId, onSelect
   );
 
   useEffect(() => {
+    // 换会话就退出搜索态：关键词是属于上一个会话的上下文。
+    setSearchTerm("");
+    setHits(null);
+    setHitsError("");
     if (selectedId) {
       // 条数输入跟随该会话自己上次导入的量，不跟全局配置串味。
       setHistoryCount(String(selected?.history_limit || 100));
@@ -132,6 +143,41 @@ export function SessionsPage({ sessions, onRefresh, notify, selectedId, onSelect
     // 仅切换会话时重开对话；消息数变化由下面的效果增量刷新。
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedId]);
+
+  /**
+   * 搜当前会话里已入库的消息正文。
+   *
+   * 停 300 毫秒再发请求：边打字连发几十次查询没有意义。清空关键词就回到正常对话视图。
+   */
+  useEffect(() => {
+    const text = searchTerm.trim();
+    searchController.current?.abort();
+    if (!selectedId || !text) {
+      setHits(null);
+      setHitsError("");
+      setHitsLoading(false);
+      return;
+    }
+    const abort = new AbortController();
+    searchController.current = abort;
+    const timer = setTimeout(async () => {
+      setHitsLoading(true);
+      try {
+        const got = await api<MessageSearch>(
+          `/api/sessions/${encodeURIComponent(selectedId)}/search?q=${encodeURIComponent(text)}`,
+          { signal: abort.signal },
+        );
+        setHits(got.items);
+        setHitsError("");
+      } catch (error) {
+        if ((error as Error).name !== "AbortError")
+          setHitsError((error as Error).message || "搜索失败");
+      } finally {
+        setHitsLoading(false);
+      }
+    }, 300);
+    return () => clearTimeout(timer);
+  }, [searchTerm, selectedId]);
 
   // 关注后自动导入、轮询新消息都会推进 message_count；变化时静默刷新当前对话。
   const watchedCount = selected?.message_count ?? 0;
@@ -203,15 +249,20 @@ export function SessionsPage({ sessions, onRefresh, notify, selectedId, onSelect
   }
 
   /**
-   * 点引用跳到被引那条。
+   * 跳到某条消息并描边：点引用的原文、点搜索结果，走同一条路。
    *
    * 目标不在当前这一屏时，用**现有**游标参数取"包含它的那一屏"就够了：`sort_seq`
    * 在会话内唯一，`before_seq = 目标 + 1, before_id = 1` 会把目标本身带进来
    * （它是这一屏最新的一条），不需要为跳转再加一个新接口。
    * `before_id` 不能给 0 —— 接口的校验是 `ge=1`。
    */
-  async function jumpToQuote(target: QuoteTarget) {
+  async function jumpToMessage(target: QuoteTarget, fromSearch = false) {
     if (!selected) return;
+    if (fromSearch) {
+      // 回到对话看上下文：结果列表和关键词都收掉，下次输入从头开始。
+      setHits(null);
+      setSearchTerm("");
+    }
     if (!messages.some((item) => item.id === target.message_id)) {
       const page = await api<MessagePage>(
         `/api/sessions/${encodeURIComponent(selected.id)}/messages?limit=40` +
@@ -309,10 +360,24 @@ export function SessionsPage({ sessions, onRefresh, notify, selectedId, onSelect
             关注会话后自动导入最近消息，并持续读取新消息。
           </p>
         </div>
-        <Button onClick={openCatalog}>
-          <Plus className="size-4" />
-          添加关注
-        </Button>
+        <div className="flex flex-wrap items-center gap-2">
+          {/* 宽度由外层 span 控制：Input 基类是 w-full，同槽位塞两个宽度类会看样式表顺序 */}
+          <span className="relative block w-64">
+            <Search className="absolute left-3 top-3 size-4 text-stone-400" />
+            <Input
+              aria-label="搜索当前会话的消息"
+              className="pl-9"
+              disabled={!selected}
+              placeholder={selected ? `在「${selected.name || selected.username}」里搜消息` : "先选一个会话"}
+              value={searchTerm}
+              onChange={(event) => setSearchTerm(event.target.value)}
+            />
+          </span>
+          <Button onClick={openCatalog}>
+            <Plus className="size-4" />
+            添加关注
+          </Button>
+        </div>
       </div>
       <div className="grid items-start gap-5 lg:grid-cols-[300px_minmax(0,1fr)]">
         <Card>
@@ -439,50 +504,95 @@ export function SessionsPage({ sessions, onRefresh, notify, selectedId, onSelect
                   </Button>
                 </div>
               </CardHeader>
-              <CardContent
-                ref={conversationRef}
-                onScroll={trackScroll}
-                className="max-h-[65vh] space-y-4 overflow-y-auto"
-              >
-                {loadError && (
-                  <div
-                    role="alert"
-                    className="rounded-md bg-rose-50 p-3 text-sm text-rose-700"
-                  >
-                    {loadError}
-                    <Button
-                      className="ml-2"
-                      size="sm"
-                      variant="ghost"
-                      onClick={() => loadConversation(selected.id)}
+              {hits === null ? (
+                <CardContent
+                  ref={conversationRef}
+                  onScroll={trackScroll}
+                  className="max-h-[65vh] space-y-4 overflow-y-auto"
+                >
+                  {loadError && (
+                    <div
+                      role="alert"
+                      className="rounded-md bg-rose-50 p-3 text-sm text-rose-700"
                     >
-                      重试
-                    </Button>
-                  </div>
-                )}
-                {loading && (
-                  <div
-                    className="flex justify-center py-4"
-                    role="status"
-                    aria-label="正在读取消息"
-                  >
-                    <Loader2 className="size-5 animate-spin motion-reduce:animate-none" />
-                  </div>
-                )}
-                {messages.map((message) => (
-                  <Message
-                    key={message.id}
-                    message={message}
-                    flash={flashId === message.id}
-                    onJump={jumpToQuote}
-                  />
-                ))}
-                {!loading && !loadError && !messages.length && (
-                  <p className="py-10 text-center text-sm text-stone-400">
-                    还没有导入消息，稍候会自动补齐。
+                      {loadError}
+                      <Button
+                        className="ml-2"
+                        size="sm"
+                        variant="ghost"
+                        onClick={() => loadConversation(selected.id)}
+                      >
+                        重试
+                      </Button>
+                    </div>
+                  )}
+                  {loading && (
+                    <div
+                      className="flex justify-center py-4"
+                      role="status"
+                      aria-label="正在读取消息"
+                    >
+                      <Loader2 className="size-5 animate-spin motion-reduce:animate-none" />
+                    </div>
+                  )}
+                  {messages.map((message) => (
+                    <Message
+                      key={message.id}
+                      message={message}
+                      flash={flashId === message.id}
+                      onJump={jumpToMessage}
+                    />
+                  ))}
+                  {!loading && !loadError && !messages.length && (
+                    <p className="py-10 text-center text-sm text-stone-400">
+                      还没有导入消息，稍候会自动补齐。
+                    </p>
+                  )}
+                </CardContent>
+              ) : (
+                <CardContent className="max-h-[65vh] space-y-1 overflow-y-auto">
+                  <p className="text-xs text-stone-500">
+                    {hitsLoading
+                      ? "正在搜索…"
+                      : `找到 ${hits.length} 条 · 关键词「${searchTerm.trim()}」`}
+                    <span className="ml-2 text-stone-400">
+                      只能搜到已导入本库的消息，更早的先用「重新导入」
+                    </span>
                   </p>
-                )}
-              </CardContent>
+                  {hitsError && (
+                    <div
+                      role="alert"
+                      className="rounded-md bg-rose-50 p-3 text-sm text-rose-700"
+                    >
+                      {hitsError}
+                    </div>
+                  )}
+                  {hits.map((hit) => (
+                    <button
+                      type="button"
+                      key={hit.id}
+                      onClick={() =>
+                        void jumpToMessage(
+                          { message_id: hit.id, sort_seq: hit.sort_seq },
+                          true,
+                        )
+                      }
+                      className="flex w-full items-start gap-3 rounded-md border border-transparent p-3 text-left hover:bg-stone-50"
+                    >
+                      <span className="min-w-0 flex-1">
+                        <span className="block truncate text-sm">{hit.content}</span>
+                        <span className="text-xs text-stone-400">
+                          {hit.sender_name} · {dateText(hit.created_at, true)}
+                        </span>
+                      </span>
+                      <Badge>{hit.type_label || hit.message_type}</Badge>
+                    </button>
+                  ))}
+                  {!hitsLoading && !hitsError && !hits.length && (
+                    <p className="py-10 text-center text-sm text-stone-400">没有匹配的消息</p>
+                  )}
+                </CardContent>
+              )}
             </>
           ) : (
             <div className="flex min-h-[520px] flex-col items-center justify-center px-5 text-center text-stone-400">
