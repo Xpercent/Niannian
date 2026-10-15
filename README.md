@@ -76,7 +76,7 @@ cd ..
 ```
 niannian/        后端（config / storage / wechat 采集器 / api / __main__）
 web/             前端（React 19 + Vite 7 + Tailwind 4，自建组件集）
-wechatauto-replica/  上游微信只读库（git submodule，锁定 1.2.5.1）
+wechatauto-replica/  上游微信只读库（git submodule，锁定 1.2.6.1）
 tests/           pytest（存储与消息规范化）
 docs/            重构记录与阶段文档
 data/            运行时数据（不入库：niannian.db、解密缓存）

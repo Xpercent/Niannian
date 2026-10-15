@@ -1,14 +1,52 @@
 # HANDOFF.md — 交接
 
 ## 当前状态
-阶段五「引用消息存定位 + 点击跳原文」已交付：**库里正文 XML 归零**（476 条消息，
-11 类非文本消息全部出中文摘要），引用行不存被引全文、只存 `quoted.sort_seq`，
-点击滚到原文并描边一下。往上翻历史已改成**滚到顶部自动加载**（无手动按钮），
-图片弹窗去掉了 × （遮罩与 Esc 仍可关）。图片解密与本机链接、发送者显示名、
-每会话独立重新导入、设置页三项、真机 fixture 离线回放测试均已在库上。
-`pytest` 78 项通过；服务 `python -m niannian` → http://127.0.0.1:8765。
+子模块 `wechatauto-replica` 升到 **1.2.6.1（62503d7）**，并**删掉了本地的发送者兜底补丁**
+（`sender_alias_map` + `IsolatedDB._fix_senders`）：上游把我们记在 AGENTS.md 的两个坑
+（发送者按全局 `SenderName2Id` 解析、跨分片 `local_id` 不可寻址）在源头修掉了，解析
+现在完全由上游承担，**pin 因此成了正确性的一部分**，由
+`test_upstream_pin_resolves_senders_per_shard` 与 `data/_upgrade_check.py` 守住。
+未清库重建（删的是与上游输出逐条相同的路径，存量 152/152 复核一致）。此前阶段：库里
+正文 XML 归零（476 条消息、11 类非文本出中文摘要），引用行只存 `quoted.sort_seq`、
+点击滚到原文并描边；往上翻历史改成滚到顶部自动加载；图片弹窗去掉 ×（遮罩与 Esc 仍可
+关）；图片解密、发送者显示名、每会话独立重新导入、设置页三项、真机 fixture 离线回放
+测试均已在库上。动画表情只留 `[动画表情]` 占位，不取图。`pytest` 77 项（76 passed /
+1 skipped）；服务 `python -m niannian` → http://127.0.0.1:8765。
 
-## 最近一轮：两个前端小改进
+## 最近一轮：子模块升级 1.2.5.1 → 1.2.6.1，并删掉本地发送者补丁
+上游 6 个提交做了两件事：**1.2.6（issue #20）** 消息行新增 `shard`（分片库文件名），
+`get_message_row` / `download_*` / `image_status` 都能按 `shard=` 锁定唯一一行，
+分片读失败不再静默当成"这片没消息"；**1.2.6.1（issue #34）** `real_sender_id` 改按
+消息所在分片的 `Name2Id` 解析，全局 `_sender_id_index()` 删掉，`sender_id == 2` 即
+"自己"的特判去掉。
+
+升级动作：`git fetch` → 逐条看 `fbfb026..origin/main` 改了哪些私有接口 → checkout
+`62503d7` → 回主仓库验证。**先核对接口再 bump**：我们在用的
+`_msg_conns` / `_contact_conn` / `nickname_map` / `MediaDownloader._image_files` 等
+全部还在，被删的三个私有方法一处都没调；`STAMP_VERSION` 没动所以缓存不作废。
+
+真机对撞（停服独占解密缓存）：上游原生解析 vs 我们的 `_fix_senders`，3 会话
+758 行 758/758 一致、0 缺行 → 用户拍板"删掉把解析交回上游"。删的是
+`sender_alias_map()`、`_fix_senders()` 和 `get_messages` / `get_new_messages` 两个覆写
+（`_each_shard` 留下，`media_hashes` / `quote_seqs` 还在用；`normalize_message` 不动，
+它读的还是 `sender_username`，只是填这个字段的人换了）。**没有清库重采**：删的是与
+上游输出完全相同的兜底路径，落库内容不变。
+
+本地没了第二层，所以补一条守门测试 `test_upstream_pin_resolves_senders_per_shard`
+（**认接口不认版本号**：`_sender_id_index` 必须不存在、`sender_username` 与
+`_name2id_map` 必须在），并把 `data/_upgrade_check.py` 改成"当前代码路径重读 vs 库里
+已存"的存量复核脚本。
+
+验证：`pytest` 77（删 2 加 1）；真机存量 152/152 逐行一致（`sender_key` /
+`sender_name` / `is_self` / `content` / `message_type` 五个字段都比）；服务重启
+connected、152 条一条没掉、`imported: 0`；私聊 52 行仍全署名"我"（1.2.5.1 正是
+在这类行上出错），群聊 100 行署名分布在真实成员内；浏览器无报错。
+
+顺带发现一个**与升级无关**的既有问题：5 条图片行 `local_file` 落成 `.wxgf`
+直接进 `<img>` 渲染不出来（那 5 行 21:53 入库，早于 22:07 的 pin bump），
+是 wxgf 档位没转 jpg，另起一轮处理。
+
+## 上一轮：两个前端小改进
 - **"加载更早消息"按钮删了，改成滚到接近顶部自动取一屏**。三个坑必须一起填，少一个就是
   回归：补来的内容从上方长高会顶走正在读的位置（要锚定 `scrollTop`）；一屏占不满时用户
   根本没有触发滚动的机会（要"占不满就继续补"）；一次滚动手势连发几十次事件（要自己的锁）。
@@ -158,11 +196,12 @@ emoji、图片、系统消息）全部落到错映射 → 群里冒出非群成�
 - 因此**单次重新导入上限仍是 1000 条**（`clamp_history_limit` 的天花板）。
 
 ## 待用户决定
+- **`.wxgf` 图片气泡是破图**（既有问题，非升级引起）：5 条图片行的 `local_file` 落成
+  `.wxgf`，`/media/…wxgf` 虽 200 但浏览器不认。要不要单起一轮把 wxgf 档转成 jpg 再落盘
+  （涉及存量 → 按惯例清库重采）。
 - **文件与视频挂本机链接**（数据已探明，做与不做等你定）：21 条文件在 `msg/file/`
   **21/21 命中同名文件**；`msg/video/` 有 24 个 mp4 + 27 张 `_thumb.jpg`，但要用
   `packed_info_data` 里的 id 定位（那条视频用 md5/newmd5 都没命中）。
-  动画表情**只有 19/53** 在 `cache/<月>/Emoticon/<前2hex>/<md5>`，且体积远小于 XML
-  里的 `len`、文件头不是任何已知魔数（单字节 XOR 解不出），没验证能不能解，先不承诺。
 - **合并转发（聊天记录）要不要给"点开看"入口**：`recorditem` 已解析成 `items`
   （每条含作者/时间/正文）存在 metadata 里，但界面还没有展开的入口。
 - **跳过去之后要不要能跳回来**：现在点引用会把当前这一屏换掉，原浏览位置丢失。
@@ -191,5 +230,6 @@ emoji、图片、系统消息）全部落到错映射 → 群里冒出非群成�
 ## 环境备注
 - 旧的问题库保留为 `data/niannian.db.bad-1`（发送者修复前的数据，可对照；确认可删）。
 - `data/diag_*.py`、`data/probe_media.py`、`data/verify_senders.py` 是排查脚本，
-  `data/` 不入库。
+  `data/` 不入库。`data/_upgrade_check.py` 是子模块升级的存量复核脚本（当前代码路径
+  重读关注会话 vs 库里已存的发送者/正文），下次 bump pin 前先停服跑它。
 - 图片落盘在 `data/wechat/media/<账号指纹>/`，清库不会自动清这里，需要时手动删。

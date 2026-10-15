@@ -62,33 +62,6 @@ def media_hash_map(conn: sqlite3.Connection, table: str, wanted: set) -> dict:
     return found
 
 
-def sender_alias_map(conn: sqlite3.Connection, table: str,
-                     wanted: set) -> dict:
-    """{(sort_seq, local_id): 发送者wxid}——用消息分片库自己的 Name2Id 还原。
-
-    微信 4.x 的 real_sender_id 是「本分片库 Name2Id 的 rowid」，id 空间按分片
-    各自编号；上游拿 message_resource.db 的全局 SenderName2Id 去查，会把发送者
-    解析成毫不相干的人（甚至解析不出），群聊无正文前缀的行和私聊自己发的消息
-    因此全错。
-    """
-    if not wanted:
-        return {}
-    seqs = sorted({seq for seq, _ in wanted})
-    quoted = '"%s"' % str(table).replace('"', '""')
-    marks = ",".join("?" * len(seqs))
-    aliases = {int(row[0]): str(row[1] or "") for row in
-               conn.execute("SELECT rowid, user_name FROM Name2Id")}
-    found = {}
-    cursor = conn.execute(
-        f"SELECT sort_seq, local_id, real_sender_id FROM {quoted} "
-        f"WHERE sort_seq IN ({marks})", seqs)
-    for sort_seq, local_id, sender_id in cursor:
-        key = (int(sort_seq), int(local_id))
-        if key in wanted:
-            found[key] = aliases.get(int(sender_id or 0), "")
-    return found
-
-
 def server_seq_map(conn: sqlite3.Connection, table: str, wanted: set) -> dict:
     """``{svrid: sort_seq}``——按 ``server_id`` 反查被引那条消息在本会话的排序号。
 
@@ -324,16 +297,6 @@ def open_isolated_db(root: Path, settings: dict):
                     conn.close()
             return found
 
-        def _fix_senders(self, user: str, rows: list) -> list:
-            """用分片内 Name2Id 覆盖上游 sender_username；解析不到的置空，回落到正文前缀。"""
-            wanted = {(int(r.get("sort_seq") or 0), int(r.get("local_id") or 0))
-                      for r in rows}
-            found = self._each_shard(user, wanted, sender_alias_map)
-            for row in rows:
-                key = (int(row.get("sort_seq") or 0), int(row.get("local_id") or 0))
-                row["sender_username"] = found.get(key, "")
-            return rows
-
         def media_hashes(self, user: str, keys: set) -> dict:
             """批量取图片行的本机文件哈希（只走采集线程，读上游库）。"""
             return self._each_shard(user, keys, media_hash_map)
@@ -370,14 +333,6 @@ def open_isolated_db(root: Path, settings: dict):
                 if group.get(wxid) and not str(member.get("remark") or ""):
                     names[wxid] = group[wxid]
             return names
-
-        def get_messages(self, user, limit=20, offset=0):
-            return self._fix_senders(
-                user, super().get_messages(user, limit=limit, offset=offset))
-
-        def get_new_messages(self, user, since_seq=0, limit=200):
-            return self._fix_senders(
-                user, super().get_new_messages(user, since_seq=since_seq, limit=limit))
 
     return IsolatedDB(db_dir=settings.get("wechat_db_dir") or None,
                       account=settings.get("wechat_account") or None,

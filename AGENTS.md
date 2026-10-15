@@ -32,24 +32,32 @@ cd web && npm run dev                   # 前端热更新，/api 代理到 8765
   `data/fixtures/capture.db`，供 `tests/test_capture_replay.py` 离线回放。跑它要**先停服务**
   （同一份解密缓存不该被两个读取方同时开）；产物是真实聊天，落在 `data/`（已 gitignore）。
   测试只断言"任何一次重新捕获都成立"的不变式，fixture 缺失就 skip，不造数据刷绿。
-- `wechatauto-replica/`：**git submodule**，锁定上游 1.2.5.1（fbfb026）。
+- `wechatauto-replica/`：**git submodule**，锁定上游 1.2.6.1（62503d7）。
   视为第三方依赖，**不要改动**（改动会偏离上游且 `submodule update` 会丢）。
   需要不同行为时在本仓库 `IsolatedDB` 子类里覆写。
+  升级流程：`cd wechatauto-replica && git fetch --all --tags` → 看清
+  `git log --oneline <旧pin>..origin/main` 改了哪些私有接口 → `git checkout <新 sha>`
+  → 回主仓库跑 `pytest` 与真机对撞脚本，再 `git add wechatauto-replica` 提交 pin。
 
 ## 上游库的关键陷阱（已踩，务必遵守）
 - **`real_sender_id` 的 id 空间是每个消息分片库各自的 `Name2Id` 表**，
-  上游 `db._sender_id_index()` 却拿 `message_resource.db` 的全局 `SenderName2Id`
-  去查，会解析出毫不相干的人（甚至群外成员）。`get_messages` 返回的
-  `sender_username` 因此**不可信**，正文无 `wxid_x:` 前缀的行（自己发的消息、
-  emoji、图片、系统消息）全部会错。修法见 `niannian/wechat.py:sender_alias_map`
-  + `IsolatedDB._fix_senders`。原项目有同一隐患，只是它只导入过"全员带前缀"的
-  通知群，症状没暴露。
-- `sender_id == 2` 在上游被当作"自己"，但分片 `Name2Id` 的 rowid 2 是别人；
-  以分片表为准，不要沿用该特判。
+  上游 1.2.5.1 及更早拿 `message_resource.db` 的全局 `SenderName2Id` 去查，
+  会解析出毫不相干的人（甚至群外成员）。正文无 `wxid_x:` 前缀的行（自己发的消息、
+  emoji、图片、系统消息）全部会错。**这条现在由上游承担**：1.2.6.1（issue #34）
+  起按消息所在分片解析，全局 `_sender_id_index()` 已删除，我们曾经兜过底的
+  `sender_alias_map` + `IsolatedDB._fix_senders` 已随之删掉（2026-10-14，用户定）。
+  **所以 pin 不能往回退** —— 退回 1.2.5.1 气泡上就是错的人，
+  `tests/test_wechat.py:test_upstream_pin_resolves_senders_per_shard` 认接口守住这件事，
+  升级前还要跑 `data/_upgrade_check.py` 拿真机存量复核。
+- `sender_id == 2` 在上游 1.2.5.1 被当作"自己"，但分片 `Name2Id` 的 rowid 2
+  是别人；以分片表为准。1.2.6.1 已去掉该特判（本机实测自己在 `message_0` 是 rowid 5）。
 - 解密缓存固定在 `data/wechat/cache/<账号指纹>/`，与其它工程隔离；
   改 WAL 合并/解密逻辑要同时 bump `wechatauto.STAMP_VERSION`。
 - 消息表跨分片，`local_id` **非全局唯一**，去重/定位一律用 `(sort_seq, local_id)`。
-  上游 `download_image(user, local_id)` 就是因此会挑错行。
+  上游 `download_image(user, local_id)` 就是因此会挑错行；1.2.6 起消息行多带一个
+  `shard`（分片库文件名），`download_*/image_status/get_message_row` 都接受
+  `shard=` 来锁定唯一一行。我们不调 `download_image`（凭 `media_md5` 自己定位文件），
+  `shard` 暂未进 metadata。
 
 ## 图片附件的关键事实（`niannian/media.py`）
 - **磁盘文件名那个 32 位哈希只在消息行的 `packed_info_data` 里**；正文 XML 的

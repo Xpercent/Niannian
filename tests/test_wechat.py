@@ -1,8 +1,12 @@
 import sqlite3
+import sys
+from pathlib import Path
 
 from niannian.wechat import (Collector, account_scope, normalize_message,
-                             open_isolated_db, quote_name, sender_alias_map,
+                             open_isolated_db, quote_name,
                              server_seq_map, session_key, source_id, split_sender)
+
+ROOT = Path(__file__).resolve().parent.parent
 
 ACCOUNT = "wxid_me"
 
@@ -62,40 +66,20 @@ def test_normalize_prefers_resolved_sender_over_body_prefix():
     assert item["content"] == "我自己发的"
 
 
-def make_shard(tmp_path, aliases, rows, table="Msg_x"):
-    path = tmp_path / "message_0.db"
-    conn = sqlite3.connect(path)
-    with conn:
-        conn.execute("CREATE TABLE Name2Id (user_name TEXT, is_session INTEGER)")
-        conn.executemany("INSERT INTO Name2Id (rowid, user_name, is_session) VALUES (?,?,?)",
-                         aliases)
-        conn.execute(f"CREATE TABLE {table} (sort_seq INTEGER, local_id INTEGER, "
-                     "real_sender_id INTEGER)")
-        conn.executemany(f"INSERT INTO {table} VALUES (?,?,?)", rows)
-    return conn
+def test_upstream_pin_resolves_senders_per_shard():
+    """发送者解析交回上游了（1.2.6.1 / issue #34），本仓库不再有兜底补丁。
 
+    所以 pin 不能往回退：退回 1.2.5.1 会拿 message_resource.db 的全局
+    ``SenderName2Id`` 解析分片编号，气泡上就是毫不相干的人。这里认接口不认版本号——
+    全局索引被删掉、按分片解析的入口在，才算上游还担得起这件事。
+    """
+    if str(ROOT / "wechatauto-replica") not in sys.path:
+        sys.path.insert(0, str(ROOT / "wechatauto-replica"))
+    from wechatauto.db import WeChatDB
 
-def test_sender_alias_map_uses_per_shard_id_space(tmp_path):
-    # 同一条 sort_seq+local_id 在两个分片里可能指向不同的人：解析必须跟着分片走。
-    conn = make_shard(tmp_path, [(5, ACCOUNT, 0), (6, "wxid_me2", 0), (9, "", 0)],
-                      [(100, 7, 6), (101, 8, 9), (999, 9, 5)])
-    found = sender_alias_map(conn, "Msg_x", {(100, 7), (101, 8), (200, 7)})
-    conn.close()
-    assert found[(100, 7)] == "wxid_me2"
-    assert found[(101, 8)] == ""      # 系统消息：分片里名字为空，不是"某个人"
-    assert (200, 7) not in found      # 不在本分片，交给别的分片
-
-
-def test_sender_alias_map_maps_self_rowid_not_global_index(tmp_path):
-    # real_sender_id=5 在本分片是自己；全局 SenderName2Id 的 5 是别人，绝不能混用。
-    conn = make_shard(tmp_path, [(5, ACCOUNT, 0)], [(100, 7, 5)])
-    found = sender_alias_map(conn, "Msg_x", {(100, 7)})
-    conn.close()
-    assert found[(100, 7)] == ACCOUNT
-    item = normalize_message(ACCOUNT, "wxid_friend", "老王", make_message(
-        sort_seq=100, local_id=7, sender_username=ACCOUNT, content="我来看看"),
-        {ACCOUNT: "我自己", "wxid_friend": "老王"})
-    assert item["is_self"] is True and item["sender_name"] == "我"
+    assert not hasattr(WeChatDB, "_sender_id_index")
+    assert hasattr(WeChatDB, "sender_username")
+    assert hasattr(WeChatDB, "_name2id_map")
 
 
 

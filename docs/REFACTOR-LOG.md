@@ -83,6 +83,9 @@ wxid**——实测本群 `real_sender_id=5` 分片内是“我自己”，全局
 
 只在 `niannian/wechat.py`，**不动子模块**（子模块是 detached HEAD 的第三方锁定）：
 
+> 后续：1、2 两条已在 2026-10-14 删掉——上游 1.2.6.1（issue #34）自己按分片解析了，
+> 见文末「子模块升级到 1.2.6.1」。第 3 条（分片解析优先、正文前缀兜底）仍然有效。
+
 1. 新增 `sender_alias_map(conn, table, wanted)`：在指定分片内按
    `(sort_seq, local_id)` 联合 `Name2Id` 还原真实发送者 wxid。
 2. `IsolatedDB` 新增 `_fix_senders()`，并覆写 `get_messages` / `get_new_messages`
@@ -573,9 +576,76 @@ API 侧 `type_label` 仍是「转账」，方向与对象也存进了 metadata �
 （等 3 秒与重复滚顶都稳定在 275）；图片弹窗无 ×、点遮罩能关、派发 `keydown` 能关
 （`press_key` 打不进隐藏标签，与截图同一限制），其它弹窗的 × 仍在且可用。
 
+## 阶段五追加：子模块升级到 1.2.6.1（2026-10-14）
 
+pin：`fbfb026`（1.2.5.1）→ `62503d7`（1.2.6.1），中间 6 个提交。
 
+### 上游动了什么
+- **1.2.6（issue #20）跨分片消息可寻址**：每条消息行多带一个 `shard`（该行的分片库
+  文件名），`get_message_row` / `download_image` / `download_voice` / `download_video` /
+  `download_file` / `image_status` 都接受 `shard=` 来锁定唯一一行；分片读取失败不再
+  静默 `continue` 当成"这一片没消息"（malformed 仍抛出走清缓存重建，其余走
+  `_warn_once` 一条只说一次）。
+- **1.2.6.1（issue #34）发送者按分片解析**：`real_sender_id` 改用**消息所在分片**的
+  `Name2Id`，全局 `SenderName2Id` 索引 `_sender_id_index()` 整个删掉，`sender_id == 2`
+  即"自己"的特判去掉；`MediaDownloader._sent_by_self` 改读行上已解析的
+  `sender_username`，解析不到就按"不是本机发的"处理，不再猜编号。
 
+也就是把我们 AGENTS.md「上游库的关键陷阱」前两条**在源头修掉了**。
 
+### 升级前先核对接口（不看清楚就 bump 是找死）
+本项目用到的上游能力：`list_accounts`、`get_sessions`、`get_messages`、
+`get_new_messages`、`get_self_info`、`nickname_map`、`get_group_members`、
+`_msg_conns`、`_contact_conn`、`MediaDownloader.{_image_files, decrypt_image,
+_write_decrypted}` —— 1.2.6.1 全部还在；被删的 `_sender_id_index` / `_msg_conn` /
+`_find_msg_table` 我们一处都没调。`STAMP_VERSION` 仍是 3（解密与 WAL 合并逻辑没动），
+所以 `data/wechat/cache/` 那份解密缓存不用重建，重启直接复用。
 
+### 真机对撞：升级后上游与我们的补丁是否等价
+停服（独占解密缓存）→ 同一份数据上把 `WeChatDB.get_messages`（上游原生解析）与
+`IsolatedDB.get_messages`（我们的 `_fix_senders`）按 `(sort_seq, local_id)` 逐行比：
+3 个会话 758 行 **758/758 一致、0 行缺失**。其中文件传输助手 52/52 解析成本机账号
+（`sender_id=5` → 自己，正是"rowid 2 才是自己"那条硬编码会点错的地方），
+后花园群 500 行里 485 行解析出真实成员 wxid。
 
+### 验证
+- `pytest` 78 项，升级前后一样（跳过几条取决于 `data/fixtures/capture.db` 在不在）。
+- 服务重启 `/api/status` connected，91 会话、152 条消息一条没掉，`imported: 0`
+  （没有重复导入）。
+- 浏览器：群聊气泡显示名仍是"备注 > 群名片 > 昵称"（实测"文体委员吴彦朋"），
+  图片 `/media/*` 全 200，控制台无报错。
+
+### 顺带发现（与本次升级无关，待单独一轮处理）
+文件传输助手有 5 条图片行的 `local_file` 落成 `.wxgf` 直接进 `<img>`，浏览器渲染不出来
+（`/media/…wxgf` 返回 200 但 `application/octet-stream`）。这 5 行是 21:53–21:56 入库的，
+在 22:07 bump pin **之前**，所以不是升级引起的回归——是 wxgf 那档没转成 jpg。
+
+### 追加：删掉 `_fix_senders`，发送者解析交回上游（用户定）
+既然逐条等价，本地那层就是纯冗余，还多花一次分片批查，删。改动全在 `niannian/wechat.py`：
+`sender_alias_map()`、`IsolatedDB._fix_senders()` 以及 `get_messages` /
+`get_new_messages` 两个覆写一并去掉（`_each_shard` 留下，`media_hashes` / `quote_seqs`
+还在用）。`normalize_message` 不动——它读的还是 `sender_username`，只是填这个字段的
+人换了。
+
+**不需要清库重采**：删的是一条与上游输出完全相同的兜底路径，落库内容不变（下面
+152/152 就是这件事的证据），不像以往"改了入库解析必须重采"那种情况。
+
+删掉之后本地没有第二层了，pin 就成了正确性的一部分，所以补一条守门测试
+`test_upstream_pin_resolves_senders_per_shard`：**认接口不认版本号**——全局
+`_sender_id_index()` 必须不存在、`sender_username` 与 `_name2id_map` 必须在。
+谁把子模块退回 1.2.5.1，这条测试就红。
+
+`data/_upgrade_check.py` 改成下次升级的存量复核脚本：拿当前代码路径重读关注会话，
+与库里已存的 `sender_key / sender_name / is_self / content / message_type` 逐行比。
+
+### 验证（删除后）
+- `pytest` 77 项（删 2 条 `sender_alias_map` 测试、加 1 条守门；跳过条数同上，取决于 fixture）。
+- 真机存量复核：文件传输助手 52/52、通知群 100/100，**152/152 逐行一致、0 处不同**
+  （群里另 106 行是脚本取 1000 条超出导入窗口，属正常）。
+- 服务重启 connected、152 条一条没掉、`imported: 0`；私聊 52 行仍全部署名"我"
+  （这正是 1.2.5.1 会错的那类行），群聊 100 行署名分布在真实成员内
+  （学委陈晔显 36 / 班长林欣桐 16 / 科技委员21陈永源 15 / 文体委员吴彦朋 14 …）。
+
+### 仍未解决
+`.wxgf` 图片气泡是破图（见上「顺带发现」），要单起一轮：wxgf 那档解密后转成 jpg
+再落盘，涉及存量需清库重采。
