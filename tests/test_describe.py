@@ -170,11 +170,14 @@ def test_transfer_summary_names_the_counterpart():
     assert summarize(desc) == "收到(=°Д°=) [转账] ￥8.00"
 
 
-def test_emoji_and_video_fields():
+def test_emoji_is_placeholder_only():
+    """表情只认得出"是表情"：正文里的 md5/宽高/直链一概不解析，气泡就是占位。"""
     emoji = describe(EMOJI_XML)
-    assert emoji["kind"] == "emoji" and emoji["bytes"] == 26287
-    assert (emoji["width"], emoji["height"]) == (518, 474)
+    assert emoji == {"kind": "emoji"}
     assert summarize(emoji) == "[动画表情]"
+
+
+def test_video_fields():
     video = describe(VIDEO_XML)
     assert video["seconds"] == 6 and video["new_md5"] == "abc89981ee881193"
     assert summarize(video) == "[视频] 0:06"

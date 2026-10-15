@@ -649,3 +649,39 @@ _write_decrypted}` —— 1.2.6.1 全部还在；被删的 `_sender_id_index` / 
 ### 仍未解决
 `.wxgf` 图片气泡是破图（见上「顺带发现」），要单起一轮：wxgf 那档解密后转成 jpg
 再落盘，涉及存量需清库重采。
+
+## 阶段五追加：动画表情退回 `[动画表情]` 占位（2026-10-15，用户定）
+
+**决定**：不要表情取图这条能力，气泡只留 `[动画表情]` 占位。历史按用户给的口径重做：
+master 回到 `da016d9`，**跳过**取图那一轮（`15b0080`），再把升级 pin 那一轮重放上来
+（新提交 `135cd82`）。表情那一轮连同之后的 wxgf/贴纸/撤回工作完整留在
+`archive/media-pipeline`（`d2f2a56`），没丢。
+
+### 这一轮删掉的与削掉的
+- 删（随 `15b0080` 一起不在 master 上）：`media.attach_emoji` 按直链取回、
+  `emoji_allowed` 主机白名单与 `_GuardedRedirect`、采集侧批内 `md5 → url` 回落、
+  读取侧 `EMOJI_READ_TIMEOUT/ATTEMPTS` 额度、前端 `picture` 判定里的 `kind === "emoji"`。
+  `describe._emoji` 的 `url`（`cdnurl`）字段也随之消失。
+- 削（本轮新改动）：`describe._emoji` 从 6 个字段（`md5/len/width/height/type`）
+  收成只回 `{"kind": "emoji"}`——用户要的是"去掉解析逻辑"，只留类型标签。
+  `summarize` 本来就把 emoji 排在 `tail`/`source` 那条分支之外，所以摘要仍是
+  `[动画表情]`，不受字段减少影响。
+- 采集重新变成**纯本地读**：表情行不再发任何 HTTP GET（AGENTS.md「约定」里那条
+  "唯一例外"随之作废）。
+
+### 存量：不用清库重采
+库里 19 条表情行的 `metadata.attachment` **全部只有 `{"kind": "emoji"}`**、正文全部
+`[动画表情]`，与削完之后的代码逐字一致 → 这次不涉及"改了入库解析要重采"。
+（今天 16:10 那次 emoji-off 重采留下的就是这一形状；备份在
+`data/backup-pre-emoji-off/`。）媒体目录里 16 个 `emoji_*` 文件（11:30 那轮取回的）
+现在没有任何行引用，用户定**保留不动**，将来要恢复取图它们还是现成素材。
+
+### 验证
+- `pytest` 78 项（77 passed / 1 skipped）：`test_emoji_and_video_fields` 拆成
+  `test_emoji_is_placeholder_only`（断言 `describe(EMOJI_XML) == {"kind": "emoji"}`）
+  与 `test_video_fields`；回放测试那条不变式"表情行正文必须是 `[动画表情]`"仍跑真
+  fixture 通过（5 passed）。
+- `npm run build` 通过（含 `tsc --noEmit`）。
+- 守门测试 `test_upstream_pin_resolves_senders_per_shard` 未受影响，仍 1 passed。
+- 全仓 `grep`：`attach_emoji` / `emoji_allowed` / `cdnurl` / `EMOJI_READ` 在
+  `niannian/`、`web/src/`、`scripts/` 下**零命中**（只剩 fixture 注释与文档里的历史叙述）。

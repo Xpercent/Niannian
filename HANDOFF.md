@@ -1,6 +1,12 @@
 # HANDOFF.md — 交接
 
 ## 当前状态
+**动画表情已彻底退回 `[动画表情]` 占位**（用户 2026-10-15 定）：取图那一轮（`15b0080`）
+不在 master 上，`describe._emoji` 也只回 `{"kind": "emoji"}`，正文的 `md5`/宽高/`cdnurl`
+一概不解析，采集重新变成**纯本地读**（表情行不发 HTTP）。那一轮连同之后的 wxgf/贴纸/
+撤回工作完整留在 `archive/media-pipeline`（`d2f2a56`），要恢复动图从那儿拿。
+存量**不需要清库重采**：库里 19 条表情行的 `attachment` 本来就全是 `{"kind":"emoji"}`、
+正文全是 `[动画表情]`，与现码逐字一致；媒体目录 16 个 `emoji_*` 按用户定**保留不动**。
 子模块 `wechatauto-replica` 升到 **1.2.6.1（62503d7）**，并**删掉了本地的发送者兜底补丁**
 （`sender_alias_map` + `IsolatedDB._fix_senders`）：上游把我们记在 AGENTS.md 的两个坑
 （发送者按全局 `SenderName2Id` 解析、跨分片 `local_id` 不可寻址）在源头修掉了，解析
@@ -10,10 +16,21 @@
 正文 XML 归零（476 条消息、11 类非文本出中文摘要），引用行只存 `quoted.sort_seq`、
 点击滚到原文并描边；往上翻历史改成滚到顶部自动加载；图片弹窗去掉 ×（遮罩与 Esc 仍可
 关）；图片解密、发送者显示名、每会话独立重新导入、设置页三项、真机 fixture 离线回放
-测试均已在库上。动画表情只留 `[动画表情]` 占位，不取图。`pytest` 77 项（76 passed /
+测试均已在库上。`pytest` 78 项（77 passed /
 1 skipped）；服务 `python -m niannian` → http://127.0.0.1:8765。
 
-## 最近一轮：子模块升级 1.2.5.1 → 1.2.6.1，并删掉本地发送者补丁
+## 最近一轮：表情退回占位 + 历史按用户口径重做
+`git rebase --onto da016d9 15b0080 master` —— 回退到 `da016d9`、跳过取图那一轮（`15b0080`）、
+把升级 pin 那一轮重放成 `135cd82`。冲突只有本文件与 `docs/REFACTOR-LOG.md`（表情段在重放
+侧变成"我们这删了、对方又在其后追加"），按"删表情段、留升级段"手工合，并把两处 `pytest`
+计数改成与去表情后的树一致。再补一刀：`describe._emoji` 从 6 字段削成只回 kind，
+`test_emoji_and_video_fields` 拆成"表情只占位"与"视频字段"两条。`summarize` 本来就不给
+emoji 走 `tail` 分支，摘要不受字段减少影响。
+验证：`pytest` 78 项（77 passed / 1 skipped）、`npm run build` 通过、守门测试仍 1 passed、
+回放里"表情正文必须是 `[动画表情]`"那条不变式跑真 fixture 通过、全仓 grep 无
+`attach_emoji` / `emoji_allowed` / `cdnurl` / `EMOJI_READ` 残留。
+
+## 上一轮：子模块升级 1.2.5.1 → 1.2.6.1，并删掉本地发送者补丁
 上游 6 个提交做了两件事：**1.2.6（issue #20）** 消息行新增 `shard`（分片库文件名），
 `get_message_row` / `download_*` / `image_status` 都能按 `shard=` 锁定唯一一行，
 分片读失败不再静默当成"这片没消息"；**1.2.6.1（issue #34）** `real_sender_id` 改按

@@ -76,6 +76,20 @@ cd web && npm run dev                   # 前端热更新，/api 代理到 8765
   是这里复用的三个私有方法（定位、解密、按文件头判格式落盘 + wxgf→jpg）。
 
 
+## 动画表情：只留 `[动画表情]` 占位（用户 2026-10-15 定）
+- `describe._emoji` **只返回 `{"kind": "emoji"}`**：正文的 `md5/len/width/height/type`
+  一律不解析，metadata 里不留任何可供下游取图的字段。要恢复动图实现看
+  `archive/media-pipeline`（15b0080 那一版：按 `cdnurl` 取回明文 + 按 md5 落盘）。
+- **别再试本机那几份**：`business/emoticon/{Persist,Thumb}` 与
+  `cache/<月>/Emoticon/<前2hex>/<md5>`（文件名就是正文 md5）长度全是 16 的倍数、与
+  「明文+PKCS7」严丝合缝，但 `emoticon.db::kNonStoreEmoticonTable.aes_key` 与正文
+  `aeskey` 的 12 种取法 × ECB/CBC/CTR/CFB/OFB × 4 种 IV × 偏移 0/16 **全部对不上首块**，
+  图片那把 AES 密钥与单字节 XOR 也否掉。这轮结论仍然成立：没破。
+- 采集因此回到**纯本地读**：表情行不发任何网络请求（`约定` 里那条"唯一例外"已作废）。
+- 媒体目录 `data/wechat/media/<账号指纹>/emoji_*`（16 个）是上一轮取回的，现在没有
+  任何行引用它，用户定**保留不动**，不是待清理项。
+
+
 ## 发送者显示名（`niannian/contacts.py`）
 - 微信群聊气泡上的名字是**三档**：`备注 > 群名片 > 昵称`。上游
   `nickname_map()` 只有「备注或昵称」两档，**中间那档是缺的**。

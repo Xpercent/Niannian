@@ -102,11 +102,9 @@ def _image(node: ElementTree.Element) -> dict:
 
 
 def _emoji(node: ElementTree.Element) -> dict:
-    return {"kind": "emoji", "md5": _attr(node, "md5"),
-            "bytes": _int(_attr(node, "len")),
-            "width": _int(_attr(node, "width")),
-            "height": _int(_attr(node, "height")),
-            "sticker_type": _int(_attr(node, "type"))}
+    # 动画表情只出占位：本机那几份是密文（没破），正文 `cdnurl` 又是外部消息给的直链，
+    # 取图要发 HTTP 且受时效约束，所以不解析 md5/宽高，也不留可供下游取图的字段。
+    return {"kind": "emoji"}
 
 
 def _video(node: ElementTree.Element) -> dict:
