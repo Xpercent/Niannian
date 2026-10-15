@@ -1,3 +1,7 @@
+import sqlite3
+
+import pytest
+
 from niannian.storage import Database
 
 
@@ -166,6 +170,70 @@ def image_row(sid, source, seq, digest, linked=False, tier=None):
     row = payload(sid, source, sort=seq)
     row["metadata"] = meta
     return row
+
+
+def test_projection_columns_follow_metadata_on_both_write_paths(tmp_path):
+    """投影列只由 metadata 算，且 ingest / update_metadata 两条写入口都要刷新它。
+
+    采集侧每轮"该补哪几行"的判定全看列（这样才走得上部分索引），所以列一旦和
+    metadata 漂移，就会漏补链接或反复重做——这条不变式必须由测试钉住。
+    """
+    db = make_db(tmp_path)
+    sid = seed(db)
+    db.set_monitored(sid, True)
+    db.ingest([image_row(sid, "wechat:1", 300, "a" * 32)])
+    with db.connect() as conn:
+        row = conn.execute("SELECT id, kind, media_md5, local_file, tier FROM messages "
+                           "WHERE source_id='wechat:1'").fetchone()
+    assert tuple(row[1:]) == ("image", "a" * 32, "", "")
+    message_id = row[0]
+
+    db.update_metadata(message_id, {"attachment": {"kind": "image"},
+                                    "media_md5": "a" * 32,
+                                    "local_file": "scope/x.jpg", "tier": "thumb"})
+    with db.connect() as conn:
+        after = conn.execute("SELECT local_file, tier FROM messages WHERE id=?",
+                             (message_id,)).fetchone()
+    assert tuple(after) == ("scope/x.jpg", "thumb")
+    # 链接补上之后就不该再在"缺链接"的队列里，而该出现在"待升级"的队列里
+    assert db.pending_images(10) == []
+    assert [r["sort_seq"] for r in db.stale_tier_images(10)] == [300]
+
+
+def test_worklist_reads_columns_not_metadata_text(tmp_path):
+    """该不该补只看列，不看 metadata 文本里有没有那一串字。
+
+    原来用 ``instr(metadata, '"kind": "image"')`` 粗筛：既绑死 ``json.dumps`` 的
+    分隔符形状，又让一行随便写坏的文本影响队列。现在文本怎么写都不算数。
+    """
+    db = make_db(tmp_path)
+    sid = seed(db)
+    db.set_monitored(sid, True)
+    db.ingest([image_row(sid, "wechat:1", 300, "a" * 32), payload(sid, "wechat:2", sort=400)])
+    with db.connect() as conn:
+        conn.execute("""UPDATE messages SET metadata='{"attachment": {"kind": "image"}, '
+                        || '"media_md5": "' || printf('%032x', 2) || '"}' WHERE source_id=?""",
+                     ("wechat:2",))
+    # wechat:2 的文本现在"看起来"就是一张缺链接的图片，但它没有投影列，不算图片行
+    assert [row["sort_seq"] for row in db.pending_images(10)] == [300]
+
+
+def test_old_database_reports_rebuild_instead_of_crashing(tmp_path):
+    """老库缺投影列：一句话说清"删掉重采"，别让每轮采集撞在 no such column 上。"""
+    path = tmp_path / "old.db"
+    with sqlite3.connect(path) as conn:
+        conn.execute("""CREATE TABLE messages (id INTEGER PRIMARY KEY AUTOINCREMENT,
+                          session_id TEXT NOT NULL, source_id TEXT NOT NULL UNIQUE,
+                          sender_key TEXT NOT NULL DEFAULT '',
+                          sender_name TEXT NOT NULL DEFAULT '',
+                          is_self INTEGER NOT NULL DEFAULT 0,
+                          content TEXT NOT NULL DEFAULT '',
+                          message_type TEXT NOT NULL DEFAULT '文本',
+                          created_at TEXT NOT NULL, sort_seq INTEGER NOT NULL DEFAULT 0,
+                          metadata TEXT NOT NULL DEFAULT '{}')""")
+    with pytest.raises(RuntimeError) as caught:
+        Database(path).init()
+    assert "重新采集" in str(caught.value) and "kind" in str(caught.value)
 
 
 def test_stale_tier_images_lists_rows_below_original(tmp_path):

@@ -637,6 +637,9 @@ class Collector:
         微信要翻到那条聊天记录才会把预览图落到盘上，所以这类行会一直缺
         ``local_file``。补链接的活**只在这里做**：网页请求线程一旦去解密图片，就可能
         连带触发"翻微信内存找钥匙"，那会把整个服务冻住（实测界面转圈两分钟）。
+
+        哪些行该补由 ``pending_images`` 的投影列说了算（kind/media_md5/local_file 都是
+        列，走部分索引）；这里只负责"这一行的 metadata 能不能写回"。
         """
         media = self._media
         if media is None:
@@ -646,13 +649,10 @@ class Collector:
             if self._stop.is_set():
                 break
             meta = row.get("metadata")
-            if not meta or (meta.get("attachment") or {}).get("kind") != "image":
-                continue
-            digest = str(meta.get("media_md5") or "")
-            if not digest or meta.get("local_file"):
-                continue
+            if not meta:
+                continue        # 坏 JSON：不写回，免得把 metadata 覆盖成半截
             user = session_user(row["session_id"])
-            linked = media.attach(user, digest, f"{user}_{row['sort_seq']}")
+            linked = media.attach(user, row["media_md5"], f"{user}_{row['sort_seq']}")
             if not linked:
                 continue
             meta.update(linked)
@@ -680,18 +680,14 @@ class Collector:
             if self._stop.is_set() or tried >= TIER_UPGRADE_LIMIT:
                 break
             meta = row.get("metadata")
-            if not meta or (meta.get("attachment") or {}).get("kind") != "image":
-                continue
-            current = str(meta.get("tier") or "")
-            old = str(meta.get("local_file") or "")
-            digest = str(meta.get("media_md5") or "")
-            if current == "original" or not old or not digest:
-                continue            # instr 只是粗筛，判定一律照着解析后的字段来
+            if not meta:
+                continue            # 坏 JSON：同 _catchup_images，不写回
             if now < self._tier_next_at.get(row["id"], 0.0):
                 continue            # 冷却中的不占本轮名额，留给下一轮
             tried += 1
             user = session_user(row["session_id"])
-            linked = media.attach(user, digest, f"{user}_{row['sort_seq']}")
+            current, old = row["tier"], row["local_file"]
+            linked = media.attach(user, row["media_md5"], f"{user}_{row['sort_seq']}")
             if not linked or tier_rank(linked.get("tier")) <= tier_rank(current):
                 self._tier_next_at[row["id"]] = now + TIER_RETRY_SECONDS
                 continue

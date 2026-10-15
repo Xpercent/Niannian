@@ -32,9 +32,21 @@ CREATE TABLE IF NOT EXISTS messages (
   message_type TEXT NOT NULL DEFAULT '文本',
   created_at TEXT NOT NULL,
   sort_seq INTEGER NOT NULL DEFAULT 0,
-  metadata TEXT NOT NULL DEFAULT '{}'
+  metadata TEXT NOT NULL DEFAULT '{}',
+  kind TEXT NOT NULL DEFAULT '',
+  media_md5 TEXT NOT NULL DEFAULT '',
+  local_file TEXT NOT NULL DEFAULT '',
+  tier TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id, sort_seq, id);
+-- 采集线程每轮取图片活的两条工作清单。这两条**每轮都跑**（默认 3 秒），而 messages
+-- 会长到几万行，所以谓词必须能走索引、排序必须就是索引序。原来用 instr(metadata,
+-- '"kind": "image"') 匹配文本：走不了索引（每轮全表扫 + 临时 B 树排序），还绑死了
+-- json.dumps 的分隔符。下面两个部分索引对应 storage._image_worklist 的两个分支。
+CREATE INDEX IF NOT EXISTS idx_messages_image_pending ON messages(sort_seq DESC, id DESC)
+  WHERE kind='image' AND media_md5<>'' AND local_file='';
+CREATE INDEX IF NOT EXISTS idx_messages_image_upgrade ON messages(sort_seq DESC, id DESC)
+  WHERE kind='image' AND local_file<>'' AND tier<>'original';
 CREATE TABLE IF NOT EXISTS checkpoints (
   account TEXT NOT NULL,
   session_id TEXT NOT NULL,
@@ -43,6 +55,9 @@ CREATE TABLE IF NOT EXISTS checkpoints (
   PRIMARY KEY (account, session_id)
 );
 """
+
+# 老库缺这四列时给一句话说明，而不是让每轮采集撞在 "no such column: kind" 上。
+PROJECTION_COLUMNS = ("kind", "media_md5", "local_file", "tier")
 
 
 def now_utc() -> str:
@@ -80,6 +95,19 @@ def as_message(row) -> dict:
     return item
 
 
+def media_projection(metadata: dict) -> tuple:
+    """metadata → ``(kind, media_md5, local_file, tier)`` 四列的值。
+
+    这四列是 metadata 的**投影**，不是第二份事实：只有 :meth:`Database.ingest` 与
+    :meth:`Database.update_metadata` 两个写入口会算它，读侧（采集线程的工作清单、
+    每轮的判定）一律按列走。metadata 本身仍是完整结构，前端与引用跳转照旧读它。
+    """
+    meta = metadata or {}
+    attachment = meta.get("attachment") or {}
+    return (str(attachment.get("kind") or ""), str(meta.get("media_md5") or ""),
+            str(meta.get("local_file") or ""), str(meta.get("tier") or ""))
+
+
 class Database:
     """一个文件库；连接按次创建（WAL），写事务由进程内锁保护。"""
 
@@ -98,6 +126,17 @@ class Database:
 
     def init(self) -> None:
         with self._write_lock, self.connect() as conn:
+            # 先认结构再建索引：投影索引的 WHERE 里用到那四列，老库上 executescript
+            # 会直接撞 "no such column: kind"，用户就看不到下面这句话了。
+            if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' "
+                            "AND name='messages'").fetchone():
+                have = {row[1] for row in conn.execute("PRAGMA table_info(messages)")}
+                missing = [name for name in PROJECTION_COLUMNS if name not in have]
+                if missing:
+                    # CREATE TABLE IF NOT EXISTS 不会给已有的表补列，所以这是老库。
+                    raise RuntimeError(
+                        f"数据库结构是旧版，缺 {'、'.join(missing)} 列："
+                        f"删掉 {self.path} 重新采集即可（已入库的消息本来就要重采）。")
             conn.executescript(SCHEMA)
 
     # ------------------------------------------------------------------ 会话
@@ -199,16 +238,19 @@ class Database:
             inserted = 0
             for p in payloads:
                 metadata = p.get("metadata") or {}
+                kind, digest, local_file, tier = media_projection(metadata)
                 cur = conn.execute(
                     """INSERT OR IGNORE INTO messages(
                          session_id, source_id, sender_key, sender_name, is_self,
-                         content, message_type, created_at, sort_seq, metadata)
-                       VALUES(?,?,?,?,?,?,?,?,?,?)""",
+                         content, message_type, created_at, sort_seq, metadata,
+                         kind, media_md5, local_file, tier)
+                       VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                     (p["session_id"], p["source_id"], p.get("sender_key", ""),
                      p.get("sender_name", ""), 1 if p.get("is_self") else 0,
                      p.get("content", ""), p.get("message_type", "文本"),
                      p["created_at"], int(p.get("sort_seq") or 0),
-                     json.dumps(metadata, ensure_ascii=False)))
+                     json.dumps(metadata, ensure_ascii=False),
+                     kind, digest, local_file, tier))
                 inserted += cur.rowcount
             if checkpoint:
                 conn.execute(
@@ -287,31 +329,8 @@ class Database:
         return [as_message(row) for row in rows]
 
     def pending_images(self, limit: int = 30) -> list[dict]:
-        """关注会话里还缺本机链接的图片行（采集那一刻文件还没落盘的那些），新→旧。
-
-        用 ``instr`` 粗筛而不用 ``json_extract``：metadata 是文本列，一行坏 JSON
-        就会让 ``json_extract`` 抛错，而这条查询每轮都要跑，不能因为一条写坏的行
-        把整轮采集打死。粗筛只当候选，真正的判定在调用方解析之后。
-        """
-        with self.connect() as conn:
-            rows = conn.execute(
-                """SELECT m.id, m.session_id, m.sort_seq, m.metadata
-                   FROM messages m JOIN sessions s ON s.id = m.session_id
-                   WHERE s.monitored = 1
-                     AND instr(m.metadata, '"kind": "image"') > 0
-                     AND instr(m.metadata, '"media_md5"') > 0
-                     AND instr(m.metadata, '"local_file"') = 0
-                   ORDER BY m.sort_seq DESC, m.id DESC LIMIT ?""",
-                (max(1, int(limit)),)).fetchall()
-        out = []
-        for row in rows:
-            item = dict(row)
-            try:
-                item["metadata"] = json.loads(item["metadata"] or "{}")
-            except json.JSONDecodeError:
-                item["metadata"] = None
-            out.append(item)
-        return out
+        """关注会话里还缺本机链接的图片行（采集那一刻文件还没落盘的那些），新→旧。"""
+        return self._image_worklist(limit, linked=False)
 
     def stale_tier_images(self, limit: int = 200) -> list[dict]:
         """关注会话里**还没拿到原图**的图片行（手里是预览图或本机下发那一份），新→旧。
@@ -322,32 +341,46 @@ class Database:
         （上游实测结论），所以停在那一档不算到底，``_h.dat`` 才是终点。
 
         ``limit`` 给的是**候选窗口**而不是本轮处理数：冷却在采集侧，窗口取太窄会被
-        刚扫过的新行占满，排在后面的永远排不到。粗筛用 ``instr``，理由与
-        :meth:`pending_images` 一样——每轮都要跑的查询不能被一行坏 JSON 打死。
+        刚扫过的新行占满，排在后面的永远排不到。
         """
+        return self._image_worklist(limit, linked=True)
+
+    def _image_worklist(self, limit: int, linked: bool) -> list[dict]:
+        """两条图片工作清单共用的查询：只差"手里有没有链接"这一件事。
+
+        判定全按投影列走，不再匹配 metadata 的文本：这样两条都能落在 SCHEMA 里那两个
+        部分索引上（排序就是索引序，没有临时 B 树），也不受 ``json.dumps`` 分隔符形状
+        的影响。metadata 仍然取回来，因为补完链接要整块写回去；坏 JSON 的行交回来是
+        ``None``，由采集侧跳过——**不能**因为一行写坏就把每轮都要跑的查询打死。
+        """
+        have = ("m.local_file<>'' AND m.tier<>'original'" if linked
+                else "m.local_file=''")
         with self.connect() as conn:
             rows = conn.execute(
-                """SELECT m.id, m.session_id, m.sort_seq, m.metadata
+                f"""SELECT m.id, m.session_id, m.sort_seq, m.metadata,
+                          m.kind, m.media_md5, m.local_file, m.tier
                    FROM messages m JOIN sessions s ON s.id = m.session_id
                    WHERE s.monitored = 1
-                     AND instr(m.metadata, '"kind": "image"') > 0
-                     AND instr(m.metadata, '"media_md5"') > 0
-                     AND instr(m.metadata, '"local_file"') > 0
-                     AND instr(m.metadata, '"tier": "original"') = 0
+                     AND m.kind = 'image' AND m.media_md5 <> '' AND {have}
                    ORDER BY m.sort_seq DESC, m.id DESC LIMIT ?""",
                 (max(1, int(limit)),)).fetchall()
         out = []
         for row in rows:
             item = dict(row)
-            try:
-                item["metadata"] = json.loads(item["metadata"] or "{}")
-            except json.JSONDecodeError:
-                item["metadata"] = None
+            item["metadata"] = load_metadata(item["metadata"])
             out.append(item)
         return out
 
     def update_metadata(self, message_id: int, metadata: dict) -> None:
-        """整块改写一条消息的 metadata（补媒体链接用），不动内容与水位。"""
+        """整块改写一条消息的 metadata（补媒体链接用），并同步刷新投影列。
+
+        内容与水位都不动。投影列只在这里和 :meth:`ingest` 两处写，读侧才不会读到
+        跟 metadata 不一致的半截状态。
+        """
+        kind, digest, local_file, tier = media_projection(metadata)
         with self._write_lock, self.connect() as conn:
-            conn.execute("UPDATE messages SET metadata=? WHERE id=?",
-                         (json.dumps(metadata, ensure_ascii=False), int(message_id)))
+            conn.execute(
+                """UPDATE messages SET metadata=?, kind=?, media_md5=?,
+                          local_file=?, tier=? WHERE id=?""",
+                (json.dumps(metadata, ensure_ascii=False), kind, digest, local_file,
+                 tier, int(message_id)))
