@@ -251,6 +251,33 @@ class Database:
                 f"AND sort_seq IN ({marks})", [session_id, *wanted]).fetchall()
         return {int(row["sort_seq"]): int(row["id"]) for row in rows}
 
+    def pending_images(self, limit: int = 30) -> list[dict]:
+        """关注会话里还缺本机链接的图片行（采集那一刻文件还没落盘的那些），新→旧。
+
+        用 ``instr`` 粗筛而不用 ``json_extract``：metadata 是文本列，一行坏 JSON
+        就会让 ``json_extract`` 抛错，而这条查询每轮都要跑，不能因为一条写坏的行
+        把整轮采集打死。粗筛只当候选，真正的判定在调用方解析之后。
+        """
+        with self.connect() as conn:
+            rows = conn.execute(
+                """SELECT m.id, m.session_id, m.sort_seq, m.metadata
+                   FROM messages m JOIN sessions s ON s.id = m.session_id
+                   WHERE s.monitored = 1
+                     AND instr(m.metadata, '"kind": "image"') > 0
+                     AND instr(m.metadata, '"media_md5"') > 0
+                     AND instr(m.metadata, '"local_file"') = 0
+                   ORDER BY m.sort_seq DESC, m.id DESC LIMIT ?""",
+                (max(1, int(limit)),)).fetchall()
+        out = []
+        for row in rows:
+            item = dict(row)
+            try:
+                item["metadata"] = json.loads(item["metadata"] or "{}")
+            except json.JSONDecodeError:
+                item["metadata"] = None
+            out.append(item)
+        return out
+
     def update_metadata(self, message_id: int, metadata: dict) -> None:
         """整块改写一条消息的 metadata（补媒体链接用），不动内容与水位。"""
         with self._write_lock, self.connect() as conn:

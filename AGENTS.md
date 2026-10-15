@@ -68,12 +68,36 @@ cd web && npm run dev                   # 前端热更新，/api 代理到 8765
   预览图。**没在微信里点开过的图片只有 `_t.dat`**，而它能单字节 XOR 解出来——
   所以预览图必须当可用素材，不能判成"本机没有"（实测 23 张里 8 张只有预览图）。
 - **采集那一刻文件可能还没落盘**（微信翻到才下预览图）。只提取一次就永久缺失，
-  所以 API 读取时凭 `media_md5` 再补一次链接（`api.py:_link_media`）——纯读文件
-  系统与工程缓存，不碰上游库，因此不必走采集线程。
+  所以凭 `media_md5` 的补链接是**每轮都做**的后台活（`wechat.py:_catchup_images`，
+  只认关注会话）；API 侧只读库里已有的 `local_file`，**读取时不再解密图片**。
 - 库里**只存相对链接** `<账号指纹>/<会话>_<sort_seq>[_档位].<ext>`，不存二进制；
   读取要经 `safe_media_path` 收口（最多两段、拒绝对称路径/盘符/UNC/`..`）。
 - 上游 `MediaDownloader` 的 `_image_files` / `decrypt_image` / `_write_decrypted`
-  是这里复用的三个私有方法（定位、解密、按文件头判格式落盘 + wxgf→jpg）。
+  是这里复用的三个私有方法（定位、解密、按文件头判格式落盘 + wxgf→jpg）；
+  弄钥匙再加四个：`_derive_cfg_key` / `_load_persisted_key` /
+  `_scan_aes_key(monitor=False)` / `_persist_key`，注入槽位是 `_image_key`。
+
+
+## 钥匙与线程：谁干什么（"一直转圈"那轮的定论）
+- **图片 AES 钥匙和数据库钥匙不是一回事**：后者有 `keys.json` 落盘副本，微信没开也能读文字；
+  前者要靠微信运行时的 `cfg_dword` 现推（`MD5(str(cfg)+wxid)[:16]`），微信没开时上游
+  `extract_master_key()` 只会便宜地返回 None。**服务先启动、微信后启动 → 文字可用、图片没钥匙。**
+- 上游"没钥匙"的分支不是报错，是**去整块扫 Weixin.exe 内存**（`_resolve_aes_key` →
+  `_scan_aes_key(monitor=True)`：扫不到每 2 秒重扫、最长 120 秒）。Python 一个进程只有
+  一条线路能真正干活（GIL），它在谁的线路上扫内存，谁的接口就跟着饿死——当年
+  `api.py:_link_media` 在请求线程里解密，于是消息列表**和设置页**一起转圈。
+- **所以：请求线程一律纯读**（只读自己的库，毫秒级返回）；`ImageStore` 有钥匙闸门，
+  `key_ready` 为假时 `attach()` 直接返回 None，连 `decrypt_image` 都不进，任何调用方
+  都不可能顺手触发扫描。补钥匙只允许采集线程调 `prepare_key()`，且**必须 `monitor=False`**
+  （只扫一次，扫到就落盘 `image_keys.json`，之后免费派生）。
+- 采集线程每轮多做两件：`_catchup_images()`（关注会话里缺链接的图片行，限量 30、新→旧）、
+  `_ensure_media_key()`（冷却 120 秒；`cfg_dword` 缺失时**重连一次**取 cfg，而不是白扫内存）。
+- 连接失败**不退出线程**：状态 `waiting_wechat`，按 10 秒冷却自己重试，用户后开微信不需要
+  重启服务。未连接时命令必须**立刻**抛中文错误（`_request` 判 `self._wx is None`）——
+  只判"线程活着"不够，线程活着但没连上时命令进队列没人执行，网页会干等 90 秒超时。
+  `catalog()` 的回落判据同样是"连着微信"而不是"线程活着"。
+- 补图查询 `Database.pending_images()` 用 `instr` 粗筛而**不用 `json_extract`**：metadata
+  是文本列，一行坏 JSON 会让 `json_extract` 抛错，而这条查询每轮都跑。
 
 
 ## 动画表情：只留 `[动画表情]` 占位（用户 2026-10-15 定）

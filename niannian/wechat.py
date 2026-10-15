@@ -18,6 +18,7 @@ import queue
 import re
 import shutil
 import sqlite3
+import subprocess
 import sys
 import tempfile
 import threading
@@ -39,6 +40,38 @@ GROUP_PREFIX = re.compile(r"^(wxid_[^:\s<>]+):\s*\n")
 # 群自己发的系统行（进群提示等）用群 ID 当前缀，它不是"某个人"，只剥不认。
 ROOM_PREFIX = re.compile(r"^\d+@chatroom:\s*\n")
 PACKED_COLUMNS = "sort_seq, local_id, packed_info_data"
+# 每轮补图片的行数上限：一条图片行要走"扫目录 + 解密 + 落盘"，几万条历史不能一口气做完。
+IMAGE_CATCHUP_LIMIT = 30
+# 连不上微信时多久再试一次。不是错误就躺平的：用户随时可能才把微信打开。
+ATTACH_RETRY_SECONDS = 10.0
+# 弄图片钥匙的冷却：一次内存扫描是几十秒级的重活，不能每轮都做。
+MEDIA_KEY_RETRY_SECONDS = 120.0
+
+
+def wechat_running() -> bool:
+    """微信进程在不在：只查进程表，不驱动界面、不发消息。
+
+    ``tasklist`` 在中文 Windows 上输出 GBK，不显式指定编码时 UTF-8 模式下解码失败
+    会让 stdout 变成 None（上游实测踩过，这里同样处理）。
+    """
+    try:
+        done = subprocess.run(
+            ["tasklist", "/FI", "IMAGENAME eq Weixin.exe", "/FO", "CSV", "/NH"],
+            capture_output=True, text=True, encoding="gbk", errors="replace",
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    except OSError:
+        return False
+    for line in (done.stdout or "").strip().splitlines():
+        parts = line.strip('"').split('","')
+        if len(parts) >= 2 and parts[1].isdigit():
+            return True
+    return False
+
+
+def session_user(session_id: str) -> str:
+    """会话主键 ``wechat:<账号指纹>:<微信原始ID>`` 里的第三段。"""
+    parts = str(session_id).split(":", 2)
+    return parts[2] if len(parts) == 3 else ""
 
 
 def media_hash_map(conn: sqlite3.Connection, table: str, wanted: set) -> dict:
@@ -340,7 +373,11 @@ def open_isolated_db(root: Path, settings: dict):
 
 
 class Collector:
-    """单采集线程 + 命令队列。状态机：stopped→starting→connected／error。"""
+    """单采集线程 + 命令队列。状态机：stopped→starting→connected／waiting_wechat／error。
+
+    连不上微信**不会让线程退出**：置 ``waiting_wechat`` 后由轮询按冷却重试，
+    用户把微信打开就自动接上，不需要重启服务。
+    """
 
     def __init__(self, db: Database, settings: dict, root: Path):
         self.db = db
@@ -357,12 +394,15 @@ class Collector:
         }
         self._wx = None
         self._media = None
+        self._next_attach = 0.0
+        self._next_key_at = 0.0
 
     # ------------------------------------------------------------ 对外接口
     @property
     def media(self):
         """图片链接解析器；未连接时为 None（此时库里已有链接仍可由 API 使用）。"""
         return self._media
+
     def update_settings(self, values: dict) -> dict:
         """把可以热更的键推进采集器自己的副本。
 
@@ -403,8 +443,11 @@ class Collector:
         return self.status()
 
     def catalog(self) -> list[dict]:
-        """会话目录：线程活着就现场同步，否则回退到本地已存目录。"""
-        if self._thread and self._thread.is_alive():
+        """会话目录：连着微信就现场同步，否则回退到本地已存目录。
+
+        判据是"有没有连上"而不是"线程活着"：线程会在微信没开时照常活着等它启动。
+        """
+        if self._thread and self._thread.is_alive() and self._wx is not None:
             future = self._request("catalog")
             return future.result(timeout=90)
         return self.db.list_sessions(account=self._state["account"])
@@ -414,8 +457,6 @@ class Collector:
 
         必须在采集线程上跑：只有它碰上游库。深历史可能读很久，超时给到 300 秒。
         """
-        if not (self._thread and self._thread.is_alive()):
-            raise RuntimeError("微信采集器未运行。")
         future = self._request("reimport", session_id, int(limit))
         return future.result(timeout=300)
 
@@ -427,33 +468,16 @@ class Collector:
     def _request(self, operation: str, *args) -> Future:
         if not (self._thread and self._thread.is_alive()):
             raise RuntimeError("微信采集器未运行。")
+        if self._wx is None:
+            # 线程活着但没连上时，命令永远不会被执行：立刻报错，不能让请求干等超时
+            raise RuntimeError("微信还没连上：请打开微信，采集器会自动接上。")
         future = Future()
         self._commands.put((operation, args, future))
         return future
 
     def _run(self):
         try:
-            self._wx = open_isolated_db(self.root, self.settings)
-            info = self._wx.get_self_info() or {}
-            account = info.get("username") or self._wx.wxid
-            if not account:
-                raise RuntimeError("无法确定当前微信账号。")
-            self._state_update(account=account)
-            from wechatauto.media import MediaDownloader
-            self._media = ImageStore(MediaDownloader(self._wx), self.root, account)
-            self._sync_catalog()
-            self._state_update(state="connected", error=None)
-        except Exception as exc:
-            message = str(exc).strip() or type(exc).__name__
-            self._state_update(state="error", error=message[:300])
-            log.warning("微信连接失败：%s", message)
-            self._wx = None
-            self._media = None
-            self._drain_commands()
-            if self._stop.is_set():
-                self._state_update(state="stopped")
-            return
-        try:
+            self._attach()
             while not self._stop.is_set():
                 deadline = time.monotonic() + max(1.0, float(
                     self.settings.get("poll_seconds", 3.0)))
@@ -465,19 +489,62 @@ class Collector:
                     self._execute(operation, args, future)
                 if self._stop.is_set():
                     break
+                if self._wx is None:
+                    self._try_reattach()
+                    continue
                 try:
                     self._sync_catalog()
                     self._poll_followed()
+                    self._catchup_images()
+                    self._ensure_media_key()
                     self._state_update(state="connected", error=None,
                                        last_sync_at=now_utc())
                 except Exception as exc:
                     self._state_update(state="error", error=str(exc)[:300])
                     log.warning("采集轮次失败：%s", exc)
         finally:
-            self._wx = None
-            self._media = None
+            self._detach()
             self._drain_commands()
             self._state_update(state="stopped")
+
+    def _build_media(self, account: str) -> None:
+        """把上游的图片解密器包成本工程的 ImageStore（钥匙闸门在它里面）。"""
+        from wechatauto.media import MediaDownloader
+        self._media = ImageStore(MediaDownloader(self._wx), self.root, account)
+
+    def _detach(self) -> None:
+        self._wx = None
+        self._media = None
+
+    def _try_reattach(self) -> None:
+        """没连上时按冷却重试：用户随时可能才把微信打开。"""
+        if time.monotonic() < self._next_attach:
+            return
+        self._attach()
+
+    def _attach(self) -> bool:
+        """连一次微信库。失败不抛出、不退出线程，只改状态并给出下次重试时间。"""
+        try:
+            self._wx = open_isolated_db(self.root, self.settings)
+            info = self._wx.get_self_info() or {}
+            account = info.get("username") or self._wx.wxid
+            if not account:
+                raise RuntimeError("无法确定当前微信账号。")
+            self._state_update(account=account)
+            self._build_media(account)
+            self._sync_catalog()
+            self._state_update(state="connected", error=None, last_sync_at=now_utc())
+            return True
+        except Exception as exc:
+            message = str(exc).strip() or type(exc).__name__
+            self._detach()
+            self._next_attach = time.monotonic() + ATTACH_RETRY_SECONDS
+            # "微信没开"和"微信开着但读不通"是两件事，界面上要说不同的话
+            state = "waiting_wechat" if not wechat_running() else "error"
+            self._state_update(state=state, error=message[:300])
+            log.warning("微信连接失败（%s）：%s", state, message)
+            self._drain_commands()
+            return False
 
     def _execute(self, operation: str, args: tuple, future: Future):
         try:
@@ -542,6 +609,56 @@ class Collector:
                     break
             if collected and not self._stop.is_set():
                 self._store(session, collected, watermark)
+
+    def _catchup_images(self) -> int:
+        """把"采集那一刻本机还没文件"的图片行补上链接，每轮限量。
+
+        微信要翻到那条聊天记录才会把预览图落到盘上，所以这类行会一直缺
+        ``local_file``。补链接的活**只在这里做**：网页请求线程一旦去解密图片，就可能
+        连带触发"翻微信内存找钥匙"，那会把整个服务冻住（实测界面转圈两分钟）。
+        """
+        media = self._media
+        if media is None:
+            return 0
+        done = 0
+        for row in self.db.pending_images(IMAGE_CATCHUP_LIMIT):
+            if self._stop.is_set():
+                break
+            meta = row.get("metadata")
+            if not meta or (meta.get("attachment") or {}).get("kind") != "image":
+                continue
+            digest = str(meta.get("media_md5") or "")
+            if not digest or meta.get("local_file"):
+                continue
+            user = session_user(row["session_id"])
+            linked = media.attach(user, digest, f"{user}_{row['sort_seq']}")
+            if not linked:
+                continue
+            meta.update(linked)
+            self.db.update_metadata(row["id"], meta)
+            done += 1
+        return done
+
+    def _ensure_media_key(self) -> None:
+        """图片钥匙没在手就补一次，按冷却限流；**只在采集线程做**。
+
+        连接是在微信没开的时候建立的，``cfg_dword`` 压根没取到，这时扫内存也派生
+        不出钥匙——正确做法是重连一次，把 cfg 编号和钥匙一起拿回来。
+        """
+        media = self._media
+        if media is None or media.key_ready:
+            return
+        now = time.monotonic()
+        if now < self._next_key_at:
+            return
+        self._next_key_at = now + MEDIA_KEY_RETRY_SECONDS
+        if not wechat_running():
+            return
+        if getattr(self._wx, "cfg_dword", None) is None:
+            self._detach()
+            self._attach()
+            return
+        media.prepare_key()
 
     def _history_limit(self, session: dict) -> int:
         """这个会话该导多少条：会话自己设过的优先，没设过才跟随全局默认。"""

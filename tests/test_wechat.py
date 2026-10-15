@@ -241,3 +241,309 @@ def test_open_isolated_db_without_wechat_reports_clearly(tmp_path):
         raise AssertionError("应当失败")
     except RuntimeError as exc:
         assert "微信" in str(exc)
+
+
+class FakeImageStore:
+    """只测"补链接"这条接线：真解密要读微信本机文件，测试里不碰。"""
+
+    def __init__(self, linked=True):
+        self.calls = []
+        self._linked = linked
+
+    def attach(self, user, digest, stem):
+        self.calls.append((user, digest, stem))
+        if not self._linked:
+            return None
+        return {"local_file": f"scope/{stem}.jpg", "tier": "mid",
+                "tier_label": "本机图", "bytes": 4096}
+
+
+def make_image_db(tmp_path, monitored=True):
+    from niannian.storage import Database
+
+    store = Database(tmp_path / "t.db")
+    store.init()
+    sid = session_key(ACCOUNT, "wxid_other")
+    store.sync_catalog(ACCOUNT, [{"id": sid, "username": "wxid_other", "name": "老王",
+                                  "unread": 0, "last_message_at": None}])
+    if monitored:
+        store.set_monitored(sid, True)
+    store.ingest([{**normalize_message(ACCOUNT, "wxid_other", "老王",
+                                        make_message(content="看图"), {}),
+                   "source_id": "wechat:img1", "sort_seq": 500,
+                   "metadata": {"attachment": {"kind": "image"},
+                                "media_md5": "a" * 32, "local_id": 7}}])
+    return store, sid
+
+
+def collector_for(store, tmp_path, media):
+    collector = Collector(store, {"poll_seconds": 1.0}, tmp_path)
+    collector._state["account"] = ACCOUNT
+    collector._media = media
+    return collector
+
+
+def test_catchup_images_links_and_writes_metadata(tmp_path):
+    """图片链接由采集线程每轮补：凭 media_md5 定位，落名带会话与序号，回写 metadata。"""
+    store, sid = make_image_db(tmp_path)
+    media = FakeImageStore()
+    assert collector_for(store, tmp_path, media)._catchup_images() == 1
+    assert media.calls == [("wxid_other", "a" * 32, "wxid_other_500")]
+    row = store.messages_page(sid, limit=10)["items"][0]
+    assert row["metadata"]["local_file"] == "scope/wxid_other_500.jpg"
+    assert row["metadata"]["tier_label"] == "本机图"
+    # 补好的行下一轮不该再出现在清单里
+    assert store.pending_images(limit=10) == []
+
+
+def test_catchup_images_keeps_row_pending_when_file_not_here_yet(tmp_path):
+    """本机一份都没有时不动 metadata：文件可能之后才落盘，下一轮还会再试。"""
+    store, sid = make_image_db(tmp_path)
+    assert collector_for(store, tmp_path, FakeImageStore(linked=False))._catchup_images() == 0
+    assert [row["sort_seq"] for row in store.pending_images(limit=10)] == [500]
+
+
+def test_catchup_images_does_nothing_before_connected(tmp_path):
+    """没连上微信（media=None）就安静跳过，不抛错也不把整轮采集带崩。"""
+    store, _ = make_image_db(tmp_path)
+    assert collector_for(store, tmp_path, None)._catchup_images() == 0
+
+
+def test_catchup_images_skips_unfollowed_sessions(tmp_path):
+    """没关注的会话不进补图清单：补图范围必须与采集范围一致。"""
+    store, _ = make_image_db(tmp_path, monitored=False)
+    media = FakeImageStore()
+    assert collector_for(store, tmp_path, media)._catchup_images() == 0
+    assert media.calls == []
+
+
+class FakeWX:
+    """够用的假上游库：_attach 只要账号、昵称表和会话目录。"""
+
+    wxid = "wxid_me"
+    account = "wxid_me_13a7"
+    cfg_dword = 4096
+
+    def get_self_info(self):
+        return {"username": "wxid_me", "nick_name": "我"}
+
+    def nickname_map(self, refresh=False):
+        return {"wxid_other": "老王"}
+
+    def get_sessions(self, limit=100):
+        return []
+
+
+def bare_collector(tmp_path):
+    from niannian.storage import Database
+
+    store = Database(tmp_path / "t.db")
+    store.init()
+    return Collector(store, {"poll_seconds": 1.0}, tmp_path)
+
+
+def test_attach_failure_waits_for_wechat_and_can_recover(tmp_path, monkeypatch):
+    """连不上不再退出线程：置 waiting_wechat，等微信打开后自己接上。"""
+    import niannian.wechat as wxmod
+
+    state = {"opened": False}
+
+    def fake_open(root, settings):
+        if not state["opened"]:
+            raise RuntimeError("未检测到 Weixin.exe，请先登录微信再运行")
+        return FakeWX()
+
+    monkeypatch.setattr(wxmod, "open_isolated_db", fake_open)
+    monkeypatch.setattr(wxmod, "wechat_running", lambda: False)
+    collector = bare_collector(tmp_path)
+
+    assert collector._attach() is False
+    status = collector.status()
+    assert status["state"] == "waiting_wechat"
+    assert "Weixin" in status["error"]
+    assert collector._wx is None and collector._media is None
+
+    state["opened"] = True                      # 用户把微信打开了
+    assert collector._attach() is True
+    status = collector.status()
+    assert status["state"] == "connected" and status["account"] == "wxid_me"
+
+
+def test_attach_failure_with_wechat_running_is_error(tmp_path, monkeypatch):
+    """微信开着却读不通是真故障，界面要说"异常"，不能含糊成"等微信启动"。"""
+    import niannian.wechat as wxmod
+
+    def fake_open(root, settings):
+        raise RuntimeError("数据库无可用密钥: contact/contact.db")
+
+    monkeypatch.setattr(wxmod, "open_isolated_db", fake_open)
+    monkeypatch.setattr(wxmod, "wechat_running", lambda: True)
+    collector = bare_collector(tmp_path)
+
+    assert collector._attach() is False
+    assert collector.status()["state"] == "error"
+
+
+def test_reattach_respects_cooldown(tmp_path, monkeypatch):
+    """没连上时按冷却重试，不是每轮都重开一遍微信库。"""
+    import time as _time
+
+    import niannian.wechat as wxmod
+
+    calls = {"n": 0}
+
+    def fake_open(root, settings):
+        calls["n"] += 1
+        raise RuntimeError("未检测到 Weixin.exe")
+
+    monkeypatch.setattr(wxmod, "open_isolated_db", fake_open)
+    monkeypatch.setattr(wxmod, "wechat_running", lambda: False)
+    collector = bare_collector(tmp_path)
+    collector._attach()
+    assert calls["n"] == 1
+
+    collector._try_reattach()                   # 冷却未到：一次都不重试
+    assert calls["n"] == 1
+
+    collector._next_attach = _time.monotonic() - 1
+    collector._try_reattach()
+    assert calls["n"] == 2
+
+
+def test_commands_fail_fast_when_disconnected(tmp_path):
+    """线程活着但没连上：命令立刻报错，不能让网页请求干等 90 秒超时。"""
+    import threading
+
+    collector = bare_collector(tmp_path)
+    holder = threading.Event()
+    collector._thread = threading.Thread(target=holder.wait, daemon=True)
+    collector._thread.start()
+    try:
+        assert collector._wx is None
+        assert collector.catalog() == []        # 回落到本地已存目录，不排队
+        try:
+            collector.reimport("wechat:sc:wxid_other", 10)
+            raise AssertionError("应当立刻报错")
+        except RuntimeError as exc:
+            assert "微信还没连上" in str(exc)
+    finally:
+        holder.set()
+
+
+def test_reader_thread_recovers_after_wechat_starts(tmp_path, monkeypatch):
+    """端到端守这条：微信后启动，采集线程自己接上，不需要重启服务。"""
+    import time as _time
+
+    import niannian.wechat as wxmod
+
+    calls = {"n": 0}
+
+    def fake_open(root, settings):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("未检测到 Weixin.exe，请先登录微信再运行")
+        return FakeWX()
+
+    monkeypatch.setattr(wxmod, "open_isolated_db", fake_open)
+    monkeypatch.setattr(wxmod, "wechat_running", lambda: False)
+    monkeypatch.setattr(wxmod, "ATTACH_RETRY_SECONDS", 0.2)
+    monkeypatch.setattr(Collector, "_build_media", lambda self, account: None)
+
+    collector = bare_collector(tmp_path)
+    collector.start()
+    try:
+        deadline = _time.monotonic() + 6.0
+        while _time.monotonic() < deadline and collector.status()["state"] != "connected":
+            _time.sleep(0.05)
+        assert collector.status()["state"] == "connected"
+        assert calls["n"] >= 2                  # 是同一条线程重试上来的，不是重启
+        assert collector.status()["running"] is True
+    finally:
+        collector.stop()
+
+
+class FakeKeyMedia:
+    def __init__(self, ready=False):
+        self.key_ready = ready
+        self.prepared = 0
+
+    def prepare_key(self):
+        self.prepared += 1
+        self.key_ready = True
+
+
+class FakeWXNoCfg(FakeWX):
+    """连接建立在微信没开的时候：库能读，但 cfg 编号压根没取到。"""
+
+    cfg_dword = None
+
+
+def test_media_key_reattaches_when_cfg_was_never_taken(tmp_path, monkeypatch):
+    """cfg 编号缺失时不该去扫内存（扫了也派生不出钥匙），要的是重连一次。"""
+    import niannian.wechat as wxmod
+
+    monkeypatch.setattr(wxmod, "wechat_running", lambda: True)
+    collector = bare_collector(tmp_path)
+    collector._wx = FakeWXNoCfg()
+    media = FakeKeyMedia()
+    collector._media = media
+    rebuilt = []
+    monkeypatch.setattr(collector, "_detach", lambda: rebuilt.append("detach"))
+    monkeypatch.setattr(collector, "_attach", lambda: rebuilt.append("attach"))
+
+    collector._ensure_media_key()
+
+    assert rebuilt == ["detach", "attach"]
+    assert media.prepared == 0
+
+
+def test_media_key_waits_for_wechat_without_probing_every_round(tmp_path, monkeypatch):
+    """微信没开：什么都不做，但要定好冷却，别每轮都去问一次进程表。"""
+    import time
+
+    import niannian.wechat as wxmod
+
+    monkeypatch.setattr(wxmod, "wechat_running", lambda: False)
+    collector = bare_collector(tmp_path)
+    collector._wx = FakeWX()
+    media = FakeKeyMedia()
+    collector._media = media
+
+    collector._ensure_media_key()
+    assert media.prepared == 0
+    assert collector._next_key_at > time.monotonic()
+
+
+def test_media_key_prepare_is_throttled(tmp_path, monkeypatch):
+    """扫内存是几十秒级重活：一次尝试之后要等冷却，不能每轮都扫。"""
+    import niannian.wechat as wxmod
+
+    monkeypatch.setattr(wxmod, "wechat_running", lambda: True)
+    collector = bare_collector(tmp_path)
+    collector._wx = FakeWX()
+    media = FakeKeyMedia()
+    collector._media = media
+
+    collector._ensure_media_key()
+    collector._ensure_media_key()                # 冷却未到
+    assert media.prepared == 1
+
+    media.key_ready = False
+    collector._next_key_at = 0.0
+    collector._ensure_media_key()
+    assert media.prepared == 2
+
+
+def test_media_key_is_untouched_when_already_ready(tmp_path, monkeypatch):
+    """钥匙已在手就一个字都不做：不探进程、不扫内存，轮询照旧读文字。"""
+    import niannian.wechat as wxmod
+
+    probes = []
+    monkeypatch.setattr(wxmod, "wechat_running", lambda: probes.append(1) or True)
+    collector = bare_collector(tmp_path)
+    collector._wx = FakeWX()
+    collector._media = FakeKeyMedia(ready=True)
+
+    collector._ensure_media_key()
+
+    assert probes == []

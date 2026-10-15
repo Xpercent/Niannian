@@ -74,16 +74,68 @@ def safe_media_path(base: Path, stored: str) -> Path | None:
 
 
 class ImageStore:
-    """把微信本机的 .dat 解密成本工程媒体目录里的图片，返回可入库的相对链接。"""
+    """把微信本机的 .dat 解密成本工程媒体目录里的图片，返回可入库的相对链接。
+
+    **钥匙闸门**：图片 AES 钥匙没在手之前，:meth:`attach` 一律不解密。上游一旦发现
+    没钥匙就会去整块扫微信进程内存（几十秒级，且 Python 的 GIL 会让整个服务冻住），
+    那种事只允许采集线程显式叫 :meth:`prepare_key` 去做，不能由一次页面读取触发。
+    """
 
     def __init__(self, downloader, root: Path, account: str):
         self._media = downloader
         self.account = account
         self.directory = media_root(root) / media_scope(account)
         self.directory.mkdir(parents=True, exist_ok=True)
+        self._key_ready = self._adopt(self._free_key())
+
+    @property
+    def key_ready(self) -> bool:
+        """图片钥匙是否已在手——没在手就绝不碰解密。"""
+        return self._key_ready
+
+    def _free_key(self) -> str:
+        """不用扫内存就能拿到的钥匙：cfg 编号派生 → 上次扫下来落盘的缓存。"""
+        try:
+            derived = self._media._derive_cfg_key()
+            if derived:
+                return str(derived[0])
+            return str(self._media._load_persisted_key() or "")
+        except Exception:
+            return ""
+
+    def _adopt(self, aes_key: str) -> bool:
+        """把钥匙放进上游的"显式注入"槽位，之后解密就不会再去要钥匙。"""
+        if not aes_key:
+            return False
+        self._media._image_key = aes_key
+        return True
+
+    def prepare_key(self) -> bool:
+        """补齐图片钥匙：免费的两条路都走不通时**只扫一次**进程内存并落盘。
+
+        刻意不用上游的 monitor 模式（每 2 秒重扫、最长 120 秒）——扫不到就交回
+        False，由调用方按冷却决定何时再试。只在采集线程调用。
+        """
+        if self._key_ready or self._adopt(self._free_key()):
+            self._key_ready = True
+            return True
+        try:
+            found = self._media._scan_aes_key(monitor=False)
+        except Exception:
+            return False
+        if not self._adopt(str(found or "")):
+            return False
+        try:
+            self._media._persist_key(found)        # 下次免扫
+        except Exception:
+            pass
+        self._key_ready = True
+        return True
 
     def attach(self, user: str, digest: str, stem: str) -> dict | None:
         """按文件哈希取本机最高一档解密；本机一份都没有返回 None。"""
+        if not self._key_ready:
+            return None
         if not digest:
             return None
         files = self._media._image_files(user, digest)

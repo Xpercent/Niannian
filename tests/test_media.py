@@ -42,6 +42,15 @@ def test_image_store_writes_inside_its_directory(tmp_path, monkeypatch):
     from niannian.media import ImageStore
 
     class FakeMedia:
+        def __init__(self):
+            self._image_key = None
+
+        def _derive_cfg_key(self):
+            return ("k" * 32, 0x88)      # cfg 在手：钥匙免费，构造时即就绪
+
+        def _load_persisted_key(self):
+            return None
+
         def _image_files(self, user, digest):
             return {"thumb": (f"/fake/{digest}_t.dat", 4096)}
 
@@ -55,9 +64,101 @@ def test_image_store_writes_inside_its_directory(tmp_path, monkeypatch):
             return str(out)
 
     store = ImageStore(FakeMedia(), tmp_path, "wxid_me")
+    assert store.key_ready is True
     linked = store.attach("room@chatroom", "ab" * 16, "room@chatroom_123")
     assert linked["tier"] == "thumb" and linked["tier_label"] == "预览图"
     assert linked["local_file"].startswith(f"{media_scope('wxid_me')}/")
     assert (tmp_path / "data" / "wechat" / "media" / linked["local_file"]).is_file()
     assert store.resolve(linked["local_file"]) is not None
     assert store.attach("room@chatroom", "", "x") is None
+
+
+class GuardedMedia:
+    """上游替身：把"要钥匙"的三个入口都记下来，用来证明解密不会被顺手触发扫描。"""
+
+    def __init__(self, cfg_key=None, persisted=None, scanned=None):
+        self._image_key = None
+        self.calls = []
+        self._cfg_key = cfg_key
+        self._persisted = persisted
+        self._scanned = scanned
+
+    def _derive_cfg_key(self):
+        self.calls.append("derive")
+        return self._cfg_key
+
+    def _load_persisted_key(self):
+        self.calls.append("persisted")
+        return self._persisted
+
+    def _scan_aes_key(self, monitor=False):
+        self.calls.append(f"scan:{monitor}")
+        return self._scanned
+
+    def _persist_key(self, key):
+        self.calls.append(f"persist:{key}")
+
+    def _image_files(self, user, digest):
+        return {"mid": (f"/fake/{digest}.dat", 4096)}
+
+    def decrypt_image(self, path):
+        self.calls.append("decrypt")
+        return b"\xff\xd8\xff\xe0"
+
+    def _write_decrypted(self, data, stem, save_dir):
+        os.makedirs(save_dir, exist_ok=True)
+        out = Path(save_dir) / (stem + ".jpg")
+        out.write_bytes(data)
+        return str(out)
+
+
+def test_attach_refuses_without_key_and_never_reaches_the_scanner(tmp_path):
+    """没钥匙就是不解密：上游那条"没钥匙就去扫内存"的路一条都不能走。
+
+    这条闸门是转圈两分钟的根治点——网页请求线程也会调 attach，但绝不允许它
+    连带触发进程内存扫描。
+    """
+    from niannian.media import ImageStore
+
+    media = GuardedMedia()
+    store = ImageStore(media, tmp_path, "wxid_me")
+    assert store.key_ready is False
+    assert store.attach("wxid_a", "ab" * 16, "wxid_a_1") is None
+    assert "decrypt" not in media.calls and not any("scan" in c for c in media.calls)
+
+
+def test_prepare_key_scans_once_without_monitor_and_persists(tmp_path):
+    """补钥匙时扫内存只扫一次（monitor=False），扫到就落盘，之后不再扫。"""
+    from niannian.media import ImageStore
+
+    media = GuardedMedia(scanned="s" * 32)
+    store = ImageStore(media, tmp_path, "wxid_me")
+    assert store.prepare_key() is True
+    assert "scan:False" in media.calls and "scan:True" not in media.calls
+    assert "persist:" + "s" * 32 in media.calls
+    assert media._image_key == "s" * 32
+    assert store.attach("wxid_a", "ab" * 16, "wxid_a_1")["tier"] == "mid"
+    assert store.prepare_key() is True                    # 已就绪，不再扫
+    assert media.calls.count("scan:False") == 1
+
+
+def test_prepare_key_keeps_the_gate_closed_when_nothing_is_found(tmp_path):
+    """扫不到就照旧关着：宁可显示"本机暂无"，也不让请求线程去反复扫内存。"""
+    from niannian.media import ImageStore
+
+    media = GuardedMedia(scanned=None)
+    store = ImageStore(media, tmp_path, "wxid_me")
+    assert store.prepare_key() is False
+    assert store.key_ready is False
+    assert store.attach("wxid_a", "ab" * 16, "wxid_a_1") is None
+
+
+def test_key_from_cache_avoids_any_scan(tmp_path):
+    """上次扫到的钥匙落盘后，这一轮直接复用，一次内存都不扫。"""
+    from niannian.media import ImageStore
+
+    media = GuardedMedia(persisted="p" * 32)
+    store = ImageStore(media, tmp_path, "wxid_me")
+    assert store.key_ready is True
+    assert not any("scan" in c for c in media.calls)
+    assert media._image_key == "p" * 32

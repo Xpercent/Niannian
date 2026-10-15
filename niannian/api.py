@@ -40,12 +40,6 @@ def project_root() -> Path:
     return Path(__file__).resolve().parent.parent
 
 
-def session_user(session_id: str) -> str:
-    """会话主键 ``wechat:<账号指纹>:<微信原始ID>`` 里的第三段。"""
-    parts = str(session_id).split(":", 2)
-    return parts[2] if len(parts) == 3 else ""
-
-
 def port_busy(host: str, port: int) -> bool:
     """试绑定一下判断端口是否已被占用。
 
@@ -131,7 +125,6 @@ def create_app(root: Path | None = None) -> FastAPI:
         page = store.messages_page(session_id, limit=limit,
                                    before_seq=before_seq, before_id=before_id)
         for item in page["items"]:
-            _link_media(item)
             item["type_label"] = type_label(item)
         _attach_quote_targets(session_id, page["items"])
         return page
@@ -153,27 +146,9 @@ def create_app(root: Path | None = None) -> FastAPI:
             item["quote_target"] = ({"message_id": target, "sort_seq": seq}
                                     if target else None)
 
-    def _link_media(item: dict) -> None:
-        """采集时本机还没有文件的图片，读取时凭 media_md5 再补一次链接。
-
-        微信会在你翻聊天记录、图片预览图落到磁盘之后才有文件；只在采集那一刻
-        提取一次，这些图就永远显示"本机没有"。这里只读文件系统与工程缓存，
-        不碰上游库，因此不需要走采集线程。
-        """
-        media = collector.media
-        if media is None:
-            return
-        meta = item.get("metadata") or {}
-        if ((meta.get("attachment") or {}).get("kind") != "image"
-                or meta.get("local_file") or not meta.get("media_md5")):
-            return
-        user = session_user(item["session_id"])
-        linked = media.attach(user, meta["media_md5"],
-                              f"{user}_{item['sort_seq']}")
-        if linked:
-            meta.update(linked)
-            store.update_metadata(item["id"], meta)
-
+    # 消息列表是**纯读**：只把自己库里的行取出来。缺链接的图片由采集线程每轮补齐
+    # （wechat.py:_catchup_images），这里一旦去解密图片就可能连带触发"翻微信内存
+    # 找钥匙"，那会把整个服务冻住——所以这条线路上不碰 media，也不碰上游库。
     @app.get("/media/{name:path}")
     def api_media(name: str):
         path = safe_media_path(media_root(root), name)

@@ -149,3 +149,55 @@ def test_monitored_filter_and_counts(tmp_path):
     rows = db.list_sessions(monitored_only=True)
     assert [r["id"] for r in rows] == ["wechat:sc:u2"]
     assert db.counts()["monitored_count"] == 1
+
+
+def image_row(sid, source, seq, digest, linked=False):
+    meta = {"attachment": {"kind": "image"}, "media_md5": digest, "local_id": seq}
+    if linked:
+        meta["local_file"] = f"scope/{source}.jpg"
+    row = payload(sid, source, sort=seq)
+    row["metadata"] = meta
+    return row
+
+
+def test_pending_images_only_unlinked_images_of_followed_sessions(tmp_path):
+    """补图队列：只收关注会话里"有哈希、还没链接"的图片行，新→旧。
+
+    这是采集线程每轮取的工作清单，范围必须与采集范围一致：不替用户没关注的会话
+    补图，也不能把已经补好的行反复重做。
+    """
+    db = make_db(tmp_path)
+    sid = seed(db)
+    other = seed(db, sid="wechat:sc:u2")
+    db.set_monitored(sid, True)
+    db.ingest([image_row(sid, "wechat:1", 300, "a" * 32),
+               image_row(sid, "wechat:2", 400, "b" * 32),
+               image_row(sid, "wechat:3", 500, "c" * 32, linked=True),
+               payload(other, "wechat:4", sort=900),
+               image_row(other, "wechat:5", 999, "d" * 32)])
+    got = db.pending_images(limit=10)
+    assert {(row["session_id"], row["sort_seq"]) for row in got} == {(sid, 400), (sid, 300)}
+    assert got[0]["sort_seq"] == 400                    # 新→旧：正在看的这一屏先补
+    assert got[0]["metadata"]["media_md5"] == "b" * 32
+    assert [row["sort_seq"] for row in db.pending_images(limit=1)] == [400]
+
+
+def test_pending_images_survives_broken_metadata(tmp_path):
+    """metadata 是文本列：一行坏 JSON 不能把每轮都要跑的补图查询整条炸掉。
+
+    所以粗筛用 ``instr`` 而不是 ``json_extract``；坏行交回来是 ``metadata=None``，
+    采集侧跳过它，别的好行照常处理。
+    """
+    db = make_db(tmp_path)
+    sid = seed(db)
+    db.set_monitored(sid, True)
+    db.ingest([image_row(sid, "wechat:1", 300, "a" * 32),
+               image_row(sid, "wechat:2", 400, "b" * 32)])
+    with db.connect() as conn:
+        conn.execute("""UPDATE messages SET metadata='{"attachment": {"kind": "image"}, '
+                        || '"media_md5": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"'
+                        WHERE source_id=?""", ("wechat:1",))
+    rows = db.pending_images(limit=10)
+    assert [row["sort_seq"] for row in rows] == [400, 300]
+    broken = next(row for row in rows if row["sort_seq"] == 300)
+    assert broken["metadata"] is None

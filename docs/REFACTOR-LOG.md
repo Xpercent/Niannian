@@ -685,3 +685,81 @@ master 回到 `da016d9`，**跳过**取图那一轮（`15b0080`），再把升�
 - 守门测试 `test_upstream_pin_resolves_senders_per_shard` 未受影响，仍 1 passed。
 - 全仓 `grep`：`attach_emoji` / `emoji_allowed` / `cdnurl` / `EMOJI_READ` 在
   `niannian/`、`web/src/`、`scripts/` 下**零命中**（只剩 fixture 注释与文档里的历史叙述）。
+
+## 阶段二·修 bug：图片解密下放轮询 + 微信后启动自动接上（2026-10-15）
+
+### 症状（用户报）
+
+微信没启动时先把服务开起来，随后再打开微信，前端**消息列表和设置页一起一直转圈**。
+
+### 真实机制（两条线索叠在一起）
+
+1. **钥匙分两把**。数据库钥匙（读文字）有落盘副本 `keys.json`，服务先启动也能连上；
+   图片 AES 钥匙要靠微信运行时的 `cfg_dword` 现推（`MD5(str(cfg)+wxid)[:16]`），
+   服务先启动时微信不在，`extract_master_key()` 便宜地返回 None → `cfg_dword=None`。
+2. **缺钥匙的分支不是"报错"，是"抢"**。上游 `MediaDownloader._resolve_aes_key()`
+   派生不出钥匙时走 `_scan_aes_key(monitor=True)`：整块读 Weixin.exe 内存、逐候选
+   AES 试解，扫不到每 2 秒重扫、最长 120 秒。
+3. 而这一串是在**回答网页请求的那条线路上**跑的（`api.py:_link_media` 读取时顺便补
+   图片链接）。Python 一个进程只有一条线路能真正干活（GIL），它被内存扫描占住时
+   连"读自己库"的 `/api/settings` 都要排队 → 两个页面一起转圈。
+4. 附带两个同族坑：`open_isolated_db` 抛错后读线程 `return` 退出，用户之后打开微信
+   也接不上，只能重启服务；微信运行中新建 db 文件时上游 `_refresh_db_files()` 会在
+   采集线程里再来一次整进程扫描（`extract_keys()`）。
+
+### 这一轮定的形状
+
+| 事 | 放哪 | 频率 |
+|---|---|---|
+| 读文字消息 | 采集线程 | 每轮（现有逻辑不动） |
+| 定位/解密/落盘图片 | **采集线程**（`_catchup_images`） | 每轮，限量 30 行，只认关注会话，新→旧 |
+| 弄图片钥匙 | **采集线程**（`_ensure_media_key` → `prepare_key`） | 冷却 ≥120 秒，一次 `monitor=False` 扫描后落盘 |
+| 网页请求 | 纯读自己库 | 毫秒级，**不碰 media、不碰上游库** |
+
+- `api.py` 删掉 `_link_media` 与 `session_user`（会话 ID 解析归 `wechat.py`）。
+- `ImageStore` 加**钥匙闸门**：`key_ready` 为假时 `attach()` 直接返回 None，
+  连 `decrypt_image` 都不进 → 任何调用方（包括将来的新代码）都不可能顺手触发扫内存。
+  钥匙来源按"免费优先"：cfg 派生 → 上次扫下来的 `image_keys.json` → 才扫一次内存。
+- `Collector` 状态机加 `waiting_wechat`：连接失败**不退出线程**，轮询按 10 秒冷却重试；
+  "微信没开"和"微信开着但读不通"在界面上说不同的话（前者琥珀色提示，后者仍算异常）。
+- 未连接时命令**立刻**抛中文错误（`_request` 加 `self._wx is None` 判据）。原来只判
+  "线程活着"，线程活着但没连上时命令会进队列永远没人执行，网页干等 90 秒超时。
+- `catalog()` 的回落判据从"线程活着"改成"连着微信"；`reimport()` 不再自己重复判线程。
+- 补图查询用 `instr` 粗筛而**不用 `json_extract`**：metadata 是文本列，一行坏 JSON
+  会让 `json_extract` 抛错，而这条查询每轮都跑，不能因为一条写坏的行把整轮打死。
+
+### 存量：不用清库重采
+
+入库字段与解析都没动（`attachment`/`media_md5`/`local_file` 形状不变），只是**谁来补**
+换了。库里 8 条图片行 7 条已有链接、1 条待补，逐条与新逻辑一致。
+
+### 验证
+
+- `pytest` 92 passed / 6 skipped（skip 的是 `test_capture_replay.py`：本机
+  `data/fixtures/capture.db` 不在，按"fixture 缺失就 skip，不造数据刷绿"）。
+  新增 14 项，其中三条是守门：
+  - `test_messages_endpoint_never_touches_media`：把假采集器的 `media` 属性做成
+    "一读就炸"，跑消息列表接口 → 必须 200 且不碰图片（**谁把解密挪回请求线程就红**）。
+  - `test_attach_refuses_without_key_and_never_reaches_the_scanner`：闸门关闭时
+    `decrypt`/`scan` 一次都不许被叫到。
+  - `test_prepare_key_scans_once_without_monitor_and_persists`：扫内存必须
+    `monitor=False`（禁掉"每 2 秒重扫最长 120 秒"那条）且只扫一次。
+  - `test_reader_thread_recovers_after_wechat_starts`：同一条线程第一次连不上、
+    第二次连上 → 状态转 connected，证明不需要重启服务。
+- 真机（微信未开）：`/api/status` `/api/settings` `/api/sessions` 2–14 ms；
+  消息列表 4 ms；已链接图片 `/media` 取回 200（144 KB）；待补那 1 行保持待补、
+  没有产生任何内存扫描，`data/wechat/cache/*/image_keys.json` 未生成（符合预期）。
+- 真机（临时空目录跑独立采集器，模拟"本机读不到微信数据"）：状态 `waiting_wechat`、
+  线程 `running=true`、10 秒后再看仍在重试；`catalog()` 回落本地 `[]`；
+  `reimport()` 立刻返回"微信还没连上：请打开微信，采集器会自动接上。"；`stop()` → `stopped`。
+- 尚未跑真机的一条：**打开微信后钥匙自动补齐**（要用户实际操作微信）。逻辑路径是
+  下一轮 `wechat_running()=true` + `cfg_dword is None` → 重连取回 cfg → 免费派生钥匙
+  → `attach` 闸门开 → 待补图片行在随后几轮内链接上。
+- `npm run build`（含 `tsc --noEmit`）通过。
+
+### 顺带两处体验修正
+- 前端默认超时从 120 秒降到 20 秒（现在所有普通接口都是毫秒级纯读，等这么久只是
+  让人对着转圈干耗），会话目录单独给 100 秒（后端在采集线程上给 90 秒，前端必须更久），
+  重新导入仍是 310 秒不动。
+- 图片占位文案改成"这张图片还没准备好：打开微信、并在微信里翻到这条记录后会自动补上"——
+  闸门关闭时文件其实在盘上但没钥匙，旧文案"本机暂无该图片文件"在这种情况下是说假话。

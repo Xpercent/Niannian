@@ -17,10 +17,32 @@ function pageFromHash(): string {
 const stateLabels: Record<string, { text: string; tone: string }> = {
   connected: { text: "微信已连接", tone: "bg-emerald-600" },
   starting: { text: "连接中", tone: "bg-amber-500" },
+  // 微信没开不算故障：采集器会自己等它，界面要说"等着"而不是"坏了"
+  waiting_wechat: { text: "等待微信启动", tone: "bg-amber-500" },
   error: { text: "连接失败", tone: "bg-rose-500" },
   stopped: { text: "采集未运行", tone: "bg-stone-400" },
   stopping: { text: "正在停止", tone: "bg-stone-400" },
 };
+
+/** 顶部横条一次只说一件当下要做的事：等微信不是错误，读不到看板才是。 */
+function bannerFor(status: WechatStatus | null, loadError: string) {
+  if (status?.state === "waiting_wechat")
+    return {
+      tone: "border-amber-200 bg-amber-50 text-amber-800",
+      text: "未连接到微信：打开微信后会自动接上，不用重启服务。已入库的历史消息仍可正常查看。",
+    };
+  if (status?.state === "error")
+    return {
+      tone: "border-rose-100 bg-rose-50 text-rose-700",
+      text: `微信采集异常：${status.error || "未知错误"}`,
+    };
+  if (loadError)
+    return {
+      tone: "border-rose-100 bg-rose-50 text-rose-700",
+      text: `看板数据读取失败：${loadError}`,
+    };
+  return null;
+}
 
 export function App() {
   const [status, setStatus] = useState<WechatStatus | null>(null);
@@ -81,6 +103,7 @@ export function App() {
     text: status?.state || "未知",
     tone: "bg-stone-400",
   };
+  const banner = bannerFor(status, loadError);
 
   const reload = async () => {
     setRefreshing(true);
@@ -183,14 +206,12 @@ export function App() {
           </div>
         </header>
         <main className="px-4 py-6 md:px-8">
-          {(loadError || (status && status.state === "error")) && (
+          {banner && (
             <div
               role="alert"
-              className="mb-5 rounded-lg border border-rose-100 bg-rose-50 px-4 py-3 text-sm text-rose-700"
+              className={`mb-5 rounded-lg border px-4 py-3 text-sm ${banner.tone}`}
             >
-              {status?.state === "error"
-                ? `微信采集异常：${status.error || "未知错误"}`
-                : `看板数据读取失败：${loadError}`}
+              {banner.text}
             </div>
           )}
           {page === "#settings" ? (
