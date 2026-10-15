@@ -143,30 +143,33 @@ export async function api<T = unknown>(
 
 export const post = (): RequestInit => ({ method: "POST" });
 
-export const dateText = (value?: string | null, full = false) => {
+/** 本机时间一律按东八区显示；认不出的值返回空串而不是 "Invalid Date"。 */
+function zhnDate(value: string | null | undefined, parts: Intl.DateTimeFormatOptions) {
   if (!value) return "";
   const date = new Date(value);
   if (Number.isNaN(date.valueOf())) return "";
   return new Intl.DateTimeFormat("zh-CN", {
     timeZone: "Asia/Shanghai",
+    ...parts,
+  }).format(date);
+}
+
+/** 会话与消息上的日期：默认只到「月-日」，`full` 带上时分。 */
+export const dateText = (value?: string | null, full = false) =>
+  zhnDate(value, {
     month: "2-digit",
     day: "2-digit",
     ...(full ? { hour: "2-digit", minute: "2-digit", hour12: false } : {}),
-  }).format(date);
-};
+  });
 
-export const clockText = (value?: string | null) => {
-  if (!value) return "";
-  const date = new Date(value);
-  if (Number.isNaN(date.valueOf())) return "";
-  return new Intl.DateTimeFormat("zh-CN", {
-    timeZone: "Asia/Shanghai",
+/** 状态条上的"上次同步"：只到秒，不带日期。 */
+export const clockText = (value?: string | null) =>
+  zhnDate(value, {
     hour: "2-digit",
     minute: "2-digit",
     second: "2-digit",
     hour12: false,
-  }).format(date);
-};
+  });
 
 /**
  * 库里只存 `<账号指纹>/<文件名>` 形式的本机相对链接，这里拼成 /media 可访问的 URL。

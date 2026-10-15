@@ -72,57 +72,68 @@ export function SessionsPage({ sessions, onRefresh, notify, selectedId, onSelect
   const jumpToBottom = useRef(false);
   const nearBottom = useRef(true);
   const controller = useRef<AbortController | null>(null);
-  const current = useRef({ id: selectedId });
-  current.current = { id: selectedId };
 
   const selected = sessions.find((item) => item.id === selectedId) || null;
   const visible = sessions.filter((item) =>
     (item.name || item.id).toLocaleLowerCase().includes(query.toLocaleLowerCase()),
   );
 
-  const loadConversation = useCallback(
-    async (id: string, older = false) => {
+  /**
+   * 取一屏消息。**翻页与跳转必须共用这一条出口**：抢同一条 abort 链、同一个请求序号。
+   *
+   * 之前 jumpToMessage 自己发请求，既不 abort 也不校验序号，于是"点引用 → 立刻切会话"
+   * 会把上一个会话的那一屏盖到刚选中的会话上；请求失败还完全没声音。
+   * 返回 null 表示这次结果不该再用（被后来的请求抢了，或已经出错报了）。
+   */
+  const fetchPage = useCallback(
+    async (id: string, cursor: string): Promise<MessagePage | null> => {
       const seq = ++requestSeq.current;
       controller.current?.abort();
       const abort = new AbortController();
       controller.current = abort;
       setLoading(true);
       setLoadError("");
+      try {
+        const page = await api<MessagePage>(
+          `/api/sessions/${encodeURIComponent(id)}/messages?limit=40${cursor}`,
+          { signal: abort.signal },
+        );
+        return seq === requestSeq.current ? page : null;
+      } catch (error) {
+        if (seq === requestSeq.current && (error as Error).name !== "AbortError")
+          setLoadError((error as Error).message || "读取会话失败");
+        return null;
+      } finally {
+        if (seq === requestSeq.current) setLoading(false);
+      }
+    },
+    [],
+  );
+
+  const loadConversation = useCallback(
+    async (id: string, older = false) => {
       if (!older) {
         setMessages([]);
         setHasMore(false);
         if (nearBottom.current) jumpToBottom.current = true;
       }
-      try {
-        const cursor =
-          older && beforeSeq != null
-            ? `&before_seq=${beforeSeq}&before_id=${beforeId ?? 0}`
-            : "";
-        const page = await api<MessagePage>(
-          `/api/sessions/${encodeURIComponent(id)}/messages?limit=40${cursor}`,
-          { signal: abort.signal },
-        );
-        if (seq !== requestSeq.current) return;
-        setMessages((old) => {
-          const fresh = page.items.slice().reverse();
-          if (!older) return fresh;
-          const seen = new Set(old.map((item) => item.id));
-          return [...fresh.filter((item) => !seen.has(item.id)), ...old];
-        });
-        setBeforeSeq(page.before_seq);
-        setBeforeId(page.before_id);
-        setHasMore(page.has_more);
-      } catch (error) {
-        if (
-          seq === requestSeq.current &&
-          (error as Error).name !== "AbortError"
-        )
-          setLoadError((error as Error).message || "读取会话失败");
-      } finally {
-        if (seq === requestSeq.current) setLoading(false);
-      }
+      const cursor =
+        older && beforeSeq != null
+          ? `&before_seq=${beforeSeq}&before_id=${beforeId ?? 0}`
+          : "";
+      const page = await fetchPage(id, cursor);
+      if (!page) return;
+      setMessages((old) => {
+        const fresh = page.items.slice().reverse();
+        if (!older) return fresh;
+        const seen = new Set(old.map((item) => item.id));
+        return [...fresh.filter((item) => !seen.has(item.id)), ...old];
+      });
+      setBeforeSeq(page.before_seq);
+      setBeforeId(page.before_id);
+      setHasMore(page.has_more);
     },
-    [beforeSeq, beforeId],
+    [beforeSeq, beforeId, fetchPage],
   );
 
   useEffect(() => {
@@ -264,10 +275,11 @@ export function SessionsPage({ sessions, onRefresh, notify, selectedId, onSelect
       setSearchTerm("");
     }
     if (!messages.some((item) => item.id === target.message_id)) {
-      const page = await api<MessagePage>(
-        `/api/sessions/${encodeURIComponent(selected.id)}/messages?limit=40` +
-          `&before_seq=${target.sort_seq + 1}&before_id=1`,
+      const page = await fetchPage(
+        selected.id,
+        `&before_seq=${target.sort_seq + 1}&before_id=1`,
       );
+      if (!page) return;
       setMessages(page.items.slice().reverse());
       setBeforeSeq(page.before_seq);
       setBeforeId(page.before_id);
@@ -277,7 +289,8 @@ export function SessionsPage({ sessions, onRefresh, notify, selectedId, onSelect
     setFlashId(target.message_id);
   }
 
-  // 跳转落点：滚到那条消息并短暂描边一下。
+  // 跳转落点：滚到那条消息并短暂描边一下。只认 flashId——挂着 messages 的话，
+  // 描边还没掉色就翻了屏，计时会被重置，那条一直亮着看不出来是"刚跳到的"。
   useEffect(() => {
     if (flashId == null) return;
     document
@@ -285,7 +298,7 @@ export function SessionsPage({ sessions, onRefresh, notify, selectedId, onSelect
       ?.scrollIntoView({ block: "center" });
     const timer = setTimeout(() => setFlashId(null), 1800);
     return () => clearTimeout(timer);
-  }, [flashId, messages]);
+  }, [flashId]);
 
   async function toggleFollow(session: SessionRow) {
     setBusy(session.id);

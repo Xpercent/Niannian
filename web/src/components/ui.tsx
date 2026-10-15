@@ -185,16 +185,3 @@ export function Dialog({
     </div>
   );
 }
-
-export function Spinner({ className }: { className?: string }) {
-  return (
-    <span
-      role="status"
-      aria-label="加载中"
-      className={cn(
-        "inline-block size-4 animate-spin rounded-full border-2 border-stone-300 border-t-primary",
-        className,
-      )}
-    />
-  );
-}

@@ -21,7 +21,6 @@ const LABELS: Record<string, string> = {
 type Field = {
   key: keyof SettingsValuesShape;
   title: string;
-  live: boolean;
   min: number;
   max: number;
   step?: number;
@@ -34,11 +33,12 @@ type SettingsValuesShape = {
   port: string;
 };
 
+// 哪些键要重启由**后端**说（`restart_required` 来自 config.RESTART_KEYS），这里不写死：
+// 以前每条字段挂一个 live 布尔，后端那份 RESTART_KEYS 改了这边不会跟着改。
 const FIELDS: Field[] = [
   {
     key: "history_limit",
     title: "新关注会话导入条数",
-    live: true,
     min: 1,
     max: 1000,
     hint: (
@@ -52,7 +52,6 @@ const FIELDS: Field[] = [
   {
     key: "poll_seconds",
     title: "采集轮询间隔（秒）",
-    live: true,
     min: 1,
     max: 3600,
     step: 0.5,
@@ -61,7 +60,6 @@ const FIELDS: Field[] = [
   {
     key: "port",
     title: "监听端口",
-    live: false,
     min: 1024,
     max: 65535,
     hint: "只监听 127.0.0.1，不会对外提供访问。保存时会检查端口是否被占用；改完需重启服务，之后用新端口访问。",
@@ -169,12 +167,14 @@ export function SettingsPage({ notify }: Props) {
         </CardHeader>
         <CardContent>
           <div className="grid gap-6 sm:grid-cols-2 xl:grid-cols-3">
-            {FIELDS.map((item) => (
+            {FIELDS.map((item) => {
+              const restart = (meta?.restart_required ?? []).includes(item.key);
+              return (
               <label key={item.key} className="block">
                 <span className="flex flex-wrap items-center gap-2 text-sm font-medium text-stone-700">
                   {item.title}
-                  <Badge tone={item.live ? "default" : "warning"}>
-                    {item.live ? "即时生效" : "需重启"}
+                  <Badge tone={restart ? "warning" : "default"}>
+                    {restart ? "需重启" : "即时生效"}
                   </Badge>
                 </span>
                 <Input
@@ -190,7 +190,8 @@ export function SettingsPage({ notify }: Props) {
                 />
                 <span className="mt-1 block text-xs leading-5 text-stone-500">{item.hint}</span>
               </label>
-            ))}
+              );
+            })}
           </div>
         </CardContent>
       </Card>
