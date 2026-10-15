@@ -928,3 +928,56 @@ master 回到 `da016d9`，**跳过**取图那一轮（`15b0080`），再把升�
   判成"暂无更高一档"正确。`GET /media/…_h.jpg` 200、`/api/status` 为 connected、
   日志无 error。
 - 采集线程每轮现在做四件：同步目录 → 轮询关注会话 → 补链接 → 重扫升级 →（缺钥匙时）补钥匙。
+
+## 进入提炼之前：全量代码审核与七轮整改（2026-10-16）
+
+用户要求"消息提炼开工前先审一遍现有提交与代码：有无冗余、更好实现、更好架构"。
+审核覆盖 25 个提交、后端 2115 行、前端 1756 行，结论按"能直接删 / 该改写 / 架构地基 /
+文档漂移"分层汇报后，用户定"全都做"。七次提交：
+
+1. `test(upstream)` 上游私有接口守卫（`tests/test_upstream_contract.py`，4 条）。
+   我们复用 `MediaDownloader` 的 7 个下划线成员与一批 `WeChatDB` 方法，而其余用例全打在
+   替身上——**上游改名时 105 条测试全绿、生产立刻瞎**。每个名字注明本仓库调用点；
+   摘掉 `_image_files` 做过反证，守卫确实会红并点名 `ImageStore.attach`。
+2. `fix(web)` 翻页与跳转共用一条取页出口 `fetchPage`。`jumpToMessage` 原来自己发请求：
+   不 abort、不校验序号、失败没声音，"点引用→立刻切会话"会让上一个会话那一屏盖过来。
+   真机把跳转请求人为拖慢 4 秒稳定复现，改后不污染、控制台零报错。顺带：设置页"需重启"
+   改读后端 `restart_required`（原来每字段硬编码 `live`，与 `config.RESTART_KEYS` 两处真源）；
+   `dateText`/`clockText` 合用同一个 Intl 包装；描边计时不再挂 `messages`；删 `Spinner`
+   与没人读的 `current` ref。
+3. `refactor(backend)` 死代码与重复。删 `open_isolated_db` 第三个 keys 猜测（算出来就是
+   `target` 本身，永远命中不了）；`contacts.display_name()` 从"只有测试在调"变成生产唯一
+   定序实现；`/api/status` 不再返回全局计数（界面一个字段都没读，而它每 10 秒把 messages
+   数三遍），`Database.counts()` 随之删除；关注/取关不再重复查一遍存在；`account` 未知时
+   `/api/sessions` 返回空而不是不过滤；metadata 坏 JSON 的回落收进 `load_metadata`/
+   `as_message`，翻页与搜索共用。
+4. `perf(storage)` 图片流水线状态提成投影列 `kind`/`media_md5`/`local_file`/`tier` +
+   两个部分索引。原来两条每轮查询用 `instr(metadata,'"kind": "image"')` 找活干，执行计划是
+   `SCAN 全表 + USE TEMP B-TREE FOR ORDER BY`。**两万行实测 6.53ms→0.40ms、8.28ms→0.69ms**，
+   且旧的随时长线性变差、新的基本常数。列只是 metadata 的投影：只有 `ingest` 与
+   `update_metadata` 经 `media_projection` 写它，读侧只看列；新增三条测试钉住这条不变式
+   （含一条"文本里写着图片不算图片"的反证）。老库在 `init` 就报"删掉重采"——顺序必须是
+   **先查结构再建索引**，否则部分索引的 `WHERE kind=…` 会先撞 `no such column`，用户看不到
+   那句话（这条是测试逼出来的）。内存冷却表按既有决定保持内存，没落库。
+5. `refactor(structure)` `wechat.py` 836 行按职责切四块：`ids`（含把逐字重复的
+   `media.media_scope` 并进 `account_scope`）、`wechat_db`（`IsolatedDB` + 分片补查）、
+   `normalize`（上游行→本地记录，纯函数，提炼阶段可直接复用）、`wechat` 只剩 Collector。
+   除 `ids` 三个函数补 docstring、`ImageStore` 换目录名来源外全部逐字搬移，
+   `Collector` 段与 HEAD **逐字节相同**（脚本比对）。
+6. `fix(wechat)` 拆模块漏了 `session_key` 导入 → 服务起来就 `state=error`。
+   **112 条测试全绿而真机崩**，因为 `FakeWX.get_sessions` 一直返回空表，
+   `_sync_catalog` 的循环体从没执行过。补一条带真实目录行的用例，这类漏导入以后 pytest 能拦。
+7. `docs` 本文件与 README/AGENTS 校准（见下）。
+
+清库重采复核（关注清单与署名快照先存进 `data/`，旧库三件套留在
+`data/backup-pre-audit/`）：两会话各自动导入 100 条；图片 28 行 **28/28 拿到链接**
+（18 本机图 / 5 原图 / 5 预览图）；与旧库 200 条共有行**署名/发送者/时间零差异**；
+投影列与 metadata 用 `json_extract` 交叉核对**零漂移**；引用行 2/2 可跳、类型徽标正常；
+抹掉一行的链接后**一轮（3 秒）内采集线程凭新的投影列队列自己补回**且列与 metadata 同步；
+日志无 warning/error。`pytest` 113 passed / 6 skipped，`tsc --noEmit` 干净，
+浏览器实测会话切换、图片气泡、搜索跳原文、设置页徽标。
+
+审出但**故意没改**的三条：`media.attach` 的 `os.path.getsize` 看着能用 `len(data)` 替，
+实际 `_write_decrypted` 会把 wxgf 转码后落盘，字节数与传入不等，stat 才是准的；
+`Collector` 的单线程 + 命令队列 + 双冷却是三轮真机事故换来的形状，不为"更现代"改掉；
+不上 FTS、不加跳转返回栈。

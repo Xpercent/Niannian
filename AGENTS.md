@@ -23,11 +23,21 @@ cd web && npm run dev                   # 前端热更新，/api 代理到 8765
 
 ## 结构
 - `niannian/`：`config`（默认值/校验/落盘）/ `storage`（SQLite 三表）/
-  `wechat`（只读采集线程 + 命令队列 + 水位增量）/ `contacts`（发送者显示名与
-  群名片 protobuf）/ `describe`（正文 XML → 结构化描述 + 一行摘要）/
+  `wechat`（**只剩**只读采集线程 + 命令队列 + 水位增量 + 每轮的那些限额）/
+  `wechat_db`（建上游读取器 `IsolatedDB` + 只在分片上跑的补查）/
+  `normalize`（上游行 → 本地记录：署名、摘要、去重键；纯函数）/
+  `ids`（账号指纹与会话主键，媒体目录也用它命名）/
+  `contacts`（发送者显示名与群名片 protobuf）/
+  `describe`（正文 XML → 结构化描述 + 一行摘要）/
   `media`（图片定位、解密、链接收口）/ `api`（FastAPI）。
+- 切分的判据是"谁有权碰什么"：只有 `wechat_db` 里的东西读微信的解密缓存，
+  且必须经 `Collector` 的命令队列进采集线程；`normalize`/`ids`/`describe` 是纯函数，
+  阶段二的提炼要直接复用它们，不需要起服务。
 - `web/`：React + Vite + Tailwind，手写 UI 组件（无 shadcn/radix）；
   `pages/` 下两页：`sessions`（微信会话）、`settings`（设置）。
+- `tests/test_upstream_contract.py`：**认接口不认版本号**地守住上游私有成员
+  （`MediaDownloader` 那 7 个 + `WeChatDB` 我们调到的那些）。其余用例全打在替身上，
+  上游改名时它们照样全绿而生产立刻瞎，所以 bump pin 前这条必须先看。
 - `scripts/capture_fixtures.py`：把关注会话的**原始正文**（未解析的 XML 也在内）导成
   `data/fixtures/capture.db`，供 `tests/test_capture_replay.py` 离线回放。跑它要**先停服务**
   （同一份解密缓存不该被两个读取方同时开）；产物是真实聊天，落在 `data/`（已 gitignore）。
@@ -37,7 +47,8 @@ cd web && npm run dev                   # 前端热更新，/api 代理到 8765
   需要不同行为时在本仓库 `IsolatedDB` 子类里覆写。
   升级流程：`cd wechatauto-replica && git fetch --all --tags` → 看清
   `git log --oneline <旧pin>..origin/main` 改了哪些私有接口 → `git checkout <新 sha>`
-  → 回主仓库跑 `pytest` 与真机对撞脚本，再 `git add wechatauto-replica` 提交 pin。
+  → 回主仓库跑 `pytest`（**`tests/test_upstream_contract.py` 会先告诉你接口动了没有**）
+  与真机对撞脚本，再 `git add wechatauto-replica` 提交 pin。
 
 ## 上游库的关键陷阱（已踩，务必遵守）
 - **`real_sender_id` 的 id 空间是每个消息分片库各自的 `Name2Id` 表**，
@@ -47,7 +58,8 @@ cd web && npm run dev                   # 前端热更新，/api 代理到 8765
   起按消息所在分片解析，全局 `_sender_id_index()` 已删除，我们曾经兜过底的
   `sender_alias_map` + `IsolatedDB._fix_senders` 已随之删掉（2026-10-14，用户定）。
   **所以 pin 不能往回退** —— 退回 1.2.5.1 气泡上就是错的人，
-  `tests/test_wechat.py:test_upstream_pin_resolves_senders_per_shard` 认接口守住这件事，
+  `tests/test_wechat.py:test_upstream_pin_resolves_senders_per_shard` 认接口守住这件事
+  （接口面整体由 `tests/test_upstream_contract.py` 兜），
   升级前还要跑 `data/_upgrade_check.py` 拿真机存量复核。
 - `sender_id == 2` 在上游 1.2.5.1 被当作"自己"，但分片 `Name2Id` 的 rowid 2
   是别人；以分片表为准。1.2.6.1 已去掉该特判（本机实测自己在 `message_0` 是 rowid 5）。
@@ -63,7 +75,15 @@ cd web && npm run dev                   # 前端热更新，/api 代理到 8765
 - **磁盘文件名那个 32 位哈希只在消息行的 `packed_info_data` 里**；正文 XML 的
   `md5` 属性是另一套值，拿它去 `msg/attach/<md5(会话ID)>/` 找文件一条也找不到。
   上游 `get_messages` 不返回 `packed_info`，所以按 `(sort_seq, local_id)` 批量补查
-  （`wechat.py:media_hash_map`），存进 metadata 的 `media_md5`。
+  （`wechat_db.py:media_hash_map`），存进 metadata 的 `media_md5`。
+- **`kind`/`media_md5`/`local_file`/`tier` 在 `messages` 上有投影列**，采集侧"这轮该补
+  哪几行"的判定**只看列**（`storage._image_worklist`）。列只是 metadata 的投影，不是
+  第二份事实：只有 `ingest` 与 `update_metadata` 两个入口会经 `media_projection` 写它，
+  新增写路径必须走这两个之一，否则列与 metadata 会漂。
+  **不要退回 `instr(metadata, '"kind": "image"')` 那种文本匹配**：它走不了索引
+  （每轮全表扫 + 临时 B 树排序，两万行实测 6.5ms/8.3ms 每轮各一次），还绑死
+  `json.dumps` 的分隔符形状。两条工作清单各自有一个部分索引对上（排序就是索引序），
+  改库结构前先看 `SCHEMA` 里那段注释，别新建第三个能全表扫的每轮查询。
 - 本机三档：`_h.dat` 原图（点过"查看原图"才有）、`.dat` 微信下发那份、`_t.dat`
   预览图。**没在微信里点开过的图片只有 `_t.dat`**，而它能单字节 XOR 解出来——
   所以预览图必须当可用素材，不能判成"本机没有"（实测 23 张里 8 张只有预览图）。
@@ -117,8 +137,10 @@ cd web && npm run dev                   # 前端热更新，/api 代理到 8765
   重启服务。未连接时命令必须**立刻**抛中文错误（`_request` 判 `self._wx is None`）——
   只判"线程活着"不够，线程活着但没连上时命令进队列没人执行，网页会干等 90 秒超时。
   `catalog()` 的回落判据同样是"连着微信"而不是"线程活着"。
-- 补图查询 `Database.pending_images()` 用 `instr` 粗筛而**不用 `json_extract`**：metadata
-  是文本列，一行坏 JSON 会让 `json_extract` 抛错，而这条查询每轮都跑。
+- 补图查询 `Database.pending_images()` / `stale_tier_images()` 只看**投影列**，既不
+  `instr` 匹配文本也不用 `json_extract`：前者走不了索引（每轮全表扫），后者会被一行
+  坏 JSON 抛错打死整轮。metadata 仍要取回来（补完链接要整块写回），坏行交回来是
+  `None`、由采集侧跳过——**不能**因为一条写坏的行让这一轮什么都不干。
 
 
 ## 动画表情：只留 `[动画表情]` 占位（用户 2026-10-15 定）
@@ -146,6 +168,8 @@ cd web && npm run dev                   # 前端热更新，/api 代理到 8765
   `session.db.SessionTable.last_sender_display_name` 与三方比对，
   7 例「群名片/备注/昵称互不相同」的样本里 6 例（无备注）跟随群名片、
   1 例（有备注）跟随备注。改显示规则前先用这条通道复核。
+- 备注 > 群名片 > 昵称这一**定序**只有一处实现：`contacts.display_name()`，
+  `IsolatedDB.display_names(user)` 调它；改优先级只改那一个函数。
 - 每会话的显示名由 `IsolatedDB.display_names(user)` 现算后传给
   `normalize_message`，**不要**再把全局 `nickname_map()` 当发送者表用。
 - 解析不出发送者的行（`Name2Id.user_name` 为空：拍一拍、撤回、进群提示）
@@ -160,6 +184,9 @@ cd web && npm run dev                   # 前端热更新，/api 代理到 8765
   （`Dialog` 的 `width` / `padded` 就是这么来的）。
 - 图片一律不放大显示：`<img>` 用 `w-auto max-w-full max-h-[…vh]`，不用 `w-full`，
   否则低分辨率预览图会被插值拉糊。
+- **取一屏只有一个出口** `sessions.tsx:fetchPage`：翻页、跳引用、跳搜索结果都走它，
+  共用同一条 abort 链与同一个请求序号。跳转自己发请求的话，"点引用→立刻切会话"
+  会让上一个会话那一屏盖到刚选中的会话上（实测过，把请求拖慢 4 秒可稳定复现）。
 - 往上翻历史**没有手动按钮**：滚到接近顶部自动取更早的一屏（`sessions.tsx:loadOlder`）。
   三件事必须同时成立，少一件就是回归：补来的内容从上方长高要**锚定 scrollTop**；
   一屏占不满时**没有触发滚动的机会**，所以要"占不满就继续补"；滚动一次手势会连发几十次
@@ -193,7 +220,9 @@ cd web && npm run dev                   # 前端热更新，/api 代理到 8765
   `validate()` 只在保存时用，越界直接抛中文错误、不落盘。别把两者合并。
 - `save_config()` 只更新提交的键并保留文件里其它键，先写 `.tmp` 再 `os.replace`。
 - `Collector` 持有 settings 的**副本**：改 `app.state.settings` 传不进采集器，
-  必须走 `Collector.update_settings()`（只接受可热更的键）。`port` 属启动期参数，
+  必须走 `Collector.update_settings()`（只接受可热更的键）。哪些键要重启**只有
+  `config.RESTART_KEYS` 一份**，界面读 `GET /api/settings` 返回的 `restart_required`，
+  不要在 `settings.tsx` 里再写死一个布尔。`port` 属启动期参数，
   界面必须标"需重启"，不能假装已应用。
 - 保存端口前用 `port_busy()` 试绑定预检；**不要**给它加 `SO_REUSEADDR`
   （Windows 下它允许重复绑定监听中的端口，探测会假成功）。
@@ -211,18 +240,18 @@ cd web && npm run dev                   # 前端热更新，/api 代理到 8765
   `向影 [转账] ￥10.00` / `收到(=°Д°=) [转账] ￥10.00`。同一笔钱微信会发**两条**卡片
   （`paysubtype` 1 发起、3 已到账），两条的 `payer_username`/`receiver_username`
   完全一样，**只有发送者换了人**，所以方向只能拿发送者去比（见
-  `wechat.py:transfer_target`）。认不出对方显示名时什么都不加——宁可只显示金额，
+  `normalize.py:transfer_target`）。认不出对方显示名时什么都不加——宁可只显示金额，
   也不把 `wxid_` 贴进气泡。`des` 那句"收到转账X元"是**收款方视角的固定话术**，
   两条都一样，不能当摘要用。
 
-## 引用消息与跳转（`describe.py` + `wechat.py` + `api.py`）
+## 引用消息与跳转（`describe.py` + `wechat_db.py` + `api.py`）
 - **不存被引全文，只存定位**（用户定的、与微信一致）：`quoted={svrid, author, name,
   at, type, label, sort_seq}`。`label` 是那行小字，实测被引原文最长 2311 字，全文一律
   不入库。引用行的**正文只放回复那句话**——引用是上下文，不该冒充本句（将来喂模型同理）。
 - **定位键是 `sort_seq`，不是 svrid**：`sort_seq` 在会话内唯一（实测）且正是翻页游标，
   前端 `before_seq = 目标+1, before_id = 1` 就能取到包含目标的那一屏，**不需要新接口**。
   `before_id` 不能给 0（API 校验 `ge=1`）。
-- `quoted.sort_seq` 由采集线程按 `svrid` 反查**微信分片库**得到（`server_seq_map`），
+- `quoted.sort_seq` 由采集线程按 `svrid` 反查**微信分片库**得到（`wechat_db.py:server_seq_map`），
   不是反查我们自己的库：原文还在导入窗口外时也查得到，等它被导入后同一个 sort_seq
   自然对上。查不到留 0 → 前端显示成不可点 + 「原文未导入」。
 - **`refermsg` 的 `fromusr` 语义不统一**：实测 27 条里 17 条它是会话 ID，另外 5 条它是
