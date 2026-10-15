@@ -31,7 +31,7 @@ from xml.etree import ElementTree
 from .config import clamp_history_limit
 from .contacts import group_nicknames
 from .describe import describe, summarize
-from .media import ImageStore, hash_from_blob
+from .media import ImageStore, hash_from_blob, tier_rank
 from .storage import Database, now_utc
 
 log = logging.getLogger(__name__)
@@ -42,6 +42,11 @@ ROOM_PREFIX = re.compile(r"^\d+@chatroom:\s*\n")
 PACKED_COLUMNS = "sort_seq, local_id, packed_info_data"
 # 每轮补图片的行数上限：一条图片行要走"扫目录 + 解密 + 落盘"，几万条历史不能一口气做完。
 IMAGE_CATCHUP_LIMIT = 30
+# 重扫预览图的行数上限与冷却：一次全树目录遍历是实打实的开销，而用户没点开过的那些
+# 永远升不上档，不能每轮都拿同一批最前的行去翻。
+TIER_UPGRADE_LIMIT = 10
+TIER_SCAN_WINDOW = 200
+TIER_RETRY_SECONDS = 600.0
 # 连不上微信时多久再试一次。不是错误就躺平的：用户随时可能才把微信打开。
 ATTACH_RETRY_SECONDS = 10.0
 # 弄图片钥匙的冷却：一次内存扫描是几十秒级的重活，不能每轮都做。
@@ -399,6 +404,8 @@ class Collector:
         self._next_attach = 0.0
         self._next_key_at = 0.0
         self._next_key_probe_at = 0.0
+        # 预览图重扫的内存冷却表 {消息行 id: 下次允许重扫的时间}：重启就清空，无害。
+        self._tier_next_at: dict = {}
         self._failures = 0
 
     # ------------------------------------------------------------ 对外接口
@@ -500,6 +507,7 @@ class Collector:
                     self._sync_catalog()
                     self._poll_followed()
                     self._catchup_images()
+                    self._upgrade_images()
                     self._ensure_media_key()
                     self._failures = 0
                     self._state_update(state="connected", error=None,
@@ -646,6 +654,49 @@ class Collector:
                 continue
             meta.update(linked)
             self.db.update_metadata(row["id"], meta)
+            done += 1
+        return done
+
+    def _upgrade_images(self) -> int:
+        """把"本机还有更高一档没拿到"的图片行重扫一遍，有就换掉链接。
+
+        和 :meth:`_catchup_images` 是同一条思路的另一半：那一个补"从没有到有"，
+        这一个补"从预览图到本机图、再到原图"。用户得在微信里点开那张图（原图还要
+        多点一次"查看原图"）大那份才会落盘，我们只读不驱动界面，所以升级只能靠定期
+        重扫磁盘追上去——依然只在采集线程做，理由与补链接一样：请求线程不能碰解密。
+
+        每轮真扫的行数封顶，扫过没升上去的进内存冷却表：用户从没点开过的图片永远
+        升不上档，不挡的话每轮都会拿队列最前面那批去翻整棵附件树，后面的永远排不到。
+        """
+        media = self._media
+        if media is None:
+            return 0
+        now = time.monotonic()
+        done = tried = 0
+        for row in self.db.stale_tier_images(TIER_SCAN_WINDOW):
+            if self._stop.is_set() or tried >= TIER_UPGRADE_LIMIT:
+                break
+            meta = row.get("metadata")
+            if not meta or (meta.get("attachment") or {}).get("kind") != "image":
+                continue
+            current = str(meta.get("tier") or "")
+            old = str(meta.get("local_file") or "")
+            digest = str(meta.get("media_md5") or "")
+            if current == "original" or not old or not digest:
+                continue            # instr 只是粗筛，判定一律照着解析后的字段来
+            if now < self._tier_next_at.get(row["id"], 0.0):
+                continue            # 冷却中的不占本轮名额，留给下一轮
+            tried += 1
+            user = session_user(row["session_id"])
+            linked = media.attach(user, digest, f"{user}_{row['sort_seq']}")
+            if not linked or tier_rank(linked.get("tier")) <= tier_rank(current):
+                self._tier_next_at[row["id"]] = now + TIER_RETRY_SECONDS
+                continue
+            # 先改写库再删旧文件：中途崩了最多留一个没人引用的文件，不会两头都没有
+            meta.update(linked)
+            self.db.update_metadata(row["id"], meta)
+            media.discard(old)
+            self._tier_next_at.pop(row["id"], None)
             done += 1
         return done
 

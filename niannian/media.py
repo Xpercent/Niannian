@@ -52,6 +52,11 @@ def pick_tier(files: dict) -> tuple | None:
     return None
 
 
+def tier_rank(tier) -> int:
+    """档位高低的排序值：越大越高，认不出的当最低（不会覆盖已认出的）。"""
+    return len(TIERS) - TIERS.index(tier) if tier in TIERS else 0
+
+
 def media_root(root: Path) -> Path:
     return Path(root) / "data" / "wechat" / "media"
 
@@ -168,3 +173,17 @@ class ImageStore:
     def resolve(self, stored: str) -> Path | None:
         """把库里的相对链接解析成媒体目录内的真实路径。"""
         return safe_media_path(self.directory.parent, stored)
+
+    def discard(self, stored: str) -> None:
+        """删掉升级后被替下来的那一份旧图，媒体目录里不留没人引用的孤儿。
+
+        只认库里那种相对链接（同样过 :func:`safe_media_path` 收口），删失败不响：
+        库里的新链接已经生效，旧文件留着也只是占地方。
+        """
+        path = self.resolve(stored)
+        if not path:
+            return
+        try:
+            path.unlink()
+        except OSError:
+            pass

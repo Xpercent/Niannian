@@ -151,13 +151,34 @@ def test_monitored_filter_and_counts(tmp_path):
     assert db.counts()["monitored_count"] == 1
 
 
-def image_row(sid, source, seq, digest, linked=False):
+def image_row(sid, source, seq, digest, linked=False, tier=None):
     meta = {"attachment": {"kind": "image"}, "media_md5": digest, "local_id": seq}
     if linked:
         meta["local_file"] = f"scope/{source}.jpg"
+        if tier:
+            meta["tier"] = tier
     row = payload(sid, source, sort=seq)
     row["metadata"] = meta
     return row
+
+
+def test_stale_tier_images_lists_rows_below_original(tmp_path):
+    """升级候选清单：关注会话里"有链接但还没拿到原图"的行，新→旧。
+
+    没链接的走 `pending_images` 那条路，已经到原图的没有更高一档可升，都不该出现。
+    """
+    db = make_db(tmp_path)
+    sid = seed(db)
+    other = seed(db, sid="wechat:sc:u2")
+    db.set_monitored(sid, True)
+    db.ingest([image_row(sid, "wechat:1", 300, "a" * 32, linked=True, tier="thumb"),
+               image_row(sid, "wechat:2", 400, "b" * 32, linked=True, tier="mid"),
+               image_row(sid, "wechat:3", 500, "c" * 32, linked=True, tier="original"),
+               image_row(sid, "wechat:4", 600, "d" * 32),
+               image_row(other, "wechat:5", 999, "e" * 32, linked=True, tier="thumb")])
+    got = db.stale_tier_images(limit=10)
+    assert [row["sort_seq"] for row in got] == [400, 300]
+    assert got[0]["metadata"]["tier"] == "mid"
 
 
 def test_pending_images_only_unlinked_images_of_followed_sessions(tmp_path):

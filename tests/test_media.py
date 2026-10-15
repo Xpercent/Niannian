@@ -1,7 +1,8 @@
 import os
 from pathlib import Path
 
-from niannian.media import (hash_from_blob, media_scope, pick_tier, safe_media_path)
+from niannian.media import (hash_from_blob, media_scope, pick_tier, safe_media_path,
+                            tier_rank)
 
 
 def test_hash_from_blob_takes_packed_info_not_xml():
@@ -17,6 +18,12 @@ def test_pick_tier_prefers_original_and_drops_empty_shell():
     assert pick_tier({"mid": ("/p/m.dat", 40000), "thumb": ("/p/t.dat", 5000)})[0] == "mid"
     assert pick_tier({"original": ("/p/h.dat", 900), "mid": ("/p/m.dat", 40000)})[0] == "mid"
     assert pick_tier({"original": ("/p/h.dat", 900000), "mid": ("/p/m.dat", 40000)})[0] == "original"
+
+
+def test_tier_rank_orders_tiers_and_unknown_is_lowest():
+    """重扫升级靠这个比高低：认不出的旧档位当最低，这样它一定会被新结果换掉。"""
+    assert tier_rank("original") > tier_rank("mid") > tier_rank("thumb")
+    assert tier_rank("thumb") > tier_rank("") and tier_rank(None) == 0
 
 
 def test_safe_media_path_blocks_traversal_and_absolute(tmp_path):
@@ -183,3 +190,18 @@ def test_cfg_derived_key_is_persisted_for_next_time(tmp_path):
     cached = GuardedMedia(persisted="c" * 32)
     assert ImageStore(cached, tmp_path, "wxid_me").key_ready is True
     assert not any(c.startswith("persist:") for c in cached.calls)   # 本就是缓存来的
+
+
+def test_discard_removes_the_replaced_copy_and_nothing_else(tmp_path):
+    """升级换链接时要删掉替下来的那份，媒体目录里不堆孤儿；越界链接一律不碰。"""
+    from niannian.media import ImageStore
+
+    store = ImageStore(GuardedMedia(cfg_key=("k" * 32, 0x88)), tmp_path, "wxid_me")
+    linked = store.attach("wxid_a", "ab" * 16, "wxid_a_1")
+    path = store.resolve(linked["local_file"])
+    assert path.is_file()
+    store.discard("../etc/passwd")        # 越界：静略过，不报错
+    store.discard("")
+    assert path.is_file()
+    store.discard(linked["local_file"])
+    assert not path.exists()

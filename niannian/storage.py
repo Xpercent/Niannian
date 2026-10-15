@@ -319,6 +319,39 @@ class Database:
             out.append(item)
         return out
 
+    def stale_tier_images(self, limit: int = 200) -> list[dict]:
+        """关注会话里**还没拿到原图**的图片行（手里是预览图或本机下发那一份），新→旧。
+
+        这是采集线程每轮"重扫升级"的候选清单：微信要用户在界面里点开图片、甚至点
+        "查看原图"，更高那一档才会落到 ``msg/attach``，而我们只读不驱动界面，所以
+        升级只能靠定期重扫磁盘追上去。中间那档 ``.dat`` 本机判不出它是不是完整图
+        （上游实测结论），所以停在那一档不算到底，``_h.dat`` 才是终点。
+
+        ``limit`` 给的是**候选窗口**而不是本轮处理数：冷却在采集侧，窗口取太窄会被
+        刚扫过的新行占满，排在后面的永远排不到。粗筛用 ``instr``，理由与
+        :meth:`pending_images` 一样——每轮都要跑的查询不能被一行坏 JSON 打死。
+        """
+        with self.connect() as conn:
+            rows = conn.execute(
+                """SELECT m.id, m.session_id, m.sort_seq, m.metadata
+                   FROM messages m JOIN sessions s ON s.id = m.session_id
+                   WHERE s.monitored = 1
+                     AND instr(m.metadata, '"kind": "image"') > 0
+                     AND instr(m.metadata, '"media_md5"') > 0
+                     AND instr(m.metadata, '"local_file"') > 0
+                     AND instr(m.metadata, '"tier": "original"') = 0
+                   ORDER BY m.sort_seq DESC, m.id DESC LIMIT ?""",
+                (max(1, int(limit)),)).fetchall()
+        out = []
+        for row in rows:
+            item = dict(row)
+            try:
+                item["metadata"] = json.loads(item["metadata"] or "{}")
+            except json.JSONDecodeError:
+                item["metadata"] = None
+            out.append(item)
+        return out
+
     def update_metadata(self, message_id: int, metadata: dict) -> None:
         """整块改写一条消息的 metadata（补媒体链接用），不动内容与水位。"""
         with self._write_lock, self.connect() as conn:

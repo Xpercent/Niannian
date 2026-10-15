@@ -258,7 +258,11 @@ class FakeImageStore:
                 "tier_label": "本机图", "bytes": 4096}
 
 
-def make_image_db(tmp_path, monitored=True):
+TIER_NAMES = {"thumb": "预览图", "mid": "本机图", "original": "原图"}
+TIER_STEMS = {"thumb": "_thumb", "mid": "", "original": "_h"}
+
+
+def make_image_db(tmp_path, monitored=True, tier=None):
     from niannian.storage import Database
 
     store = Database(tmp_path / "t.db")
@@ -268,11 +272,14 @@ def make_image_db(tmp_path, monitored=True):
                                   "unread": 0, "last_message_at": None}])
     if monitored:
         store.set_monitored(sid, True)
+    meta = {"attachment": {"kind": "image"}, "media_md5": "a" * 32, "local_id": 7}
+    if tier:
+        meta["local_file"] = f"scope/wxid_other_500{TIER_STEMS[tier]}.jpg"
+        meta["tier"] = tier
+        meta["tier_label"] = TIER_NAMES[tier]
     store.ingest([{**normalize_message(ACCOUNT, "wxid_other", "老王",
                                         make_message(content="看图"), {}),
-                   "source_id": "wechat:img1", "sort_seq": 500,
-                   "metadata": {"attachment": {"kind": "image"},
-                                "media_md5": "a" * 32, "local_id": 7}}])
+                   "source_id": "wechat:img1", "sort_seq": 500, "metadata": meta}])
     return store, sid
 
 
@@ -315,6 +322,73 @@ def test_catchup_images_skips_unfollowed_sessions(tmp_path):
     media = FakeImageStore()
     assert collector_for(store, tmp_path, media)._catchup_images() == 0
     assert media.calls == []
+
+
+class FakeTierStore:
+    """按预置顺序回报本机最高一档，用来测"重扫升级"这条接线（真解密要读微信本机文件）。"""
+
+    def __init__(self, tiers):
+        self._tiers = list(tiers)
+        self.calls = []
+        self.retired = []
+
+    def attach(self, user, digest, stem):
+        self.calls.append((user, digest, stem))
+        tier = self._tiers.pop(0) if len(self._tiers) > 1 else (
+            self._tiers[0] if self._tiers else None)
+        if not tier:
+            return None
+        return {"local_file": f"scope/{stem}{TIER_STEMS[tier]}.jpg", "tier": tier,
+                "tier_label": TIER_NAMES[tier], "bytes": 4096}
+
+    def discard(self, stored):
+        self.retired.append(stored)
+
+
+def test_upgrade_images_swaps_preview_and_retires_the_old_copy(tmp_path):
+    """用户在微信里点开过之后本机有了更大那份：换链接、改档位、删掉替下来的预览图。"""
+    store, sid = make_image_db(tmp_path, tier="thumb")
+    media = FakeTierStore(["mid"])
+    assert collector_for(store, tmp_path, media)._upgrade_images() == 1
+    assert media.calls == [("wxid_other", "a" * 32, "wxid_other_500")]
+    row = store.messages_page(sid, limit=10)["items"][0]
+    assert row["metadata"]["local_file"] == "scope/wxid_other_500.jpg"
+    assert row["metadata"]["tier_label"] == "本机图"
+    assert media.retired == ["scope/wxid_other_500_thumb.jpg"]
+    # 中间那档本机判不出是不是完整图，所以停在 mid 的行还得继续有升到头的机会
+    assert [r["sort_seq"] for r in store.stale_tier_images(limit=10)] == [500]
+
+
+def test_upgrade_images_cooldowns_a_row_that_is_still_a_preview(tmp_path):
+    """还是只有预览图：一个字都不改，进冷却，冷却期内不再翻这行的附件目录。"""
+    store, sid = make_image_db(tmp_path, tier="thumb")
+    media = FakeTierStore(["thumb"])
+    collector = collector_for(store, tmp_path, media)
+    assert collector._upgrade_images() == 0
+    assert collector._upgrade_images() == 0
+    assert len(media.calls) == 1
+    assert media.retired == []
+    row = store.messages_page(sid, limit=10)["items"][0]
+    assert row["metadata"]["local_file"] == "scope/wxid_other_500_thumb.jpg"
+    assert row["metadata"]["tier_label"] == "预览图"
+
+
+def test_upgrade_images_leaves_originals_and_unfollowed_alone(tmp_path):
+    """已拿到原图的行、没关注的会话都不进候选清单：一行都不该重扫。"""
+    store, _ = make_image_db(tmp_path, tier="original")
+    media = FakeTierStore(["original"])
+    assert collector_for(store, tmp_path, media)._upgrade_images() == 0
+    assert media.calls == []
+
+    store, _ = make_image_db(tmp_path, monitored=False, tier="thumb")
+    media = FakeTierStore(["mid"])
+    assert collector_for(store, tmp_path, media)._upgrade_images() == 0
+    assert media.calls == []
+
+
+def test_upgrade_images_does_nothing_before_connected(tmp_path):
+    store, _ = make_image_db(tmp_path, tier="thumb")
+    assert collector_for(store, tmp_path, None)._upgrade_images() == 0
 
 
 class FakeWX:
@@ -593,6 +667,7 @@ def test_round_failure_needs_two_in_a_row_to_show_as_error(tmp_path, monkeypatch
     monkeypatch.setattr(Collector, "_sync_catalog", flaky_sync)
     monkeypatch.setattr(Collector, "_poll_followed", lambda self: None)
     monkeypatch.setattr(Collector, "_catchup_images", lambda self: 0)
+    monkeypatch.setattr(Collector, "_upgrade_images", lambda self: 0)
     monkeypatch.setattr(Collector, "_ensure_media_key", lambda self: None)
 
     collector = bare_collector(tmp_path)
