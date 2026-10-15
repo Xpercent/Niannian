@@ -93,21 +93,31 @@ class ImageStore:
         """图片钥匙是否已在手——没在手就绝不碰解密。"""
         return self._key_ready
 
-    def _free_key(self) -> str:
-        """不用扫内存就能拿到的钥匙：cfg 编号派生 → 上次扫下来落盘的缓存。"""
+    def _free_key(self) -> tuple:
+        """不用扫内存就能拿到的钥匙，返回 ``(钥匙, 是不是 cfg 现派的)``。
+
+        优先级：cfg 编号派生 → 上次拿到后落盘的缓存。派生出来的那份要顺手落盘，
+        否则下次服务在微信没开时启动，又得等微信开起来重要一遍。
+        """
         try:
             derived = self._media._derive_cfg_key()
             if derived:
-                return str(derived[0])
-            return str(self._media._load_persisted_key() or "")
+                return str(derived[0]), "cfg"
+            return str(self._media._load_persisted_key() or ""), ""
         except Exception:
-            return ""
+            return "", ""
 
-    def _adopt(self, aes_key: str) -> bool:
+    def _adopt(self, got: tuple) -> bool:
         """把钥匙放进上游的"显式注入"槽位，之后解密就不会再去要钥匙。"""
+        aes_key, from_cfg = got
         if not aes_key:
             return False
         self._media._image_key = aes_key
+        if from_cfg:
+            try:
+                self._media._persist_key(aes_key)    # 微信重启后密钥会变，取用时自校验
+            except Exception:
+                pass
         return True
 
     def prepare_key(self) -> bool:
@@ -123,7 +133,7 @@ class ImageStore:
             found = self._media._scan_aes_key(monitor=False)
         except Exception:
             return False
-        if not self._adopt(str(found or "")):
+        if not self._adopt((str(found or ""), "")):
             return False
         try:
             self._media._persist_key(found)        # 下次免扫

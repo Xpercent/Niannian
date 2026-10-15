@@ -763,3 +763,73 @@ master 回到 `da016d9`，**跳过**取图那一轮（`15b0080`），再把升�
   重新导入仍是 310 秒不动。
 - 图片占位文案改成"这张图片还没准备好：打开微信、并在微信里翻到这条记录后会自动补上"——
   闸门关闭时文件其实在盘上但没钥匙，旧文案"本机暂无该图片文件"在这种情况下是说假话。
+
+## 阶段二·补刀：图片"要等一分钟才出现"是冷却被白问了占掉（2026-10-15）
+
+用户复测后回报：服务先开、微信后开，图片**过了将近一分钟才出现**。转圈没了，但延迟还在。
+
+### 原因（我上一轮写错的判据）
+
+`_ensure_media_key()` 把两件成本完全不同的事共用了**一个** 120 秒冷却，而且
+`self._next_key_at = now + 120` 写在 `wechat_running()` 检查**之前**：服务启动后第一轮
+（微信没开）只是便宜地问了一句进程表，却把 120 秒的重活冷却一并占掉了。用户随后打开微信，
+采集线程要等冷却到期才会去取钥匙 → 白等最多两分钟。
+
+### 改法：两把时间分开
+
+| 动作 | 成本 | 节流 |
+|---|---|---|
+| `wechat_running()` 查进程表 | 毫秒级 | `MEDIA_KEY_PROBE_SECONDS = 5.0`，勤问 |
+| 重连取 cfg / 扫内存找钥匙 | 几十秒级 | `MEDIA_KEY_RETRY_SECONDS = 120.0`，只在**真要动手时**才占用 |
+
+先探测、再判冷却、最后才占用：微信一开 ≤5 秒就开始取钥匙，剩下的一次性成本只有
+上游 `extract_master_key()` 读 `weixin.dll` 映像找锚点那几十秒（不改上游就去不掉）。
+
+### 顺带把钥匙落盘补全
+
+上游只在"扫内存扫到了"那条路径落盘 `image_keys.json`，cfg 现派生的那份不落盘 →
+下次服务在微信没开时启动，还得重走一遍取 cfg。现在 `_adopt` 到 cfg 派的钥匙就顺手落盘
+（从缓存读来的不重复写）。微信重启后钥匙会变，而 `_load_persisted_key()` 取用时会自校验，
+所以过期缓存不会将错就错。
+
+### 验证
+- `pytest` 93 passed / 6 skipped。新增与改写的守门断言：
+  `test_no_wechat_does_not_burn_the_heavy_cooldown` —— 微信没开那一次**不得**占用重活冷却
+  （`_next_key_at` 保持已到期），且只留下一次便宜探测；紧接着把"微信在跑"打开、探测时间一到，
+  必须**立刻**重连。这条断言就是本轮 bug 的直接反面。
+  `test_cfg_derived_key_is_persisted_for_next_time` —— cfg 派的钥匙落盘、缓存来的不重写。
+- 待用户复测：微信关掉 → 开服务 → 再开微信，看图片是不是在十几秒内出现（而不是接近一分钟）。
+
+## 阶段二·再补刀：一个进程不许有两个读取器（WinError 5）（2026-10-15）
+
+用户按"关微信 → 开服务 → 开微信"复测，报出红条：
+`微信采集异常：[WinError 5] 拒绝访问。'...contact__contact.db.10964.593c.tmp' -> '...contact__contact.db'`
+（随后下一轮自愈，状态回到 connected）。
+
+### 原因
+
+是我上一轮加的"重连取 cfg"引出来的：`_ensure_media_key()` 在 `cfg_dword` 缺失时
+`_detach()` + `_attach()`，等于**在同一进程里开了第二个 `IsolatedDB`**。上游的建库锁
+登记表是 `self._build_locks`——**按实例存**，不是按文件路径全局存。两个实例各自以为
+自己在串行重建，实际会同时对 `data/wechat/cache/<指纹>/contact__contact.db` 动手：
+新实例 `os.replace(tmp → dst)` 时旧实例还挂着 dst 的只读句柄，Windows 直接
+`ERROR_ACCESS_DENIED`。这与 AGENTS.md 早就写着的"跑 capture_fixtures 要先停服务"
+是同一类坑（同一份解密缓存不该被两个读取方同时开），只是这次是我们自己开的第二个读取方。
+
+### 改法
+
+1. **不再重连**：cfg 编号用 `self._wx.extract_master_key()` 从**当前**读取器要，
+   拿到填回同一个对象（`self._wx.cfg_dword = got[1]`），随后 `prepare_key()` 免费派生。
+   少一个实例、少一次全目录重扫，也少一次密钥校验。
+2. **一次轮次失败不亮红条**：`_failures` 连计两轮才置 `error`。微信 checkpoint 期间
+   上游重建缓存会短暂撞车，下一轮自愈；真没自愈的话"上次同步"时间会停着不动，那本身就是
+   信号，不会漏报。
+
+### 验证
+- `pytest` 94 passed / 6 skipped。新增/改写：
+  `test_media_key_takes_cfg_without_opening_a_second_reader`（`_attach`/`_detach` 必须
+  一次都不被调用，`cfg_dword` 填回同一对象）、
+  `test_no_wechat_does_not_burn_the_heavy_cooldown` 同步改成"不重开读取器"，
+  `test_round_failure_needs_two_in_a_row_to_show_as_error`（一次失败不置 error、
+  连续两轮置 error、自愈后清掉）。
+- 待用户复测：同一条顺序（关微信 → 开服务 → 开微信）不再出现 WinError 5 红条。

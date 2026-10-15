@@ -51,6 +51,9 @@ def test_image_store_writes_inside_its_directory(tmp_path, monkeypatch):
         def _load_persisted_key(self):
             return None
 
+        def _persist_key(self, key):
+            pass
+
         def _image_files(self, user, digest):
             return {"thumb": (f"/fake/{digest}_t.dat", 4096)}
 
@@ -162,3 +165,21 @@ def test_key_from_cache_avoids_any_scan(tmp_path):
     assert store.key_ready is True
     assert not any("scan" in c for c in media.calls)
     assert media._image_key == "p" * 32
+
+
+def test_cfg_derived_key_is_persisted_for_next_time(tmp_path):
+    """cfg 现派的钥匙要落盘：下次服务在微信没开时启动，也能直接解图，不用再等。
+
+    微信重启后这把钥匙会变，所以取用缓存时上游自己会校验，过期缓存不会将错就错。
+    """
+    from niannian.media import ImageStore
+
+    media = GuardedMedia(cfg_key=("c" * 32, 0x88))
+    store = ImageStore(media, tmp_path, "wxid_me")
+    assert store.key_ready is True
+    assert "persist:" + "c" * 32 in media.calls
+    assert not any("scan" in c for c in media.calls)
+
+    cached = GuardedMedia(persisted="c" * 32)
+    assert ImageStore(cached, tmp_path, "wxid_me").key_ready is True
+    assert not any(c.startswith("persist:") for c in cached.calls)   # 本就是缓存来的

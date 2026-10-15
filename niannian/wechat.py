@@ -46,6 +46,8 @@ IMAGE_CATCHUP_LIMIT = 30
 ATTACH_RETRY_SECONDS = 10.0
 # 弄图片钥匙的冷却：一次内存扫描是几十秒级的重活，不能每轮都做。
 MEDIA_KEY_RETRY_SECONDS = 120.0
+# 而"微信开了没有"只是一次进程表查询，问得勤一点，微信一开就能马上动手。
+MEDIA_KEY_PROBE_SECONDS = 5.0
 
 
 def wechat_running() -> bool:
@@ -396,6 +398,8 @@ class Collector:
         self._media = None
         self._next_attach = 0.0
         self._next_key_at = 0.0
+        self._next_key_probe_at = 0.0
+        self._failures = 0
 
     # ------------------------------------------------------------ 对外接口
     @property
@@ -497,11 +501,17 @@ class Collector:
                     self._poll_followed()
                     self._catchup_images()
                     self._ensure_media_key()
+                    self._failures = 0
                     self._state_update(state="connected", error=None,
                                        last_sync_at=now_utc())
                 except Exception as exc:
-                    self._state_update(state="error", error=str(exc)[:300])
-                    log.warning("采集轮次失败：%s", exc)
+                    # 一轮失败、下一轮就自愈的不惊动界面：微信 checkpoint 时上游重建
+                    # 解密缓存会短暂撞车（Windows 上表现为 rename 被拒），下一轮自然好。
+                    # 连失败两轮才是真异常。同步时间停着不动本身就是信号。
+                    self._failures += 1
+                    if self._failures >= 2:
+                        self._state_update(state="error", error=str(exc)[:300])
+                    log.warning("采集轮次失败（连续第 %d 次）：%s", self._failures, exc)
         finally:
             self._detach()
             self._drain_commands()
@@ -640,24 +650,35 @@ class Collector:
         return done
 
     def _ensure_media_key(self) -> None:
-        """图片钥匙没在手就补一次，按冷却限流；**只在采集线程做**。
+        """图片钥匙没在手就补，**便宜地勤看、重活限流**。
 
-        连接是在微信没开的时候建立的，``cfg_dword`` 压根没取到，这时扫内存也派生
-        不出钥匙——正确做法是重连一次，把 cfg 编号和钥匙一起拿回来。
+        两条时间分开：``wechat_running()`` 只是一次进程表查询，几毫秒，所以按
+        ``MEDIA_KEY_PROBE_SECONDS`` 勤问一句，微信一开就能立刻动手；而取 cfg 编号、
+        扫内存找钥匙是几十秒级的重活，按 ``MEDIA_KEY_RETRY_SECONDS`` 限流。
+        原来把两件事共用一个冷却，结果"微信还没开"那一次白问就把 120 秒占掉了，
+        用户打开微信后还要再等两分钟才见到图（实测就是这个坑）。
+
+        cfg 编号只从**当前这个**读取器上要：``extract_master_key()`` 是纯读微信进程，
+        拿到就填回同一个对象。**不要**在这里重开一个 IsolatedDB——两个读取器各自一套
+        ``_build_locks``，会同时重建同一份解密缓存，Windows 上 rename 撞上没关的只读
+        句柄就是 ``[WinError 5] 拒绝访问``（实测踩过）。
         """
         media = self._media
         if media is None or media.key_ready:
             return
         now = time.monotonic()
+        if now < self._next_key_probe_at:
+            return
+        self._next_key_probe_at = now + MEDIA_KEY_PROBE_SECONDS
+        if not wechat_running():
+            return
         if now < self._next_key_at:
             return
         self._next_key_at = now + MEDIA_KEY_RETRY_SECONDS
-        if not wechat_running():
-            return
         if getattr(self._wx, "cfg_dword", None) is None:
-            self._detach()
-            self._attach()
-            return
+            got = self._wx.extract_master_key()
+            if got:
+                self._wx.cfg_dword = got[1]
         media.prepare_key()
 
     def _history_limit(self, session: dict) -> int:

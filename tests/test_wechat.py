@@ -333,6 +333,10 @@ class FakeWX:
     def get_sessions(self, limit=100):
         return []
 
+    def extract_master_key(self):
+        """微信在跑时上游能从进程里读到 (主密钥, cfgDword, wxid)。"""
+        return ("master-key", 4096, "wxid_me")
+
 
 def bare_collector(tmp_path):
     from niannian.storage import Database
@@ -478,40 +482,60 @@ class FakeWXNoCfg(FakeWX):
     cfg_dword = None
 
 
-def test_media_key_reattaches_when_cfg_was_never_taken(tmp_path, monkeypatch):
-    """cfg 编号缺失时不该去扫内存（扫了也派生不出钥匙），要的是重连一次。"""
+def test_media_key_takes_cfg_without_opening_a_second_reader(tmp_path, monkeypatch):
+    """cfg 缺失时只从**当前**读取器要编号，绝不重开一个 IsolatedDB。
+
+    两个读取器各有一套 ``_build_locks``，会同时重建同一份解密缓存，Windows 上
+    rename 撞上没关的只读句柄就是 ``[WinError 5] 拒绝访问``（实测踩过）。
+    """
     import niannian.wechat as wxmod
 
     monkeypatch.setattr(wxmod, "wechat_running", lambda: True)
     collector = bare_collector(tmp_path)
-    collector._wx = FakeWXNoCfg()
+    wx = FakeWXNoCfg()
+    collector._wx = wx
     media = FakeKeyMedia()
     collector._media = media
-    rebuilt = []
-    monkeypatch.setattr(collector, "_detach", lambda: rebuilt.append("detach"))
-    monkeypatch.setattr(collector, "_attach", lambda: rebuilt.append("attach"))
+    touched = []
+    monkeypatch.setattr(collector, "_detach", lambda: touched.append("detach"))
+    monkeypatch.setattr(collector, "_attach", lambda: touched.append("attach"))
 
     collector._ensure_media_key()
 
-    assert rebuilt == ["detach", "attach"]
-    assert media.prepared == 0
+    assert touched == []                       # 没有第二个读取器
+    assert wx.cfg_dword == 4096                # 编号填回同一个对象
+    assert media.prepared == 1
 
 
-def test_media_key_waits_for_wechat_without_probing_every_round(tmp_path, monkeypatch):
-    """微信没开：什么都不做，但要定好冷却，别每轮都去问一次进程表。"""
+def test_no_wechat_does_not_burn_the_heavy_cooldown(tmp_path, monkeypatch):
+    """微信没开时那一次只是便宜地查了进程表，**不许占用 120 秒的重活冷却**。
+
+    占用过的话，用户随后打开微信还要再等满两分钟才见到图——实测就是这个坑。
+    """
     import time
 
     import niannian.wechat as wxmod
 
     monkeypatch.setattr(wxmod, "wechat_running", lambda: False)
     collector = bare_collector(tmp_path)
-    collector._wx = FakeWX()
+    wx = FakeWXNoCfg()
+    collector._wx = wx
     media = FakeKeyMedia()
     collector._media = media
+    touched = []
+    monkeypatch.setattr(collector, "_detach", lambda: touched.append("detach"))
+    monkeypatch.setattr(collector, "_attach", lambda: touched.append("attach"))
 
     collector._ensure_media_key()
-    assert media.prepared == 0
-    assert collector._next_key_at > time.monotonic()
+    assert media.prepared == 0 and touched == []
+    assert collector._next_key_at <= time.monotonic()        # 重活冷却没被占
+    assert collector._next_key_probe_at > time.monotonic()   # 只留下一次便宜探测
+
+    monkeypatch.setattr(wxmod, "wechat_running", lambda: True)
+    collector._next_key_probe_at = 0.0            # 探测时间到（真实是 5 秒后）
+    collector._ensure_media_key()
+    assert touched == []                          # 不重开读取器
+    assert wx.cfg_dword == 4096 and media.prepared == 1   # 微信一开就立刻动手
 
 
 def test_media_key_prepare_is_throttled(tmp_path, monkeypatch):
@@ -525,7 +549,8 @@ def test_media_key_prepare_is_throttled(tmp_path, monkeypatch):
     collector._media = media
 
     collector._ensure_media_key()
-    collector._ensure_media_key()                # 冷却未到
+    collector._next_key_probe_at = 0.0
+    collector._ensure_media_key()                # 重活冷却未到
     assert media.prepared == 1
 
     media.key_ready = False
@@ -547,3 +572,41 @@ def test_media_key_is_untouched_when_already_ready(tmp_path, monkeypatch):
     collector._ensure_media_key()
 
     assert probes == []
+
+
+def test_round_failure_needs_two_in_a_row_to_show_as_error(tmp_path, monkeypatch):
+    """微信 checkpoint 时上游重建缓存会短暂撞车（Windows 上 rename 被拒），
+    下一轮自然自愈：这种一次性的失败不该在界面上亮红条，连失败两轮才算异常。"""
+    import time
+
+    import niannian.wechat as wxmod
+
+    calls = {"n": 0}
+
+    def flaky_sync(self):
+        calls["n"] += 1
+        if calls["n"] <= 2:
+            raise OSError(5, "拒绝访问")
+
+    monkeypatch.setattr(Collector, "_attach",
+                        lambda self: (setattr(self, "_wx", FakeWX()), True)[1])
+    monkeypatch.setattr(Collector, "_sync_catalog", flaky_sync)
+    monkeypatch.setattr(Collector, "_poll_followed", lambda self: None)
+    monkeypatch.setattr(Collector, "_catchup_images", lambda self: 0)
+    monkeypatch.setattr(Collector, "_ensure_media_key", lambda self: None)
+
+    collector = bare_collector(tmp_path)
+    collector.start()
+    try:
+        deadline = time.monotonic() + 8.0
+        while time.monotonic() < deadline and calls["n"] < 2:
+            time.sleep(0.1)
+        assert calls["n"] >= 2
+        assert collector.status()["state"] == "error"        # 连续两轮才算真异常
+
+        while time.monotonic() < deadline and collector.status()["state"] != "connected":
+            time.sleep(0.1)
+        status = collector.status()
+        assert status["state"] == "connected" and status["error"] is None
+    finally:
+        collector.stop()
