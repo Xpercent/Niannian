@@ -981,3 +981,25 @@ master 回到 `da016d9`，**跳过**取图那一轮（`15b0080`），再把升�
 实际 `_write_decrypted` 会把 wxgf 转码后落盘，字节数与传入不等，stat 才是准的；
 `Collector` 的单线程 + 命令队列 + 双冷却是三轮真机事故换来的形状，不为"更现代"改掉；
 不上 FTS、不加跳转返回栈。
+
+## 收尾补丁：wxgf 图片转码兜底（2026-10-16）
+
+审核轮我在 HANDOFF 里写过"重采后当前 200 行里一张 wxgf 都没有"，那句**只覆盖了当时关注
+的两个会话**；用户随后关注「文件传输助手」，53 条里就有 5 张是 `.wxgf` 破图。先把那句
+错的更正掉，再修根因。
+
+根因（本机逐层实测，不是猜的）：ffmpeg 装了、上游 `_ffmpeg_exe()` 也找到了、
+`_extract_hevc()` 从 3091 字节的 wxgf 里剥出 2779 字节 HEVC 裸流，但上游把裸流写成
+`in.hevc` 后直接 `ffmpeg -i in.hevc` —— **没给 `-f hevc`**，ffmpeg 对没有容器头的裸流
+自动探测失败（rc=3199971767，`Invalid data found when processing input`）。同一个流加
+`-f hevc` 立刻转出 4909 字节 jpg。上游拿 None 就走"落盘原始 .wxgf"的兜底，浏览器不认。
+
+- 修在 `niannian/media.py`：`hevc_to_jpg()`（显式 `-f hevc`，且只认 `FF D8 FF` 开头的
+  产物，坏字节一律不落盘）+ `build_downloader()`（子类覆写 `_wxgf_to_jpg`，**先调
+  `super()`**，上游哪天修好兜底自动失效）。按 AGENTS.md 不动 submodule。
+- 测试两条：命令里必须带 `-f hevc`、非零退出与产物不是 jpg 都算失败；以及"上游转成功
+  时一次都不跑兜底"。新依赖的三个上游私有成员进契约守卫清单。
+- 存量 5 行没走清库：抹掉它们的 `local_file`/`tier`（列与 metadata 一起），采集线程
+  **一轮 3 秒**凭投影列捞回来重转成 jpg；替下来的 5 个 `.wxgf` 确认无人引用后删除。
+  复核：图片链接 44 条（32 jpg + 12 png）、缺链接 0、目录孤儿 0；浏览器 `new Image()`
+  实测 8 张全部 `onload`（364x138 / 1206x368 等真实尺寸）。`pytest` 115 passed / 6 skipped。

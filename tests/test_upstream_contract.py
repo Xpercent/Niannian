@@ -44,6 +44,11 @@ MEDIA_SURFACE = {
     "_load_persisted_key": "ImageStore._free_key 第二条路（上次落盘的缓存）",
     "_scan_aes_key": "ImageStore.prepare_key 唯一允许采集线程调的重活，必须 monitor=False",
     "_persist_key": "ImageStore._adopt/prepare_key——cfg 派生那份也要落盘，否则下次还得扫",
+    # 下面三个是 wxgf 转码兜底覆写所依赖的：media.py 的 Downloader 会先调 super()
+    # 转一次，失败再自己找 ffmpeg、自己剥裸流
+    "_wxgf_to_jpg": "media.py:Downloader._wxgf_to_jpg 先让上游转（super()）",
+    "_ffmpeg_exe": "media.py:兜底那一路找 ffmpeg 可执行文件",
+    "_extract_hevc": "media.py:兜底那一路从 wxgf 里剥 HEVC 裸流",
 }
 
 # 这些是**实例属性**而不是方法：IsolatedDB 靠覆写它们把缓存钉在工程内。

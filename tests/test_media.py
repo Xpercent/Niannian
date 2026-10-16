@@ -206,3 +206,70 @@ def test_discard_removes_the_replaced_copy_and_nothing_else(tmp_path):
     assert path.is_file()
     store.discard(linked["local_file"])
     assert not path.exists()
+
+
+def test_hevc_to_jpg_tells_ffmpeg_the_stream_format(monkeypatch):
+    """兜底转码必须显式给 ``-f hevc``：裸流没有容器头，ffmpeg 自动探测会直接报错。
+
+    不真跑 ffmpeg，只验我们拼出来的命令，以及"产物不是 FF D8 FF 就当没转出来"——
+    坏字节一旦落盘，气泡上又是一个破图。
+    """
+    import niannian.media as media_mod
+
+    calls = []
+
+    class Done:
+        def __init__(self, code=0):
+            self.returncode = code
+
+    def write_jpg(argv, **kwargs):
+        calls.append(argv)
+        Path(argv[-1]).write_bytes(b"\xff\xd8\xff\xe0fake")
+        return Done()
+
+    monkeypatch.setattr(media_mod.subprocess, "run", write_jpg)
+    got = media_mod.hevc_to_jpg(b"\x00\x00\x00\x01hevc", "ffmpeg")
+    assert got == b"\xff\xd8\xff\xe0fake"
+    assert calls[0][calls[0].index("-f") + 1] == "hevc"
+
+    def write_junk(argv, **kwargs):
+        Path(argv[-1]).write_bytes(b"not a jpeg")
+        return Done()
+
+    monkeypatch.setattr(media_mod.subprocess, "run", write_junk)
+    assert media_mod.hevc_to_jpg(b"\x00", "ffmpeg") is None
+
+    def fail(argv, **kwargs):
+        return Done(1)
+
+    monkeypatch.setattr(media_mod.subprocess, "run", fail)
+    assert media_mod.hevc_to_jpg(b"\x00", "ffmpeg") is None
+
+
+def test_wxgf_override_only_steps_in_when_upstream_gives_up(monkeypatch):
+    """先让上游自己转：它哪天修好这段，我们的兜底就该自动不再触发。"""
+    import sys
+    import niannian.media as media_mod
+    from pathlib import Path as P
+
+    root = P(__file__).resolve().parent.parent
+    if str(root / "wechatauto-replica") not in sys.path:
+        sys.path.insert(0, str(root / "wechatauto-replica"))
+    from wechatauto.media import MediaDownloader
+
+    monkeypatch.setattr(MediaDownloader, "_wxgf_to_jpg",
+                        lambda self, data: b"upstream-jpg")
+    monkeypatch.setattr(media_mod, "hevc_to_jpg", lambda *a: (_ for _ in ()).throw(
+        AssertionError("上游已经转成功，不该再跑兜底")))
+    downloader = media_mod.build_downloader(object())
+    assert downloader._wxgf_to_jpg(b"wxgf") == b"upstream-jpg"
+
+    monkeypatch.setattr(MediaDownloader, "_wxgf_to_jpg", lambda self, data: None)
+    monkeypatch.setattr(MediaDownloader, "_ffmpeg_exe", staticmethod(lambda: "ffmpeg"))
+    monkeypatch.setattr(MediaDownloader, "_extract_hevc",
+                        lambda self, data: b"hevc-stream")
+    seen = []
+    monkeypatch.setattr(media_mod, "hevc_to_jpg",
+                        lambda hevc, exe: seen.append((hevc, exe)) or b"ours")
+    assert downloader._wxgf_to_jpg(b"wxgf") == b"ours"
+    assert seen == [(b"hevc-stream", "ffmpeg")]

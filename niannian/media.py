@@ -15,6 +15,8 @@ from __future__ import annotations
 
 import os
 import re
+import subprocess
+import tempfile
 from pathlib import Path
 
 from .ids import account_scope
@@ -72,6 +74,52 @@ def safe_media_path(base: Path, stored: str) -> Path | None:
     root = Path(base).resolve()
     target = (root / Path(*parts)).resolve()
     return target if target.is_file() and target.is_relative_to(root) else None
+
+
+def hevc_to_jpg(hevc: bytes, exe: str) -> bytes | None:
+    """把 HEVC 裸流交给 ffmpeg 转成 jpg；拿不到 jpg 就返回 None。
+
+    **必须显式给 ``-f hevc``**：从 wxgf 里剥出来的那段没有容器头，ffmpeg 自动探测
+    会直接报 ``Invalid data found when processing input``（本机实测），加了 demuxer
+    名字同一条流就能转出来。
+    """
+    with tempfile.TemporaryDirectory() as td:
+        src = os.path.join(td, "in.hevc")
+        dst = os.path.join(td, "out.jpg")
+        try:
+            with open(src, "wb") as f:
+                f.write(hevc)
+            done = subprocess.run([exe, "-y", "-v", "error", "-f", "hevc",
+                                   "-i", src, "-frames:v", "1", dst],
+                                  capture_output=True, timeout=30)
+            if done.returncode:
+                return None
+            out = Path(dst).read_bytes()
+        except (OSError, subprocess.SubprocessError):
+            return None
+    return out if out[:3] == b"\xff\xd8\xff" else None
+
+
+def build_downloader(wx):
+    """上游的图片下载器，加一处覆写：wxgf 转码失败时补一次带 ``-f hevc`` 的尝试。
+
+    不改 submodule（AGENTS.md 把它当第三方依赖）。**先让上游自己转**——它哪天修好
+    这段，下面的兜底就自动不再触发；只有它返回 None 我们才接手。
+    """
+    from wechatauto.media import MediaDownloader
+
+    class Downloader(MediaDownloader):
+        def _wxgf_to_jpg(self, data):
+            got = super()._wxgf_to_jpg(data)
+            if got:
+                return got
+            exe = self._ffmpeg_exe()
+            if not exe:
+                return None
+            hevc = self._extract_hevc(data)
+            return hevc_to_jpg(hevc, exe) if hevc else None
+
+    return Downloader(wx)
 
 
 class ImageStore:

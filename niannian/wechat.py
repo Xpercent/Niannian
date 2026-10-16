@@ -26,7 +26,7 @@ from pathlib import Path
 
 from .config import clamp_history_limit
 from .ids import session_key, session_user
-from .media import ImageStore, tier_rank
+from .media import ImageStore, build_downloader, tier_rank
 from .normalize import normalize_message
 from .storage import Database, now_utc
 from .wechat_db import open_isolated_db
@@ -216,8 +216,7 @@ class Collector:
 
     def _build_media(self, account: str) -> None:
         """把上游的图片解密器包成本工程的 ImageStore（钥匙闸门在它里面）。"""
-        from wechatauto.media import MediaDownloader
-        self._media = ImageStore(MediaDownloader(self._wx), self.root, account)
+        self._media = ImageStore(build_downloader(self._wx), self.root, account)
 
     def _detach(self) -> None:
         self._wx = None

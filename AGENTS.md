@@ -102,6 +102,12 @@ cd web && npm run dev                   # 前端热更新，/api 代理到 8765
   界面去下载的路，与"采集只读"的约定冲突，**不要用**。
 - 库里**只存相对链接** `<账号指纹>/<会话>_<sort_seq>[_档位].<ext>`，不存二进制；
   读取要经 `safe_media_path` 收口（最多两段、拒绝对称路径/盘符/UNC/`..`）。
+- **wxgf（微信 4.x 用 HEVC 存图）要补 `-f hevc` 才转得动**：上游 `_wxgf_to_jpg` 调 ffmpeg
+  时没给 demuxer 名字，HEVC 裸流自动探测直接报 `Invalid data found`，于是把裸 `.wxgf`
+  落盘——浏览器不认，气泡就是破图（本机「文件传输助手」实测 5 张）。修法在
+  `media.py:build_downloader`：**本仓库子类覆写，不动 submodule**，且**先让上游自己转**
+  （`super()`），它哪天修好这段兜底就自动失效。覆写依赖的 `_wxgf_to_jpg`/`_ffmpeg_exe`/
+  `_extract_hevc` 已进契约守卫清单。
 - 上游 `MediaDownloader` 的 `_image_files` / `decrypt_image` / `_write_decrypted`
   是这里复用的三个私有方法（定位、解密、按文件头判格式落盘 + wxgf→jpg）；
   弄钥匙再加四个：`_derive_cfg_key` / `_load_persisted_key` /
