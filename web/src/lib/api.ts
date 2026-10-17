@@ -100,6 +100,12 @@ export const CATALOG_REQUEST_MS = 100000;
 /** 重新导入深历史会同步读上游库，后端超时 300 秒，前端要等得比它久。 */
 export const LONG_REQUEST_MS = 310000;
 
+/**
+ * 测试连接在后端最多等服务商 20 秒；开着思考实测能到 21 秒，后端为此放宽到 45 秒。
+ * 前端要等得比它久，否则用户看到的是"请求超时"而不是服务商的答复。
+ */
+export const LLM_TEST_REQUEST_MS = 60000;
+
 export async function api<T = unknown>(
   path: string,
   init: RequestInit = {},
@@ -190,13 +196,23 @@ export type SettingsValues = {
   history_limit: number;
   poll_seconds: number;
   port: number;
+  llm_base_url: string;
+  llm_model: string;
+  /** 后端**永远**回空串：真密钥只待在 config.json，界面靠 api_key_masked 显示存了哪一把。 */
+  llm_api_key: string;
+  llm_thinking: boolean;
+  llm_include_images: boolean;
 };
 
 export type SettingsResponse = {
   values: SettingsValues;
   restart_required: string[];
+  /** 每个开放键的中文名，由后端给（界面不再抄第二张表）。 */
+  labels: Record<string, string>;
   config_file: string;
   config_exists: boolean;
+  api_key_masked: string;
+  api_key_set: boolean;
 };
 
 export type SettingsSaveResult = {
@@ -206,9 +222,29 @@ export type SettingsSaveResult = {
   /** 已写入配置但要重启才生效的键。 */
   restart: string[];
   unchanged: boolean;
+  api_key_masked: string;
+  api_key_set: boolean;
+};
+
+/** 测试连接的结果：通不通都回 200，界面只认 ok 这一个字段决定这行字变绿还是变红。 */
+export type LlmTestResult = {
+  ok: boolean;
+  elapsed_ms: number;
+  model?: string;
+  reply?: string;
+  thinking?: boolean;
+  /** 开关与服务商实际表现不一致时的提醒（例如开了思考却没回思考内容）。 */
+  note?: string;
+  error?: string;
 };
 
 export const putJson = (body: unknown): RequestInit => ({
   method: "PUT",
+  body: JSON.stringify(body),
+});
+
+/** 带体的 POST：设置页的「测试连接」用它把界面上当前那份草稿送去，不要求先保存。 */
+export const postJson = (body: unknown): RequestInit => ({
+  method: "POST",
   body: JSON.stringify(body),
 });

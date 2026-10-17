@@ -10,9 +10,10 @@ from fastapi import Body, FastAPI, HTTPException, Query
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from .config import (EDITABLE_KEYS, RESTART_KEYS, load_config, save_config,
-                     validate)
+from .config import (EDITABLE_KEYS, KEY_LABELS, RESTART_KEYS, load_config,
+                     mask_api_key, merge_api_key, save_config, validate)
 from .describe import KIND_LABEL
+from .llm import test_connection
 from .media import media_root, safe_media_path
 from .storage import Database
 from .wechat import Collector
@@ -54,6 +55,22 @@ def port_busy(host: str, port: int) -> bool:
     return False
 
 
+def editable_values(settings: dict) -> dict:
+    """设置页开放的键；密钥那一格**永远回空串**（界面上留空的意思是不改）。
+
+    读与存两个接口都要回同一份形状，这里出一次，避免两处各写各的。
+    """
+    values = {key: settings.get(key) for key in EDITABLE_KEYS}
+    values["llm_api_key"] = ""
+    return values
+
+
+def api_key_fields(settings: dict) -> dict:
+    """密钥只显示指纹：``sk-…0001`` 与"到底存没存"。"""
+    key = str(settings.get("llm_api_key") or "")
+    return {"api_key_masked": mask_api_key(key), "api_key_set": bool(key.strip())}
+
+
 def create_app(root: Path | None = None) -> FastAPI:
     root = Path(root) if root else project_root()
     settings = load_config(root)
@@ -89,20 +106,28 @@ def create_app(root: Path | None = None) -> FastAPI:
 
     @app.get("/api/settings")
     def api_get_settings():
-        """设置页读当前生效值；``restart_required`` 告诉界面哪些要重启。"""
+        """设置页读当前生效值；``restart_required`` 告诉界面哪些要重启。
+
+        API Key **不回明文**：``values`` 里那个键一律给空串，界面要显示"已经存了
+        哪一把"就读 ``api_key_masked``（只有头尾几位）。
+        """
         path = root / "config.json"
         return {
-            "values": {key: settings.get(key) for key in EDITABLE_KEYS},
+            "values": editable_values(settings),
             "restart_required": list(RESTART_KEYS),
+            # 中文名由后端给一份：界面再抄一张表就会和这里漂开
+            "labels": KEY_LABELS,
             "config_file": path.name,
             "config_exists": path.is_file(),
+            **api_key_fields(settings),
         }
 
     @app.put("/api/settings")
     def api_put_settings(payload: dict = Body(...)):
         """保存设置：写 config.json，能热更的立刻推给采集器，其余标需重启。"""
         try:
-            values = validate({key: payload.get(key) for key in EDITABLE_KEYS})
+            values = validate({key: payload.get(key) for key in EDITABLE_KEYS}
+                              | {"llm_api_key": merge_api_key(payload, settings)})
         except ValueError as exc:
             raise HTTPException(400, str(exc)) from exc
         changed = {key for key, value in values.items() if settings.get(key) != value}
@@ -112,11 +137,30 @@ def create_app(root: Path | None = None) -> FastAPI:
         collector.update_settings(values)
         settings.update(values)
         return {
-            "values": {key: settings.get(key) for key in EDITABLE_KEYS},
+            "values": editable_values(settings),
             "applied": sorted(changed - set(RESTART_KEYS)),
             "restart": sorted(changed & set(RESTART_KEYS)),
             "unchanged": not changed,
+            **api_key_fields(settings),
         }
+
+    @app.post("/api/settings/test-connection")
+    def api_test_connection(payload: dict = Body(default=None)):
+        """拿界面上**当前填的**这份参数试一次服务商，不用先保存。
+
+        没提交的键回落到库里已有的值；API Key 留空意思是"沿用已存的那把"，因为
+        界面读到的永远是掩码，留空才是常态。参数明显写错时**先不出网**，直接把
+        校验那句中文话回回来——测连失败的 ``ok=false`` 就是这条接口的正常结果，
+        不走 400/500，界面才知道该把哪一行字变红。
+        """
+        submitted = payload or {}
+        draft = {key: submitted.get(key, settings.get(key)) for key in EDITABLE_KEYS}
+        draft["llm_api_key"] = merge_api_key(submitted, settings)
+        try:
+            draft = validate(draft)
+        except ValueError as exc:
+            return {"ok": False, "error": str(exc), "elapsed_ms": 0}
+        return test_connection(draft)
 
     @app.get("/api/sessions/{session_id}/messages")
     def api_messages(session_id: str, limit: int = Query(40, ge=1, le=200),

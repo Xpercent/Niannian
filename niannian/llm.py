@@ -1,0 +1,154 @@
+"""模型接入层：只负责"按配置发一次 OpenAI 兼容请求"，提炼的语义不在这层。
+
+阶段二的提炼直接复用 :func:`chat`——它是纯函数式的入参出参，不起服务、不碰
+微信解密缓存，所以在请求线程上调它是安全的（"请求线程一律纯读"那条约定针对的是
+微信那份缓存和图片钥匙扫描，不是外部 HTTPS）。
+"""
+
+from __future__ import annotations
+
+import time
+
+from openai import (APIConnectionError, APIStatusError, APITimeoutError,
+                    AuthenticationError, BadRequestError, NotFoundError,
+                    OpenAI, RateLimitError)
+
+# 测试连接是人在界面上等的：20 秒没回就该说话，不能让人盯着转圈。
+TEST_TIMEOUT_SECONDS = 20.0
+# 测试只花一个来回的额度：正文限长 64，够看出通没通、模型认不认。
+TEST_MAX_TOKENS = 64
+# 真机踩过的两个坑（2026-10-17，Qwen/Qwen3-8B）：开着思考时 64 的上限会被思考内容
+# 全吃光，正文一个字都没有，界面上成了"通了但没回话"；而开思考的单次耗时实测在
+# 3.5～21 秒之间晃过（20 秒那一次直接撞破超时）。所以**开思考时上限与超时一起放宽**。
+TEST_MAX_TOKENS_THINKING = 512
+TEST_TIMEOUT_THINKING_SECONDS = 45.0
+TEST_PROMPT = "只回两个字：好的"
+
+
+def thinking_body(enabled) -> dict:
+    """思考模式在请求体里的写法（2026-10-17 拿真服务商实测定的）。
+
+    Qwen3 在 SiliconFlow 上**默认就是开的**：什么参数都不带时回了
+    ``reasoning_content`` 并花掉 334 token，显式关掉只剩 19 token。所以"关"必须
+    **显式发过去**，省略参数等于替用户开着。
+
+    服务商同时也认 ``thinking={"type": "enabled"|"disabled"}``（实测两种都吃），
+    但官方 API 参考里列的是 ``enable_thinking``，我们按文档那个走。
+    """
+    return {"enable_thinking": bool(enabled)}
+
+
+def split_config(settings: dict) -> tuple[str, str, str]:
+    """取出 ``(base_url, model, api_key)``，缺哪个就用中文说哪个没填。
+
+    在出网**之前**检查：配置没填齐是我的问题，不该拿去问服务商。
+    """
+    base = str(settings.get("llm_base_url") or "").strip()
+    model = str(settings.get("llm_model") or "").strip()
+    key = str(settings.get("llm_api_key") or "").strip()
+    if not base:
+        raise ValueError("还没有填服务商地址")
+    if not model:
+        raise ValueError("还没有填模型名")
+    if not key:
+        raise ValueError("还没有填 API Key")
+    return base, model, key
+
+
+def chat(settings: dict, messages: list[dict], *,
+         max_tokens: int | None = None,
+         timeout: float = TEST_TIMEOUT_SECONDS) -> dict:
+    """发一次对话请求，回 ``{text, reasoning, model}``。
+
+    ``max_retries=0``：SDK 默认失败重试两次，那会把界面上的等待时间乘三，
+    而"测试连接"要的是立刻告诉用户通不通。
+    """
+    base, model, key = split_config(settings)
+    client = OpenAI(api_key=key, base_url=base, timeout=timeout, max_retries=0)
+    kwargs: dict = {"model": model, "messages": messages,
+                    "extra_body": thinking_body(settings.get("llm_thinking"))}
+    if max_tokens:
+        kwargs["max_tokens"] = int(max_tokens)
+    completion = client.chat.completions.create(**kwargs)
+    if not getattr(completion, "choices", None):
+        raise ValueError("服务商回了空响应")
+    message = completion.choices[0].message
+    return {"text": (getattr(message, "content", None) or "").strip(),
+            "reasoning": (getattr(message, "reasoning_content", None) or "").strip(),
+            "model": getattr(completion, "model", None) or model}
+
+
+def error_text(exc: Exception, secret: str = "",
+               timeout: float = TEST_TIMEOUT_SECONDS) -> str:
+    """把服务商的错翻成一句给用户看的话，并且**绝不带上密钥**。
+
+    判断顺序是"先具体后笼统"：``AuthenticationError`` 与 ``BadRequestError`` 都是
+    :class:`APIStatusError` 的子类，而 ``APITimeoutError`` 是 ``APIConnectionError``
+    的子类，反过来写就会把 401 说成"连不上"。
+    """
+    if isinstance(exc, AuthenticationError):
+        text = "API Key 被服务商拒了（401）：检查密钥有没有填对、是不是已经作废"
+    elif isinstance(exc, NotFoundError):
+        text = "服务商找不到这个模型或地址（404）：检查模型名和 URL 里的 /v1"
+    elif isinstance(exc, RateLimitError):
+        text = "服务商说请求太频繁（429）：等一会儿再试"
+    elif isinstance(exc, BadRequestError):
+        # 参数与模型不匹配最常走这条，服务商那句话本身就有用，原样带出来
+        text = f"服务商不接受这个请求（400）：{exc.message}"
+    elif isinstance(exc, APITimeoutError):
+        text = (f"等了 {int(timeout)} 秒服务商还没回话：地址对不对、网络通不通，"
+                "开着思考可以再等等或关掉再测")
+    elif isinstance(exc, APIConnectionError):
+        text = "连不上服务商：地址写错、网络不通，或那个端口没在听"
+    elif isinstance(exc, APIStatusError):
+        text = f"服务商返回 {exc.status_code}：{exc.message}"
+    else:
+        text = f"模型请求失败：{type(exc).__name__}"
+    if secret:
+        text = text.replace(secret, "（密钥）")
+    return text
+
+
+def test_budget(settings: dict) -> tuple[int, float]:
+    """这一次测试给多少正文额度、等多久。
+
+    两档分开是因为实测：开着思考时 64 token 会被思考内容吃光（正文一个字都不剩），
+    单次耗时也在 3.5～21 秒之间晃，20 秒那道线被撞破过。
+    """
+    if bool(settings.get("llm_thinking")):
+        return TEST_MAX_TOKENS_THINKING, TEST_TIMEOUT_THINKING_SECONDS
+    return TEST_MAX_TOKENS, TEST_TIMEOUT_SECONDS
+
+
+def test_connection(settings: dict) -> dict:
+    """按当前配置发一条最短请求，把结果讲成人话。
+
+    失败**不抛异常**：测连不通是这条接口的正常结果之一，回 ``ok=False`` 与原因，
+    界面才知道该显示什么，而不是收到一个 500。
+    """
+    thinking = bool(settings.get("llm_thinking"))
+    tokens, timeout = test_budget(settings)
+    started = time.perf_counter()
+    try:
+        result = chat(settings, [{"role": "user", "content": TEST_PROMPT}],
+                      max_tokens=tokens, timeout=timeout)
+    except ValueError as exc:
+        return {"ok": False, "error": str(exc), "elapsed_ms": _elapsed(started)}
+    except Exception as exc:
+        return {"ok": False,
+                "error": error_text(exc, str(settings.get("llm_api_key") or ""), timeout),
+                "elapsed_ms": _elapsed(started)}
+    notes: list[str] = []
+    if thinking and not result["reasoning"]:
+        notes.append("开了思考但服务商没回思考内容，这个模型可能不支持")
+    elif not thinking and result["reasoning"]:
+        notes.append("没开思考却回了思考内容，服务商可能忽略了这个参数")
+    if not result["text"]:
+        # 通了却没回话不算坏：额度被思考内容占满而已，这句得讲出来，不然看着像坏了
+        notes.append("正文是空的（多半被思考内容占满了输出额度），链路本身是通的")
+    return {"ok": True, "elapsed_ms": _elapsed(started), "model": result["model"],
+            "reply": result["text"], "thinking": thinking, "note": "；".join(notes)}
+
+
+def _elapsed(started: float) -> int:
+    return int((time.perf_counter() - started) * 1000)

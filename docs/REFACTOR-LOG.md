@@ -1003,3 +1003,69 @@ master 回到 `da016d9`，**跳过**取图那一轮（`15b0080`），再把升�
   **一轮 3 秒**凭投影列捞回来重转成 jpg；替下来的 5 个 `.wxgf` 确认无人引用后删除。
   复核：图片链接 44 条（32 jpg + 12 png）、缺链接 0、目录孤儿 0；浏览器 `new Image()`
   实测 8 张全部 `onload`（364x138 / 1206x368 等真实尺寸）。`pytest` 115 passed / 6 skipped。
+
+## 模型接入：提炼开工前的第一块（2026-10-17）
+
+用户定这一轮的范围：**只接通模型**（接入层 + 设置页 + 测试连接 + 思考模式开关），
+提炼流水线本身下一轮做；顺带把「图片喂给模型」那个开关（默认关）一起放进设置页。
+
+### 先实测，再写参数（不是猜的）
+
+上一轮留在 `data/` 里的假服务商只验证了链路形状，参数形状必须拿真服务商定。探针脚本
+（`data/_probe_thinking.py`，一次性）拿 `Qwen/Qwen3-8B` 各发一条，结论三条：
+
+1. **不带任何参数时思考是开着的**——回了 `reasoning_content`、花掉 334 token；
+   显式关掉只剩 19 token。所以"关"必须**显式发过去**，省略参数等于替用户开着。
+   这条直接决定了开关的默认值与实现方式。
+2. `enable_thinking`（官方 API 参考里列的那个）与 `thinking={"type": …}`
+   （社区里常见的那种）**两种形状服务商都吃**，实测都能把 reasoning 关掉。
+   按文档走前者。
+3. 开思考的单次耗时在 **0.9～29.9 秒**之间晃（同一条 prompt），而 64 token 的上限
+   会被思考内容**全吃光**：正文一个字都不剩，界面上就成了"通了但没回话"，看着像坏了。
+
+### 落成代码
+
+- `niannian/llm.py`（新）：`chat()` 是唯一出网口，`test_connection()` 给设置页用。
+  错误一律翻成中文（`AuthenticationError`→"API Key 被服务商拒了（401）"…），判断顺序
+  **先具体后笼统**（那两个 4xx 都是 `APIStatusError` 子类，`APITimeoutError` 是
+  `APIConnectionError` 子类，写反了会把 401 说成"连不上"）；错误文本出接口前**先抹掉密钥**。
+  `max_retries=0`（SDK 默认重试两次会把界面上的等待乘三）。额度与超时**按开关分两档**
+  （64/20s、512/45s），就是上面第 3 条逼出来的。
+- `config.py`：模型五项进 `DEFAULTS`/`EDITABLE_KEYS`，`validate()` 严格（URL 必须有
+  scheme 与主机、模型名非空、开关只能认 `true/false/1/0/on/off/yes/no` 这些形状，
+  认不出的一律中文报错——不能让用户以为开了思考而实际没开），`load_config()` 宽容
+  （坏值退回默认，服务起得来）。新增 `to_bool`（同一套词表两种严格度）、
+  `mask_api_key`、`merge_api_key`。`RESTART_KEYS` 不变：模型五项全是热读配置，改完就用。
+- `api.py`：`GET /api/settings` 的 `values.llm_api_key` **恒为空串**，另外给
+  `api_key_masked`/`api_key_set`；`PUT` 走 `merge_api_key`——**留空即不改**，要删只能显式
+  带 `clear_llm_api_key`（因为界面读回来的是掩码，把空当"删"会一保存就丢密钥）。
+  `POST /api/settings/test-connection` 收**草稿**（不要求先保存），参数明显写错时
+  **先不出网**，直接把校验那句话回回来；通不通**都回 200**，`ok` 一个字段决定界面红哪行。
+- 前端：`ui.tsx` 加 `Switch`（手写 `role=switch`，没有引 radix）；`settings.tsx` 加
+  「模型接入」卡片（地址/模型/Key + 思考模式 + 图片喂模型 + 测试连接与结果行）；
+  `lib/api.ts` 加类型、`postJson` 与 `LLM_TEST_REQUEST_MS=60s`（必须比后端最长等待更久，
+  否则用户看到的是"请求超时"而不是服务商的答复）。
+  键的中文名改由 `GET /api/settings` 的 `labels`（`config.KEY_LABELS`）给一份——
+  设置页原来那张 `LABELS` 表是同一个事实的第二个真源，后端改叫法界面不会跟着改。
+
+### 验证
+
+- `pytest` **175 passed / 6 skipped**（新增 41 条：`test_llm.py` 19 条全打在替身服务商上、
+  `test_api_settings.py` 8 条守密钥那条线、`test_config.py` 补校验与开关词表）。测试一条
+  都不出网，"关思考必须显式发过去"这条由 `test_thinking_off_is_sent_explicitly` 钉住。
+- 真机（`Qwen/Qwen3-8B` + 工程里那把 Key）：关思考 **0.85s** 回「好的」；开思考
+  **8.8s / 29.4s**（两次都成功，第二次已经越过旧的 20 秒上限，正好证明分档必要）；
+  错 Key → "API Key 被服务商拒了（401）…"；地址写成 `api.siliconflow.cn/v1` →
+  不出网直接说"要写成完整 URL"。测连**没有**改动 `config.json`（草稿语义）。
+- 浏览器：设置页两张卡片都在，开关点得动（开：轨道 `rgb(36,100,72)`、滑块位移 20px；
+  关：灰、不位移），测连结果行显示"通了 · 模型 · 耗时 · 回「好的」· 思考模式开着"，
+  保存后 `config.json` 落了 `llm_include_images`，**密钥没被空格抹掉**；重新读回是掩码。
+  截图没做成——内置浏览器视口是 0x0（`visibilityState=hidden`），只能用可访问性树 +
+  计算样式核对，这条差异要记下来。
+
+### 已知没做的
+
+- `llm_include_images` 这一轮**没有任何代码读它**（先把开关放进设置页，提炼接上时读）。
+- `data/_llm_stub.py`（上一轮的假服务商）留着不动；`data/_probe_thinking.py` 是本轮的一次性
+  探针，结论已经抄进 AGENTS.md，可以删。
+- 提炼的提示词、批次、结果落库、界面展示全部下一轮。

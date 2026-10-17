@@ -1,9 +1,21 @@
 import { useEffect, useState } from "react";
-import { Loader2, Save } from "lucide-react";
-import { Badge, Button, Card, CardContent, CardHeader, CardTitle, Input } from "../components/ui";
+import { Loader2, PlugZap, Save } from "lucide-react";
+import {
+  Badge,
+  Button,
+  Card,
+  CardContent,
+  CardHeader,
+  CardTitle,
+  Input,
+  Switch,
+} from "../components/ui";
 import {
   api,
+  LLM_TEST_REQUEST_MS,
+  postJson,
   putJson,
+  type LlmTestResult,
   type SettingsResponse,
   type SettingsSaveResult,
 } from "../lib/api";
@@ -12,14 +24,10 @@ type Props = {
   notify: (message: string, error?: boolean) => void;
 };
 
-const LABELS: Record<string, string> = {
-  history_limit: "导入条数",
-  poll_seconds: "轮询间隔",
-  port: "监听端口",
-};
-
+// 键的中文名读后端那一份（`GET /api/settings` 的 `labels`）：这边再抄一张表的话，
+// 后端改了叫法界面不会跟着改，保存后的提示就会说出旧名字。
 type Field = {
-  key: keyof SettingsValuesShape;
+  key: "history_limit" | "poll_seconds" | "port";
   title: string;
   min: number;
   max: number;
@@ -27,10 +35,27 @@ type Field = {
   hint: React.ReactNode;
 };
 
-type SettingsValuesShape = {
+/** 表单里一律用字符串存：数字输入框要能把用户正在敲的东西原样放着，别边打字边改写。 */
+type Form = {
   history_limit: string;
   poll_seconds: string;
   port: string;
+  llm_base_url: string;
+  llm_model: string;
+  llm_api_key: string;
+  llm_thinking: boolean;
+  llm_include_images: boolean;
+};
+
+const EMPTY: Form = {
+  history_limit: "100",
+  poll_seconds: "3",
+  port: "8765",
+  llm_base_url: "",
+  llm_model: "",
+  llm_api_key: "",
+  llm_thinking: false,
+  llm_include_images: false,
 };
 
 // 哪些键要重启由**后端**说（`restart_required` 来自 config.RESTART_KEYS），这里不写死：
@@ -66,15 +91,36 @@ const FIELDS: Field[] = [
   },
 ];
 
+function SwitchRow({
+  title,
+  hint,
+  checked,
+  onChange,
+}: {
+  title: string;
+  hint: React.ReactNode;
+  checked: boolean;
+  onChange: (next: boolean) => void;
+}) {
+  return (
+    <div className="flex items-start justify-between gap-4">
+      <div>
+        <span className="block text-sm font-medium text-stone-700">{title}</span>
+        <span className="mt-1 block text-xs leading-5 text-stone-500">{hint}</span>
+      </div>
+      <Switch label={title} checked={checked} onChange={onChange} />
+    </div>
+  );
+}
+
 export function SettingsPage({ notify }: Props) {
-  const [values, setValues] = useState<SettingsValuesShape>({
-    history_limit: "100",
-    poll_seconds: "3",
-    port: "8765",
-  });
+  const [form, setForm] = useState<Form>(EMPTY);
   const [meta, setMeta] = useState<SettingsResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
+  const [testing, setTesting] = useState(false);
+  const [test, setTest] = useState<LlmTestResult | null>(null);
+  const [clearKey, setClearKey] = useState(false);
   const [error, setError] = useState("");
   const [pendingPort, setPendingPort] = useState<number | null>(null);
 
@@ -84,10 +130,16 @@ export function SettingsPage({ notify }: Props) {
       .then((data) => {
         if (!active) return;
         setMeta(data);
-        setValues({
+        setForm({
           history_limit: String(data.values.history_limit),
           poll_seconds: String(data.values.poll_seconds),
           port: String(data.values.port),
+          llm_base_url: data.values.llm_base_url,
+          llm_model: data.values.llm_model,
+          // 后端回的是空串（密钥不出网关），这里保持空 = 不改
+          llm_api_key: "",
+          llm_thinking: data.values.llm_thinking,
+          llm_include_images: data.values.llm_include_images,
         });
         setError("");
       })
@@ -98,31 +150,75 @@ export function SettingsPage({ notify }: Props) {
     };
   }, []);
 
+  /** 提交给后端的整份设置：密钥那格按"留空即不改/勾了清除才删"翻译。 */
+  function saveBody() {
+    return {
+      history_limit: Number(form.history_limit),
+      poll_seconds: Number(form.poll_seconds),
+      port: Number(form.port),
+      llm_base_url: form.llm_base_url.trim(),
+      llm_model: form.llm_model.trim(),
+      llm_api_key: clearKey ? "" : form.llm_api_key.trim(),
+      clear_llm_api_key: clearKey,
+      llm_thinking: form.llm_thinking,
+      llm_include_images: form.llm_include_images,
+    };
+  }
+
+  /** 保存后的提示用后端那份中文名（读不到时退回键名，不至于显示 undefined）。 */
+  const label = (key: string) => meta?.labels?.[key] ?? key;
+
   async function save() {
     setSaving(true);
     try {
       const result = await api<SettingsSaveResult>(
         "/api/settings",
-        putJson({
-          history_limit: Number(values.history_limit),
-          poll_seconds: Number(values.poll_seconds),
-          port: Number(values.port),
-        }),
+        putJson(saveBody()),
       );
+      setMeta((old) =>
+        old ? { ...old, values: result.values, api_key_masked: result.api_key_masked,
+                api_key_set: result.api_key_set } : old,
+      );
+      setForm((old) => ({ ...old, llm_api_key: "" }));
+      setClearKey(false);
       if (result.unchanged) {
         notify("没有改动需要保存");
       } else {
-        const done = result.applied.map((key) => LABELS[key] || key).join("、");
+        const done = result.applied.map(label).join("、");
         if (done) notify(`已保存并即时生效：${done}`);
         if (result.restart.length) {
-          setPendingPort(Number(values.port));
-          notify(`${LABELS[result.restart[0]] || result.restart[0]} 已写入配置，重启后生效`, true);
+          setPendingPort(Number(form.port));
+          notify(`${label(result.restart[0])} 已写入配置，重启后生效`, true);
         }
       }
     } catch (reason) {
       notify((reason as Error).message || "保存失败", true);
     } finally {
       setSaving(false);
+    }
+  }
+
+  /**
+   * 用界面上**当前这份**去问服务商，不需要先保存。
+   * 只提交模型那几项：采集与端口的值由后端从库里回落，免得改端口改了一半测连不上模型。
+   */
+  async function runTest() {
+    setTesting(true);
+    setTest(null);
+    const body = {
+      llm_base_url: form.llm_base_url.trim(),
+      llm_model: form.llm_model.trim(),
+      // 框里没重填就沿用库里那把；"清除"只影响保存，不影响这一次试
+      llm_api_key: form.llm_api_key.trim(),
+      llm_thinking: form.llm_thinking,
+    };
+    try {
+      setTest(await api<LlmTestResult>("/api/settings/test-connection", postJson(body),
+                                      LLM_TEST_REQUEST_MS));
+    } catch (reason) {
+      setTest({ ok: false, elapsed_ms: 0, error: (reason as Error).message || "测试失败" });
+    } finally {
+      setTesting(false);
     }
   }
 
@@ -183,9 +279,9 @@ export function SettingsPage({ notify }: Props) {
                   max={item.max}
                   step={item.step}
                   className="mt-2"
-                  value={values[item.key]}
+                  value={form[item.key]}
                   onChange={(event) =>
-                    setValues((old) => ({ ...old, [item.key]: event.target.value }))
+                    setForm((old) => ({ ...old, [item.key]: event.target.value }))
                   }
                 />
                 <span className="mt-1 block text-xs leading-5 text-stone-500">{item.hint}</span>
@@ -193,6 +289,168 @@ export function SettingsPage({ notify }: Props) {
               );
             })}
           </div>
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle>模型接入</CardTitle>
+          <Button variant="secondary" size="sm" disabled={testing} onClick={() => void runTest()}>
+            {testing ? (
+              <Loader2 className="size-4 animate-spin motion-reduce:animate-none" />
+            ) : (
+              <PlugZap className="size-4" />
+            )}
+            {testing ? "正在等服务商" : "测试连接"}
+          </Button>
+        </CardHeader>
+        <CardContent className="space-y-5">
+          <div className="grid gap-6 sm:grid-cols-2">
+            <label className="block">
+              <span className="flex flex-wrap items-center gap-2 text-sm font-medium text-stone-700">
+                服务商地址
+                <Badge>即时生效</Badge>
+              </span>
+              <Input
+                className="mt-2"
+                placeholder="https://api.siliconflow.cn/v1"
+                value={form.llm_base_url}
+                onChange={(event) =>
+                  setForm((old) => ({ ...old, llm_base_url: event.target.value }))
+                }
+              />
+              <span className="mt-1 block text-xs leading-5 text-stone-500">
+                任何 OpenAI 兼容服务商都能用，末尾带上 <code className="rounded bg-stone-100 px-1">/v1</code>。
+              </span>
+            </label>
+            <label className="block">
+              <span className="flex flex-wrap items-center gap-2 text-sm font-medium text-stone-700">
+                模型名
+                <Badge>即时生效</Badge>
+              </span>
+              <Input
+                className="mt-2"
+                placeholder="Qwen/Qwen3-8B"
+                value={form.llm_model}
+                onChange={(event) =>
+                  setForm((old) => ({ ...old, llm_model: event.target.value }))
+                }
+              />
+              <span className="mt-1 block text-xs leading-5 text-stone-500">
+                写服务商那边的完整模型 ID，带组织前缀的那种。
+              </span>
+            </label>
+          </div>
+
+          <div>
+            <span className="flex flex-wrap items-center gap-2 text-sm font-medium text-stone-700">
+              API Key
+              {meta?.api_key_set ? (
+                <Badge tone="default">已存 {meta.api_key_masked}</Badge>
+              ) : (
+                <Badge tone="warning">还没填</Badge>
+              )}
+            </span>
+            {/* 清除那颗按钮放在这组之外：label 里嵌按钮的话，点它会连带把输入框叫出来，
+                看起来像"没点上"。名字靠 aria-label 给，不靠 label 包。 */}
+            <Input
+              type="password"
+              autoComplete="off"
+              className="mt-2"
+              aria-label="API Key"
+              placeholder={
+                clearKey
+                  ? "保存后会清掉已存的 Key"
+                  : meta?.api_key_set
+                    ? "留空表示不改，填了就换掉"
+                    : "填服务商给的密钥"
+              }
+              value={form.llm_api_key}
+              onChange={(event) => {
+                setForm((old) => ({ ...old, llm_api_key: event.target.value }));
+                if (event.target.value) setClearKey(false);
+              }}
+            />
+            <span className="mt-1 flex flex-wrap items-center gap-3 text-xs leading-5 text-stone-500">
+              <span>
+                密钥只写进 <code className="rounded bg-stone-100 px-1">{meta?.config_file}</code>
+                ，接口与页面都不回显（这格读回来永远是空的）。
+              </span>
+              {meta?.api_key_set && (
+                <button
+                  type="button"
+                  className="text-stone-600 underline decoration-dotted hover:text-rose-600"
+                  onClick={() => setClearKey((old) => !old)}
+                >
+                  {clearKey ? "撤销清除" : "清除已存的 Key"}
+                </button>
+              )}
+            </span>
+          </div>
+
+          <div className="grid gap-4 sm:grid-cols-2">
+            <SwitchRow
+              title="思考模式"
+              checked={form.llm_thinking}
+              onChange={(next) => setForm((old) => ({ ...old, llm_thinking: next }))}
+              hint={
+                <>
+                  打开后模型先想再答，回复慢好几秒也更费额度。
+                  <strong className="font-medium">Qwen3 这类模型在服务商那边默认就是开的</strong>
+                  （实测），要快与省就得把它关掉。
+                </>
+              }
+            />
+            <SwitchRow
+              title="图片喂给模型"
+              checked={form.llm_include_images}
+              onChange={(next) => setForm((old) => ({ ...old, llm_include_images: next }))}
+              hint="开了才把图片一起给模型看。默认关：只喂气泡上那行文字。"
+            />
+          </div>
+
+          {testing && (
+            <p className="text-sm text-stone-500" role="status">
+              正在等服务商回话，最多 {Math.round(LLM_TEST_REQUEST_MS / 1000)} 秒…
+            </p>
+          )}
+          {test && !testing && (
+            <div
+              role="status"
+              className={
+                test.ok
+                  ? "rounded-lg border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-800"
+                  : "rounded-lg border border-rose-100 bg-rose-50 px-4 py-3 text-sm text-rose-700"
+              }
+            >
+              {test.ok ? (
+                <>
+                  <span className="font-medium">通了</span>
+                  {" · "}
+                  {test.model}
+                  {" · 耗时 "}
+                  {(test.elapsed_ms / 1000).toFixed(1)} 秒
+                  {test.reply ? <span className="block break-words">回「{test.reply}」</span> : null}
+                  <span className="mt-1 block text-xs text-emerald-700">
+                    思考模式{test.thinking ? "开着" : "关着"}
+                  </span>
+                  {test.note ? (
+                    <span className="mt-1 block text-xs text-amber-700">{test.note}</span>
+                  ) : null}
+                </>
+              ) : (
+                <>
+                  <span className="font-medium">没通</span>
+                  {" · "}
+                  {test.error}
+                </>
+              )}
+            </div>
+          )}
+          <p className="text-xs leading-5 text-stone-500">
+            测试连接不打折扣地按界面上这份参数去问服务商（不用先保存）；
+            但<strong className="font-medium">只有保存之后</strong>，下一轮的提炼才会读到它。
+          </p>
         </CardContent>
       </Card>
 

@@ -29,7 +29,8 @@ cd web && npm run dev                   # 前端热更新，/api 代理到 8765
   `ids`（账号指纹与会话主键，媒体目录也用它命名）/
   `contacts`（发送者显示名与群名片 protobuf）/
   `describe`（正文 XML → 结构化描述 + 一行摘要）/
-  `media`（图片定位、解密、链接收口）/ `api`（FastAPI）。
+  `media`（图片定位、解密、链接收口）/ `llm`（按配置发一次 OpenAI 兼容请求 + 测试连接）/
+  `api`（FastAPI）。
 - 切分的判据是"谁有权碰什么"：只有 `wechat_db` 里的东西读微信的解密缓存，
   且必须经 `Collector` 的命令队列进采集线程；`normalize`/`ids`/`describe` 是纯函数，
   阶段二的提炼要直接复用它们，不需要起服务。
@@ -219,8 +220,9 @@ cd web && npm run dev                   # 前端热更新，/api 代理到 8765
   必须清库重采才对存量生效。
 
 ## 设置页与配置（`config.py` / `api.py`）
-- 设置页**只开放三项**：`history_limit`、`poll_seconds`、`port`。`host` 刻意不放
-  （改成非 127.0.0.1 会把本机微信数据暴露到局域网，且改错会把自己关在门外）；
+- 设置页开放**八项**：采集侧 `history_limit`、`poll_seconds`、`port`，模型侧
+  `llm_base_url`、`llm_model`、`llm_api_key`、`llm_thinking`、`llm_include_images`。
+  `host` 刻意不放（改成非 127.0.0.1 会把本机微信数据暴露到局域网，且改错会把自己关在门外）；
   数据目录/账号仍可手工写在 `config.json`。
 - **读宽容、写严格**：`load_config()` 遇到坏值退回默认或夹到边界，保证服务起得来；
   `validate()` 只在保存时用，越界直接抛中文错误、不落盘。别把两者合并。
@@ -249,6 +251,32 @@ cd web && npm run dev                   # 前端热更新，/api 代理到 8765
   `normalize.py:transfer_target`）。认不出对方显示名时什么都不加——宁可只显示金额，
   也不把 `wxid_` 贴进气泡。`des` 那句"收到转账X元"是**收款方视角的固定话术**，
   两条都一样，不能当摘要用。
+
+## 模型接入（`niannian/llm.py`，2026-10-17 上）
+- 这一层**只管"怎么跟服务商说话"**：`chat(settings, messages)` 发一次 OpenAI 兼容
+  请求，`test_connection(settings)` 是设置页那颗按钮的后端。提炼的提示词、批次、
+  结果落库都不在这层——下一轮直接复用 `chat`，不需要起服务也不需要再包一层。
+- **思考模式的参数是实测定的**：SiliconFlow 对 `extra_body={"enable_thinking": bool}`
+  与 `thinking={"type": "enabled"|"disabled"}` **两种形状都吃**，我们按官方 API 参考
+  里那个 `enable_thinking` 走。关键是 **Qwen3 在服务商侧默认就是开的**
+  （不带任何参数时回了 `reasoning_content`、334 token；显式关掉 19 token），
+  所以"关"必须**显式发过去**，省略参数等于替用户开着。
+- **测试连接的两档额度与超时是分开的，别合成一档**（真机踩过）：关思考 64 token / 20 秒；
+  开思考 512 token / 45 秒。开着思考时 64 的上限会被思考内容全吃光（正文一个字都不剩，
+  界面看着像坏了），而单次耗时实测在 **0.9 秒～29.9 秒**之间晃过 20 秒那道线。
+  前端 `LLM_TEST_REQUEST_MS`（60 秒）必须比后端最长等待更久，否则用户看到的是"请求超时"
+  而不是服务商的答复。
+- **服务商的错误一律翻成中文再出接口**（`error_text`），并且**回显前先抹掉密钥**；
+  判断顺序必须先具体后笼统（`AuthenticationError`/`BadRequestError` 都是
+  `APIStatusError` 子类，`APITimeoutError` 是 `APIConnectionError` 子类，反了就把 401
+  说成"连不上"）。测连不通**不走 400/500**：回 `ok=false` + 原因，界面才知道红哪一行。
+- 请求线程打外部 HTTPS 是允许的——"请求线程一律纯读"那条针对的是微信解密缓存与图片钥匙
+  扫描，`llm.py` 两者都不碰。`max_retries=0`（SDK 默认重试两次会把等待时间乘三）。
+- **API Key 不出网关**：`GET /api/settings` 的 `values.llm_api_key` 恒为空串，界面要显示
+  存了哪一把就读 `api_key_masked`/`api_key_set`；保存时**留空即不改**（`merge_api_key`），
+  要删只能显式带 `clear_llm_api_key`。别把它改成回显明文。
+- `llm_include_images` 现在**没有任何代码读它**，只是先把开关放进设置页（用户 2026-10-16
+  定的"图片可选喂模型、必须带开关、默认关"）。提炼接上时读这个键，不用再动存储与采集。
 
 ## 提炼阶段的输入（用户 2026-10-16 定）
 - **喂模型就读 `content`**，也就是气泡上那行人能读的话（`[文件] 报名表.docx · 13.8 KB`、

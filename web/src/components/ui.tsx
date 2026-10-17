@@ -122,6 +122,46 @@ export function Input({
   );
 }
 
+/** 布尔开关：设置页的思考模式与图片喂模型用它（不是原生 checkbox，样式要对齐绿色调）。 */
+export function Switch({
+  checked,
+  onChange,
+  label,
+  disabled,
+  className,
+}: {
+  checked: boolean;
+  onChange: (next: boolean) => void;
+  /** 同时作为 aria-label，读屏要能听见这是哪个开关。 */
+  label: string;
+  disabled?: boolean;
+  className?: string;
+}) {
+  return (
+    <button
+      type="button"
+      role="switch"
+      aria-checked={checked}
+      aria-label={label}
+      disabled={disabled}
+      onClick={() => onChange(!checked)}
+      className={cn(
+        // 轨道 44x24、滑块 20、左右各留 2px：位移量给整档 20px（translate-x-5）
+        "relative h-6 w-11 shrink-0 cursor-pointer rounded-full outline-none transition disabled:cursor-not-allowed disabled:opacity-50",
+        checked ? "bg-primary" : "bg-stone-300",
+        className,
+      )}
+    >
+      <span
+        className={cn(
+          "absolute top-0.5 left-0.5 size-5 rounded-full bg-white shadow-sm transition-transform",
+          checked && "translate-x-5",
+        )}
+      />
+    </button>
+  );
+}
+
 export function Dialog({
   open,
   onClose,

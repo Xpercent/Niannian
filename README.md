@@ -1,8 +1,9 @@
 # 念念 Niannian（重构版）
 
 本机微信只读采集 + 个人工作空间看板。
-已完成：微信会话页（关注、看消息与图片、会话内搜索、引用跳转、重新导入）与设置页；
-下一步是**消息提炼**。阶段编号不再写在界面与文档标题里（历史文档按当时的叫法，见
+已完成：微信会话页（关注、看消息与图片、会话内搜索、引用跳转、重新导入）、设置页，
+以及**模型接入**（OpenAI 兼容服务商 + 思考模式开关 + 设置页"测试连接"）；
+下一步是**消息提炼**本身。阶段编号不再写在界面与文档标题里（历史文档按当时的叫法，见
 `docs/REFACTOR-LOG.md`）。
 
 ## 快速开始
@@ -13,7 +14,7 @@
 git clone --recursive <本仓库>
 cd Niannian2
 python -m venv .venv
-.venv\Scripts\pip install -e wechatauto-replica fastapi uvicorn pytest
+.venv\Scripts\pip install -e wechatauto-replica fastapi uvicorn pytest openai
 .venv\Scripts\pip install -e .          # 可选：安装后端包（也可免安装直接运行）
 cd web
 npm install
@@ -26,8 +27,8 @@ cd ..
 
 ## 配置
 
-优先用页面左侧的**设置页**改（`history_limit` / `poll_seconds` / `port` 三项，
-写入工程根目录 `config.json`，前两项即时生效、端口需重启）。
+优先用页面左侧的**设置页**改（采集三项 + 模型接入五项，写入工程根目录
+`config.json`，除端口外都即时生效）。
 也可直接编辑 `config.json`（可选，参考 `config.json.example`，该文件不入库）：
 
 | 键 | 默认 | 说明 |
@@ -37,6 +38,11 @@ cd ..
 | `wechat_account` | 自动选择 | 多账号时指定 wxid |
 | `history_limit` | 100 | **新关注会话**首次自动导入的最近条数（1–1000）；已关注的会话可用页面上的"重新导入历史"单独指定条数，不影响这里 |
 | `poll_seconds` | 3.0 | 采集轮询间隔 |
+| `llm_base_url` | `https://api.siliconflow.cn/v1` | 模型服务商地址（任何 OpenAI 兼容的都能用，末尾带 `/v1`） |
+| `llm_model` | `Qwen/Qwen3-8B` | 服务商那边的完整模型 ID |
+| `llm_api_key` | 空 | 密钥。**只有这一份是敏感内容**：接口只回掩码（`sk-…xgme`），设置页那格读回来永远是空的，留空保存 = 不改 |
+| `llm_thinking` | false | 思考模式。注意 Qwen3 这类模型在服务商侧**默认是开的**，要快与省必须显式关掉 |
+| `llm_include_images` | false | 提炼时喂不喂图片。**这一轮还没人读它**（提炼流水线下一轮接） |
 
 ## 行为约定
 
@@ -59,6 +65,10 @@ cd ..
   预览图三档取最高；没在微信里点开过的图片会显示预览图档并在放大时标注
   “预览图”。采集那一刻文件还没落盘的，由**采集线程每轮**凭哈希补链接（网页
   请求一律纯读，不解密）；本机出现更高一档时同样由采集线程定期重扫换掉链接。
+- **模型接入只到"能说话"为止**：这一轮建的是 `llm.py` 那一层（按配置发一次
+  OpenAI 兼容请求）与设置页的"测试连接"。**只有测试连接会出网**，发出去的是一句
+  固定测试语，**不含任何聊天内容**；把消息喂给服务商是下一轮提炼的事，
+  那时才受 `llm_include_images` 与关注会话的约束。
 - 其余非纯文本消息由 `describe.py` 解析成中文摘要：文件/视频/链接/小程序/卡片/
   聊天记录/转账/拍一拍/引用/撤回/群动态；语音与位置本机暂无样本，保持上游文本原样，
   认不出的 XML 一律不猜结构。
@@ -75,7 +85,8 @@ cd ..
 | GET | `/api/wechat/catalog` | 微信实时会话目录 |
 | POST | `/api/sessions/{id}/follow` / `unfollow` | 关注 / 取消关注 |
 | POST | `/api/sessions/{id}/reimport?limit=N` | 按 N 条重新导入该会话历史（只影响该会话） |
-| GET / PUT | `/api/settings` | 读 / 存设置页的三项（返回哪些已生效、哪些需重启） |
+| GET / PUT | `/api/settings` | 读 / 存设置页的八项（返回哪些已生效、哪些需重启；密钥只回掩码） |
+| POST | `/api/settings/test-connection` | 用界面上当前那份参数试一次服务商，**不需要先保存**；通不通都回 200，结果在 `ok`/`error` 里 |
 
 ## 目录结构
 
