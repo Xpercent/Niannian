@@ -1,17 +1,40 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Leaf, MessageCircle, Menu, RefreshCw, Settings, X } from "lucide-react";
+import {
+  CheckCircle2,
+  Leaf,
+  Loader2,
+  MessageCircle,
+  Menu,
+  RefreshCw,
+  Settings,
+  X,
+} from "lucide-react";
 import { Button, cn } from "./components/ui";
+import { TaskDrawer } from "./components/task-drawer";
 import { SessionsPage } from "./pages/sessions";
 import { SettingsPage } from "./pages/settings";
-import { api, clockText, type SessionRow, type WechatStatus } from "./lib/api";
+import { TasksPage } from "./pages/tasks";
+import {
+  api,
+  clockText,
+  postJson,
+  type ExtractStatus,
+  type QuoteTarget,
+  type SessionRow,
+  type TaskStats,
+  type WechatStatus,
+} from "./lib/api";
 
+// 待办事项排在最前并且是默认页：这个产品存在的理由就是"消息里剩下的那几件事"，
+// 会话列表是它的来源，不是门面。
 const NAV = [
+  { hash: "#tasks", label: "待办事项", icon: CheckCircle2 },
   { hash: "#sessions", label: "微信会话", icon: MessageCircle },
   { hash: "#settings", label: "设置", icon: Settings },
 ] as const;
 
 function pageFromHash(): string {
-  return NAV.some((item) => item.hash === location.hash) ? location.hash : "#sessions";
+  return NAV.some((item) => item.hash === location.hash) ? location.hash : "#tasks";
 }
 
 const stateLabels: Record<string, { text: string; tone: string }> = {
@@ -47,13 +70,23 @@ function bannerFor(status: WechatStatus | null, loadError: string) {
 export function App() {
   const [status, setStatus] = useState<WechatStatus | null>(null);
   const [sessions, setSessions] = useState<SessionRow[]>([]);
+  const [stats, setStats] = useState<TaskStats | null>(null);
+  const [extract, setExtract] = useState<ExtractStatus | null>(null);
   const [loadError, setLoadError] = useState("");
   const [refreshing, setRefreshing] = useState(false);
   const [mobileNav, setMobileNav] = useState(false);
   const [page, setPage] = useState<string>(() => pageFromHash());
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [taskId, setTaskId] = useState<number | null>(null);
+  const [revision, setRevision] = useState(0);
+  const [busyProcess, setBusyProcess] = useState(false);
+  /** 待办抽屉跳到会话页：这里只放"要去哪一条"，落地由 SessionsPage 用它那唯一的出口做。 */
+  const [pendingJump, setPendingJump] = useState<{ session_id: string; target: QuoteTarget } | null>(null);
   const [notice, setNotice] = useState<{ text: string; error: boolean } | null>(null);
   const noticeTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  /** 跑没跑完要在下一轮才看得出来，所以这两个记在 ref 上，不进渲染。 */
+  const runningRef = useRef(false);
+  const wasRunning = useRef(false);
 
   const notify = useCallback((text: string, error = false) => {
     clearTimeout(noticeTimer.current);
@@ -62,13 +95,21 @@ export function App() {
   }, []);
 
   const refresh = useCallback(async () => {
-    const [nextStatus, nextSessions] = await Promise.all([
+    const [nextStatus, nextSessions, nextStats, nextExtract] = await Promise.all([
       api<WechatStatus>("/api/status"),
       api<SessionRow[]>("/api/sessions"),
+      api<TaskStats>("/api/tasks/stats"),
+      api<ExtractStatus>("/api/extract/status"),
     ]);
     setStatus(nextStatus);
     setSessions(nextSessions);
+    setStats(nextStats);
     setLoadError("");
+    // 一轮从"在跑"变成"跑完"：待办列表与指标卡要立刻重读，不然人得等下一个 10 秒
+    if (wasRunning.current && !nextExtract.running) setRevision((value) => value + 1);
+    wasRunning.current = nextExtract.running;
+    runningRef.current = nextExtract.running;
+    setExtract(nextExtract);
   }, []);
 
   useEffect(() => {
@@ -76,11 +117,12 @@ export function App() {
     let timer: ReturnType<typeof setTimeout>;
     const poll = async () => {
       try {
-        if (active) await refresh();
+        await refresh();
       } catch (error) {
         if (active) setLoadError((error as Error).message || "无法读取看板数据");
       }
-      if (active) timer = setTimeout(() => void poll(), 10000);
+      // 提炼在跑时 2.5 秒问一次：一轮十几批，10 秒一轮的刷新条根本看不出进度
+      if (active) timer = setTimeout(() => void poll(), runningRef.current ? 2500 : 10000);
     };
     void poll();
     return () => {
@@ -117,6 +159,49 @@ export function App() {
     }
   };
 
+  /**
+   * 起一轮提炼。接口只负责"起"，立刻回 200 与这一轮的初始状态——
+   * 一轮十几批、每批最长等 180 秒，把请求挂着等人不可能。
+   */
+  const startRound = async () => {
+    setBusyProcess(true);
+    try {
+      const got = await api<ExtractStatus>("/api/extract", postJson({ session_id: "" }));
+      await refresh();
+      notify(
+        got.accepted
+          ? `已起一轮提炼：${got.total} 条待处理`
+          : "上一轮还在跑，这一轮没排队",
+        got.accepted ? false : true,
+      );
+    } catch (error) {
+      notify((error as Error).message || "起提炼失败", true);
+    } finally {
+      setBusyProcess(false);
+    }
+  };
+
+  /**
+   * 待办抽屉里点"到会话里看这句"：切页 + 选会话 + 留一个待跳转。
+   *
+   * 落地不是这里做的——会话页取屏只有一个出口（`fetchPage`），由它消费 `pendingJump`；
+   * 自己在这里发一次请求，就会出现"上一个会话那一屏盖到刚选中的会话上"那个老 bug。
+   */
+  const openSource = (sessionId: string, target: QuoteTarget) => {
+    if (!sessions.some((item) => item.id === sessionId)) {
+      // 会话已经不再关注：/api/sessions 只列关注的会话，那边没有可选的会话可跳
+      notify("这个会话已不再关注，只能在这里看依据原文。", true);
+      return;
+    }
+    setTaskId(null);
+    setSelectedId(sessionId);
+    setPendingJump({ session_id: sessionId, target });
+    location.hash = "#sessions";
+    setPage("#sessions");
+  };
+
+  const running = Boolean(extract?.running);
+  const extractFailed = !running && Boolean(extract?.error);
   return (
     <div className="min-h-screen">
       {mobileNav && (
@@ -161,6 +246,12 @@ export function App() {
             >
               <item.icon className="size-[18px]" />
               <span>{item.label}</span>
+              {item.hash === "#tasks" && stats && (
+                // 角标只说"还有几件没做完"，逾期与否留给页面里那张卡，别在导航上吓人
+                <span className="ml-auto text-xs tabular-nums text-emerald-700">
+                  {stats.pending}
+                </span>
+              )}
             </a>
           ))}
         </nav>
@@ -206,6 +297,47 @@ export function App() {
           </div>
         </header>
         <main className="px-4 py-6 md:px-8">
+          {(running || extractFailed) && (
+            <div
+              role="status"
+              className={cn(
+                "mb-5 flex flex-wrap items-center gap-3 rounded-lg border px-4 py-3 text-xs",
+                running
+                  ? "border-emerald-200 bg-emerald-50/80 text-emerald-800"
+                  : "border-rose-100 bg-rose-50 text-rose-700",
+              )}
+            >
+              {running ? (
+                <Loader2 className="size-4 animate-spin motion-reduce:animate-none" />
+              ) : (
+                <X className="size-4" />
+              )}
+              <div className="min-w-0 flex-1">
+                <p>
+                  {running
+                    ? extract?.session
+                      ? `正在提炼 · ${extract.session}`
+                      : "正在从消息里提炼待办"
+                    : `上一轮有 ${extract?.failed_batches ?? 0} 批没成功：${extract?.error || "未知原因"}`}
+                </p>
+                {running && (
+                  <progress
+                    className="mt-2 h-1 w-full accent-emerald-700"
+                    value={extract?.done ?? 0}
+                    max={Math.max(1, extract?.total ?? 0)}
+                  />
+                )}
+                {extractFailed && (
+                  <p className="mt-1 leading-5 text-rose-500">
+                    没成功的那几批<em className="font-medium not-italic underline decoration-rose-300">没有</em>被标记，下次点「立即提炼」还会再问一遍。
+                  </p>
+                )}
+              </div>
+              <span className="tabular-nums">
+                {extract?.done ?? 0} / {extract?.total ?? 0}
+              </span>
+            </div>
+          )}
           {banner && (
             <div
               role="alert"
@@ -214,7 +346,16 @@ export function App() {
               {banner.text}
             </div>
           )}
-          {page === "#settings" ? (
+          {page === "#tasks" ? (
+            <TasksPage
+              stats={stats}
+              sessions={sessions}
+              revision={revision}
+              onOpen={setTaskId}
+              onProcess={() => void startRound()}
+              processDisabled={busyProcess || running}
+            />
+          ) : page === "#settings" ? (
             <SettingsPage notify={notify} />
           ) : (
             <SessionsPage
@@ -223,10 +364,22 @@ export function App() {
               notify={notify}
               selectedId={selectedId}
               onSelect={setSelectedId}
+              jumpTo={pendingJump}
+              onJumped={() => setPendingJump(null)}
             />
           )}
         </main>
       </div>
+      <TaskDrawer
+        taskId={taskId}
+        onClose={() => setTaskId(null)}
+        onSaved={() => {
+          setRevision((value) => value + 1);
+          void refresh();
+        }}
+        notify={notify}
+        onOpenSource={openSource}
+      />
       {notice && (
         <div
           role="status"

@@ -6,7 +6,7 @@ import json
 import re
 import sqlite3
 import threading
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 SCHEMA = """
@@ -77,10 +77,31 @@ PROJECTION_COLUMNS = ("kind", "media_md5", "local_file", "tier")
 # 提炼轮次加的那一列不属于 metadata 投影，但同样要求老库重建：
 # 没有它就无法回答"哪些消息还没喂过模型"。
 EXTRACTION_COLUMNS = ("extracted_at",)
+# 待办页能改的也就这几列；`sources`、`session_id`、时间戳由程序自己写。
+TASK_EDITABLE_FIELDS = ("title", "description", "deadline", "priority", "status")
 
 
 def now_utc() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+# 所有**给人看、也要比大小**的时间都是东八区：进模型的 time、tasks.deadline 都是这一份。
+# 常量放在这里（跟 now_utc 作邻居）而不是渲染层，因为"库里存什么形状"是存储的约定；
+# extract.py 渲染消息时间时也从这里取，同一件事只有一处实现。
+SHANGHAI = timezone(timedelta(hours=8))
+
+
+def shanghai_bounds() -> tuple[str, str, str]:
+    """今天零点、明天零点、现在，全部 `2026-10-17T00:00+08:00` 这一档形状。
+
+    刻意不用 SQLite 的 `julianday()`：`deadline` 列的形状是定宽的东八区 ISO，
+    **字典序就是时间序**，字符串比较既走得完索引也不用担心解析格式。
+    """
+    now = datetime.now(SHANGHAI)
+    day = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    return (day.isoformat(timespec="minutes"),
+            (day + timedelta(days=1)).isoformat(timespec="minutes"),
+            now.isoformat(timespec="minutes"))
 
 
 LIKE_SPECIAL = re.compile(r"([%_\\])")
@@ -473,12 +494,14 @@ class Database:
         return len(tasks)
 
     def list_tasks(self, session_id: str = "", status: str = "pending",
-                   priority: str = "", query: str = "",
+                   priority: str = "", query: str = "", due: str = "all",
                    limit: int = 200) -> list[dict]:
-        """任务清单，新→旧；``status='all'`` 不过滤状态。
+        """任务清单，**按优先级再按截止时间**排；``status='all'`` 不过滤状态。
 
         ``sources`` 存的是**依据消息的 sort_seq**（会话内唯一、也正是翻页游标），
         前端点依据跳原文要照消息列表那条路走，不需要新接口。
+        ``due`` 认 today/overdue/upcoming，比较的是 `shanghai_bounds()` 那三个同形状
+        字符串——定宽东八区 ISO 的字典序就是时间序。
         """
         sql = """SELECT t.*, s.name AS session_name FROM tasks t
                  JOIN sessions s ON s.id=t.session_id WHERE 1=1"""
@@ -492,11 +515,25 @@ class Database:
         if priority in ("high", "medium", "low"):
             sql += " AND t.priority=?"
             args.append(priority)
+        day_start, day_end, now = shanghai_bounds()
+        if due == "overdue":
+            sql += " AND t.deadline IS NOT NULL AND t.deadline<?"
+            args.append(now)
+        elif due == "today":
+            sql += " AND t.deadline>=? AND t.deadline<?"
+            args += [day_start, day_end]
+        elif due == "upcoming":
+            sql += " AND t.deadline>=?"
+            args.append(day_end)
         text = str(query or "").strip()
         if text:
-            sql += " AND (t.title LIKE ? ESCAPE '\\' OR t.description LIKE ? ESCAPE '\\')"
-            args += [like_pattern(text), like_pattern(text)]
-        sql += " ORDER BY t.id DESC LIMIT ?"
+            # 会话名也搜：人记的是"那个群里让我做的事"，不一定记得标题被模型写成啥
+            sql += (""" AND (t.title LIKE ? ESCAPE '\\' OR t.description LIKE ? ESCAPE '\\'
+                      OR s.name LIKE ? ESCAPE '\\')""")
+            args += [like_pattern(text)] * 3
+        sql += """ ORDER BY CASE t.priority WHEN 'high' THEN 0
+                                         WHEN 'medium' THEN 1 ELSE 2 END,
+                        t.deadline IS NULL, t.deadline, t.id DESC LIMIT ?"""
         args.append(max(1, min(int(limit), 500)))
         with self.connect() as conn:
             rows = conn.execute(sql, args).fetchall()
@@ -518,3 +555,77 @@ class Database:
             item["sources"] = seqs
             out.append(item)
         return out
+
+    def task(self, task_id: int) -> dict | None:
+        """一条任务的详情，连**依据消息的原文**一起回（抽屉里要看是哪几句话）。
+
+        原文按 sort_seq 升序（模型看到的先后），行形状与消息列表一致，所以前端
+        直接复用那个气泡组件，不需要第二份渲染逻辑。
+        """
+        with self.connect() as conn:
+            row = conn.execute(
+                """SELECT t.*, s.name AS session_name
+                   FROM tasks t JOIN sessions s ON s.id=t.session_id WHERE t.id=?""",
+                (int(task_id),)).fetchone()
+        if not row:
+            return None
+        task = dict(row)
+        try:
+            task["sources"] = [int(s) for s in json.loads(task["sources"] or "[]")]
+        except (json.JSONDecodeError, TypeError, ValueError):
+            task["sources"] = []
+        task["messages"] = self.messages_by_seqs(task["session_id"], task["sources"])
+        return task
+
+    def messages_by_seqs(self, session_id: str, seqs: list[int]) -> list[dict]:
+        """按 ``sort_seq`` 取回这几条消息（升序）；没导入的不会出现，前端据此判可点。"""
+        wanted = sorted({int(s) for s in seqs if int(s)})
+        if not wanted:
+            return []
+        marks = ",".join("?" * len(wanted))
+        with self.connect() as conn:
+            rows = conn.execute(
+                f"""SELECT id, session_id, source_id, sender_key, sender_name, is_self,
+                           content, message_type, created_at, sort_seq, metadata
+                    FROM messages WHERE session_id=? AND sort_seq IN ({marks})
+                    ORDER BY sort_seq, id""",
+                [session_id, *wanted]).fetchall()
+        return [as_message(row) for row in rows]
+
+    def update_task(self, task_id: int, values: dict) -> bool:
+        """改任务的白名单字段；返回 False 表示这条任务不存在。
+
+        只认这几列，别的键（包括前端多带的）一概不落——列名是拼进 SQL 的，
+        白名单就是唯一的注入防线。
+        """
+        fields = {key: values[key] for key in TASK_EDITABLE_FIELDS if key in values}
+        if not fields:
+            return self.task(task_id) is not None
+        fields["updated_at"] = now_utc()
+        sets = ",".join(f"{column}=?" for column in fields)
+        with self._write_lock, self.connect() as conn:
+            cur = conn.execute(f"UPDATE tasks SET {sets} WHERE id=?",
+                               [*fields.values(), int(task_id)])
+        return cur.rowcount > 0
+
+    def task_stats(self) -> dict:
+        """待办页那八个数字。都是 `COUNT`/`SUM` 一把取，页面每 10 秒问一次不心疼。"""
+        day_start, day_end, now = shanghai_bounds()
+        with self.connect() as conn:
+            tasks = conn.execute(
+                """SELECT SUM(status='pending') AS pending,
+                          SUM(status='completed') AS completed,
+                          SUM(status='cancelled') AS cancelled,
+                          SUM(status='pending' AND deadline>=? AND deadline<?) AS due_today,
+                          SUM(status='pending' AND deadline IS NOT NULL AND deadline<?) AS overdue
+                   FROM tasks""", (day_start, day_end, now)).fetchone()
+            messages = conn.execute(
+                """SELECT COUNT(*) AS total,
+                          SUM(s.monitored=1 AND m.extracted_at='') AS queued
+                   FROM messages m JOIN sessions s ON s.id=m.session_id""").fetchone()
+            monitored = conn.execute(
+                "SELECT COUNT(*) AS n FROM sessions WHERE monitored=1").fetchone()
+        return {**{key: int(tasks[key] or 0) for key in tasks.keys()},
+                "messages": int(messages["total"] or 0),
+                "queued": int(messages["queued"] or 0),
+                "monitored": int(monitored["n"] or 0)}

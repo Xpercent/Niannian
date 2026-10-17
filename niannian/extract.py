@@ -11,9 +11,10 @@ import re
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
+from .storage import SHANGHAI
+
 # 时间约定（用户 2026-10-17 定）：**进出模型的都是 Asia/Shanghai 本地时间**，
 # 形如 2026-10-11T15:34。库里 created_at 存 UTC，渲染这一头换算。
-SHANGHAI = timezone(timedelta(hours=8))
 
 HISTORY_LIMIT = 15      # 每批带上文几条旧消息（只当参照，不带编号）
 BATCH_LIMIT = 20        # 一次请求最多带几条待提炼消息

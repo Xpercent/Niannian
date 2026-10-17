@@ -37,7 +37,7 @@ cd web && npm run dev                   # 前端热更新，/api 代理到 8765
   且必须经 `Collector` 的命令队列进采集线程；`normalize`/`ids`/`describe` 是纯函数，
   阶段二的提炼要直接复用它们，不需要起服务。
 - `web/`：React + Vite + Tailwind，手写 UI 组件（无 shadcn/radix）；
-  `pages/` 下两页：`sessions`（微信会话）、`settings`（设置）。
+  `pages/` 下三页：`tasks`（待办事项，**默认页**）、`sessions`（微信会话）、`settings`（设置）。
 - `tests/test_upstream_contract.py`：**认接口不认版本号**地守住上游私有成员
   （`MediaDownloader` 那 7 个 + `WeChatDB` 我们调到的那些）。其余用例全打在替身上，
   上游改名时它们照样全绿而生产立刻瞎，所以 bump pin 前这条必须先看。
@@ -310,6 +310,30 @@ cd web && npm run dev                   # 前端热更新，/api 代理到 8765
 - 额度与超时**分两档**（关 1200/60s、开 2400/180s），理由跟"测试连接"那条实测一样。
 - **429 不做退避重试**：连续 13 批之后智谱会限流（实测），那批不标记、等人再点。
 - 图片这一轮**只喂 `[图片]` 那几个字**，`llm_include_images` 仍然没有任何代码读它。
+
+## 待办事项页（`web/src/pages/tasks.tsx` + `components/task-drawer.tsx`，2026-10-17 上）
+- **默认页是待办事项**（`#tasks`），导航第一项挂 `pending` 角标。原项目那套里的变更记录
+  （`task_events`）、负责人 `owner`、上下文摘要、导出、趋势图**都没有搬**——我们没这些东西，
+  别为了界面去补一张空表。
+- **期限比较走字典序，不用 `julianday()`**：`tasks.deadline` 是定宽东八区 ISO
+  （`2026-10-16T20:00+08:00`），字符串比大小就是时间比大小；边界由 `storage.shanghai_bounds()`
+  给（今天零点 / 明天零点 / 现在，同一形状）。
+- **"今天截止"看日历、"已逾期"看现在**，两条会重叠（今晚 8 点的任务在 22 点既算今天也算逾期），
+  与原项目口径一致，不要"顺手"改成互斥。
+- **`GET /api/tasks/stats` 必须声明在 `GET /api/tasks/{task_id}` 之前**，否则 "stats" 会被
+  当成 id 去转 int（用例 `test_stats_route_is_not_swallowed_by_the_id_route` 钉着）。
+- **`update_task` 只认 `TASK_EDITABLE_FIELDS` 五列**：列名要拼进 SQL，白名单就是唯一的注入防线；
+  `sources`/`session_id`/`created_at` 不许界面改（改了依据就跳不回原文）。
+- **PATCH 的期限复用 `extract.parse_deadline`**：界面上 `datetime-local` 交来没时区的
+  `2026-10-08T09:00`，与模型回的那份过同一个函数，库里只有一种形状。
+  "没给期限"（空 → NULL）与"给了但读不懂"（400 中文）是两回事，不能都当成删掉。
+- **跨页跳原文只有一个出口**：抽屉点"到会话里看这句"→ App 记 `pendingJump` + 切页，
+  会话页在**首次加载那个 effect 之后**消费它并走 `fetchPage`。自己发请求就会重现
+  "上一个会话那一屏盖到刚选中的会话上"。会话已不再关注时不切页，直接说只能看抽屉里的原文。
+- `Dialog` 的 `placement`（`center`|`right`）：两档各给完整的壳子与面板类。`cn()` 是纯拼接，
+  把 `max-h-[85vh]` 留在基类里就会和抽屉要的 `h-full` 打架（同"可覆盖尺寸必须由 prop 整档给出"那条）。
+- App 的轮询在提炼跑着时是 2.5 秒（平时 10 秒），一轮从"在跑"变"跑完"要 bump `revision`
+  让列表与数字立刻重读。
 
 ## 提炼阶段的输入（用户 2026-10-16 定）
 - **喂模型就读 `content`**，也就是气泡上那行人能读的话（`[文件] 报名表.docx · 13.8 KB`、

@@ -328,15 +328,15 @@ def test_list_tasks_filters_and_tolerates_a_broken_sources_cell(db):
     with db.connect() as conn:
         conn.execute("UPDATE tasks SET sources='[' WHERE title='交表'")
 
-    # 新→旧：后插进来的那条排在最前
-    assert [t["title"] for t in db.list_tasks()] == ["交表", "完成问卷"]
+    # 界面要的是"先急后缓"：优先级第一，同档再按期限、没期限的排后面
+    assert [t["title"] for t in db.list_tasks()] == ["完成问卷", "交表"]
     assert [t["title"] for t in db.list_tasks(priority="high")] == ["完成问卷"]
     assert [t["title"] for t in db.list_tasks(query="学号")] == ["交表"]
     assert db.list_tasks(session_id="没这个会话") == []
     assert db.list_tasks(status="completed") == []
     # 坏 JSON 当空表：不能让一行写坏的数据把整个清单查询打死
-    assert db.list_tasks()[0]["sources"] == []
-    assert db.list_tasks()[1]["sources"] == [100, 101]
+    assert db.list_tasks()[0]["sources"] == [100, 101]
+    assert db.list_tasks()[1]["sources"] == []
 
 
 def test_old_database_without_the_extraction_column_says_how_to_fix_it(tmp_path):

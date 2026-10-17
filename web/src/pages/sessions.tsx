@@ -40,9 +40,23 @@ type Props = {
   /** 选中会话提升到 App：切到设置页再回来不该丢掉正在看的会话。 */
   selectedId: string | null;
   onSelect: (id: string | null) => void;
+  /**
+   * 从待办抽屉跳过来时要落到的那一句。这页**不主动发跳转请求**：
+   * 只在这一屏读完后拿它走一次 `jumpToMessage`，翻页与跳转仍然只有一个出口。
+   */
+  jumpTo?: { session_id: string; target: QuoteTarget } | null;
+  onJumped?: () => void;
 };
 
-export function SessionsPage({ sessions, onRefresh, notify, selectedId, onSelect }: Props) {
+export function SessionsPage({
+  sessions,
+  onRefresh,
+  notify,
+  selectedId,
+  onSelect,
+  jumpTo,
+  onJumped,
+}: Props) {
   const [query, setQuery] = useState("");
   const [messages, setMessages] = useState<MessageRow[]>([]);
   const [hasMore, setHasMore] = useState(false);
@@ -299,6 +313,17 @@ export function SessionsPage({ sessions, onRefresh, notify, selectedId, onSelect
     const timer = setTimeout(() => setFlashId(null), 1800);
     return () => clearTimeout(timer);
   }, [flashId]);
+
+  /**
+   * 消费待办抽屉留下的那一句：等这一屏读完（`loading` 掉下）再走，
+   * 而且必须排在首次加载那个 effect 之后——两个请求抢同一条 abort 链时，
+   * 后发的才算数，跳转不能被会话的首屏盖掉。
+   */
+  useEffect(() => {
+    if (!jumpTo || !selected || jumpTo.session_id !== selectedId || loading) return;
+    void jumpToMessage(jumpTo.target);
+    onJumped?.();
+  }, [jumpTo, selected, selectedId, loading]);
 
   async function toggleFollow(session: SessionRow) {
     setBusy(session.id);

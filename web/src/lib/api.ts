@@ -81,6 +81,68 @@ export type MessagePage = {
 /** 会话内正文搜索结果：items 新→旧，query 是后端 strip 过的关键词。 */
 export type MessageSearch = { items: MessageRow[]; query: string };
 
+export type TaskPriority = "high" | "medium" | "low";
+export type TaskStatus = "pending" | "completed" | "cancelled";
+
+/** 一条待办。`deadline` 是东八区定宽 ISO（`2026-10-18T12:00+08:00`），没期限是 null。 */
+export type TaskRow = {
+  id: number;
+  session_id: string;
+  session_name: string;
+  title: string;
+  description: string;
+  deadline: string | null;
+  priority: TaskPriority;
+  status: TaskStatus;
+  /** 依据消息的 sort_seq 列表：会话内唯一，也正是翻页游标。 */
+  sources: number[];
+  created_at: string;
+  updated_at: string;
+};
+
+/** 详情多带依据消息的原文（行形状与消息列表一致，所以气泡组件能直接复用）。 */
+export type TaskDetail = TaskRow & { messages: MessageRow[] };
+
+/** 待办页那四张指标卡与导航角标上的数字。 */
+export type TaskStats = {
+  pending: number;
+  completed: number;
+  cancelled: number;
+  due_today: number;
+  overdue: number;
+  messages: number;
+  /** 关注会话里还没喂给模型的条数。 */
+  queued: number;
+  monitored: number;
+};
+
+/** 提炼轮次的进度：`accepted` 只在 POST 的即时回应里有，false 表示上一轮还没结束。 */
+export type ExtractStatus = {
+  running: boolean;
+  started_at: string | null;
+  finished_at: string | null;
+  total: number;
+  done: number;
+  batches: number;
+  created: number;
+  failed_batches: number;
+  session: string | null;
+  error: string | null;
+  accepted?: boolean;
+};
+
+export const PRIORITY_NAMES: Record<TaskPriority, string> = {
+  high: "高",
+  medium: "普通",
+  low: "低",
+};
+
+export const TASK_STATUS_NAMES: Record<TaskStatus, string> = {
+  pending: "进行中",
+  completed: "已完成",
+  cancelled: "已忽略",
+};
+
 export type WechatStatus = {
   state: string;
   account: string;
@@ -248,3 +310,23 @@ export const postJson = (body: unknown): RequestInit => ({
   method: "POST",
   body: JSON.stringify(body),
 });
+
+/** 改待办（标题/说明/优先级/期限/状态）用它。 */
+export const patchJson = (body: unknown): RequestInit => ({
+  method: "PATCH",
+  body: JSON.stringify(body),
+});
+
+/**
+ * 期限输入框要的是**上海挂钟时间**那种没时区的 `2026-10-18T12:00`：
+ * 库里存的就是定宽东八区，截前 16 位正是它在上海读起来的样子，不做二次换算。
+ * 认不出来（旧数据没有偏移之类）就返回空串，让人重新选，不猜。
+ */
+export function deadlineInput(value?: string | null): string {
+  if (!value) return "";
+  return /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}\+08:00$/.test(value) ? value.slice(0, 16) : "";
+}
+
+/** 反向：表单里那份挂钟时间补回东八区再交给后端（后端还会过一次 parse_deadline）。 */
+export const deadlinePayload = (value: string): string | null =>
+  value ? `${value}+08:00` : null;

@@ -6,6 +6,7 @@ import type {
   HTMLAttributes,
   InputHTMLAttributes,
   ReactNode,
+  TextareaHTMLAttributes,
 } from "react";
 import type { Ref } from "react";
 import { X } from "lucide-react";
@@ -170,6 +171,7 @@ export function Dialog({
   width = "w-full max-w-lg",
   padded = true,
   closable = true,
+  placement = "center",
 }: {
   open: boolean;
   onClose: () => void;
@@ -180,6 +182,13 @@ export function Dialog({
   padded?: boolean;
   /** 右上角那颗 ×；关掉后仍可点遮罩或按 Esc 关闭（图片弹窗就这么用）。 */
   closable?: boolean;
+  /**
+   * `center` 是普通弹窗；`right` 是贴右边的整高抽屉（待办详情用它）。
+   *
+   * 两档各自给完整的壳子与面板类：`cn()` 是纯字符串拼接，把 `max-h-[85vh]` 写在基类里
+   * 就会跟抽屉要的 `h-full` 撞在一起，谁生效取决于样式表顺序。
+   */
+  placement?: "center" | "right";
 }) {
   useEffect(() => {
     if (!open) return;
@@ -190,8 +199,16 @@ export function Dialog({
     return () => window.removeEventListener("keydown", key);
   }, [open, onClose]);
   if (!open) return null;
+  const shells = {
+    center: "items-center justify-center p-4",
+    right: "items-stretch justify-end",
+  };
+  const panels = {
+    center: "relative max-h-[85vh] overflow-hidden rounded-xl border bg-card shadow-xl",
+    right: "relative flex h-full flex-col overflow-y-auto border-l bg-card shadow-xl",
+  };
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+    <div className={cn("fixed inset-0 z-50 flex", shells[placement])}>
       <button
         type="button"
         aria-label="关闭弹窗"
@@ -203,12 +220,7 @@ export function Dialog({
       <div
         role="dialog"
         aria-modal="true"
-        className={cn(
-          "relative max-h-[85vh] overflow-hidden rounded-xl border bg-card shadow-xl",
-          width,
-          padded ? "p-6" : "p-0",
-          className,
-        )}
+        className={cn(panels[placement], width, padded ? "p-6" : "p-0", className)}
       >
         {closable && (
           <button
@@ -223,5 +235,21 @@ export function Dialog({
         {children}
       </div>
     </div>
+  );
+}
+
+/** 多行输入：待办详情里改说明用它（样式跟 Input 同一档）。 */
+export function Textarea({
+  className,
+  ...props
+}: TextareaHTMLAttributes<HTMLTextAreaElement>) {
+  return (
+    <textarea
+      className={cn(
+        "w-full rounded-lg border bg-white px-3 py-2 text-sm leading-6 outline-none transition placeholder:text-muted-foreground focus-visible:ring-2 focus-visible:ring-ring",
+        className,
+      )}
+      {...props}
+    />
   );
 }

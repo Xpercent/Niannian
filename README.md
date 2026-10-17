@@ -1,9 +1,10 @@
 # 念念 Niannian（重构版）
 
 本机微信只读采集 + 个人工作空间看板。
-已完成：微信会话页（关注、看消息与图片、会话内搜索、引用跳转、重新导入）、设置页、
+已完成：**待办事项页**（默认页：指标卡、筛选、右侧抽屉看依据原文并跳回会话、改状态与期限）、
+微信会话页（关注、看消息与图片、会话内搜索、引用跳转、重新导入）、设置页、
 **模型接入**（OpenAI 兼容服务商 + 思考模式开关 + 设置页"测试连接"），以及**第一轮消息提炼**
-（关注会话的消息 → 模型 → `tasks` 表，手动起一轮、后台线程跑，接口能查任务；**界面还没接**）。
+（关注会话的消息 → 模型 → `tasks` 表，手动点「立即提炼」起一轮、后台线程跑）。
 下一步是第二轮对齐（同一件事被不同批次重复建出来，要靠合并收掉）。阶段编号不再写在界面与
 文档标题里（历史文档按当时的叫法，见 `docs/REFACTOR-LOG.md`）。
 
@@ -90,9 +91,12 @@ cd ..
 | GET | `/api/wechat/catalog` | 微信实时会话目录 |
 | POST | `/api/sessions/{id}/follow` / `unfollow` | 关注 / 取消关注 |
 | POST | `/api/sessions/{id}/reimport?limit=N` | 按 N 条重新导入该会话历史（只影响该会话） |
+| GET | `/api/tasks?session_id=&status=&priority=&q=&due=&limit=` | 待办清单（`due` 认 today/overdue/upcoming；`sources` 是依据消息的 sort_seq） |
+| GET | `/api/tasks/stats` | 待办页那几张卡与导航角标的数字（进行中/今天截止/已逾期/累计完成/真实消息/等待提炼/关注会话） |
+| GET | `/api/tasks/{id}` | 一条待办 + **依据消息原文**（按 sort_seq 升序，形状与消息列表一致） |
+| PATCH | `/api/tasks/{id}` | 改标题/说明/优先级/期限/状态；认不出来的中文报错，期限与模型那份过同一个解析器 |
 | POST | `/api/extract` | 起一轮提炼（body 可带 `session_id`，空=所有关注会话）。**立刻回状态**，不等模型；已经在跑就 `accepted=false`，不排队第二轮；配置没填齐直接 400，不出网 |
 | GET | `/api/extract/status` | 这一轮跑到哪儿了（`total/done/batches/created/failed_batches/error`） |
-| GET | `/api/tasks?session_id=&status=&priority=&q=&limit=` | 任务清单（`sources` 是依据消息的 sort_seq；界面还没接，目前 curl） |
 | GET / PUT | `/api/settings` | 读 / 存设置页的八项（返回哪些已生效、哪些需重启；密钥只回掩码） |
 | POST | `/api/settings/test-connection` | 用界面上当前那份参数试一次服务商，**不需要先保存**；通不通都回 200，结果在 `ok`/`error` 里 |
 

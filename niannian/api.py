@@ -13,11 +13,15 @@ from fastapi.staticfiles import StaticFiles
 from .config import (EDITABLE_KEYS, KEY_LABELS, RESTART_KEYS, load_config,
                      mask_api_key, merge_api_key, save_config, validate)
 from .describe import KIND_LABEL
+from .extract import PRIORITIES, parse_deadline
 from .extractor import Extractor
 from .llm import test_connection
 from .media import media_root, safe_media_path
 from .storage import Database
 from .wechat import Collector
+
+# 界面上那三个状态按钮：值必须与 tasks 表的 CHECK 一致，只有这一份清单
+TASK_STATUSES = ("pending", "completed", "cancelled")
 
 
 def type_label(item: dict) -> str:
@@ -215,6 +219,7 @@ def create_app(root: Path | None = None) -> FastAPI:
     @app.get("/api/tasks")
     def api_tasks(session_id: str = Query(""), status: str = Query("pending"),
                   priority: str = Query(""), q: str = Query(""),
+                  due: str = Query("all"),
                   limit: int = Query(100, ge=1, le=200)):
         """任务清单（纯读）。``status`` 给 ``all`` 不过滤状态。
 
@@ -222,7 +227,71 @@ def create_app(root: Path | None = None) -> FastAPI:
         不需要为任务再加接口。
         """
         return {"items": store.list_tasks(session_id=session_id, status=status,
-                                          priority=priority, query=q, limit=limit)}
+                                          priority=priority, query=q, due=due,
+                                          limit=limit)}
+
+    @app.get("/api/tasks/stats")
+    def api_task_stats():
+        """待办页那几张指标卡与导航角标上的数字（先于 ``/{task_id}`` 声明，
+        不然 "stats" 会被当成任务 id 去转 int）。"""
+        return store.task_stats()
+
+    @app.get("/api/tasks/{task_id}")
+    def api_task_detail(task_id: int):
+        """一条任务连同**依据消息的原文**：抽屉里要看是哪几句话让模型建的这条。"""
+        task = store.task(task_id)
+        if not task:
+            raise HTTPException(404, "待办不存在")
+        for item in task["messages"]:
+            item["type_label"] = type_label(item)
+        _attach_quote_targets(task["session_id"], task["messages"])
+        return task
+
+    @app.patch("/api/tasks/{task_id}")
+    def api_task_patch(task_id: int, payload: dict = Body(...)):
+        """人在界面上改这几个字段（标题/说明/优先级/期限/状态），别的不动。
+
+        期限走 `extract.parse_deadline`：界面交来的是 `datetime-local` 那种没时区的
+        "2026-10-18T12:00"，与模型回的那份用**同一个收形状的函数**，库里只有一种形状。
+        """
+        updates: dict = {}
+        if "title" in payload:
+            title = str(payload.get("title") or "").strip()
+            if not title:
+                raise HTTPException(400, "标题不能空着")
+            updates["title"] = title
+        if "description" in payload:
+            updates["description"] = str(payload.get("description") or "").strip()
+        if "priority" in payload:
+            priority = str(payload.get("priority") or "").strip().lower()
+            if priority not in PRIORITIES:
+                raise HTTPException(400, "优先级只能是高、普通、低三档之一")
+            updates["priority"] = priority
+        if "status" in payload:
+            status = str(payload.get("status") or "").strip()
+            if status not in TASK_STATUSES:
+                raise HTTPException(400, "状态只能是进行中、已完成或已忽略")
+            updates["status"] = status
+        if "deadline" in payload:
+            raw = payload.get("deadline")
+            if raw is None or str(raw).strip() == "":
+                updates["deadline"] = None
+            else:
+                # parse_deadline 认不出来给 None，而"没给期限"与"给了但读不懂"是两回事：
+                # 后者是人在界面上填的，要说清楚，不能悄悄把期限删掉。
+                shape = parse_deadline(raw)
+                if shape is None:
+                    raise HTTPException(400, f"截止时间认不出来：{raw}")
+                updates["deadline"] = shape
+        if not updates:
+            raise HTTPException(400, "没有要修改的内容")
+        if not store.update_task(task_id, updates):
+            raise HTTPException(404, "待办不存在")
+        task = store.task(task_id)
+        for item in task["messages"]:
+            item["type_label"] = type_label(item)
+        _attach_quote_targets(task["session_id"], task["messages"])
+        return task
 
     def _attach_quote_targets(session_id: str, items: list[dict]) -> None:
         """给引用行挂 ``quote_target``：被引那条在本库里存在才给，否则为 None。
