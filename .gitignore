@@ -10,3 +10,4 @@ web/dist/
 .replica-backup-tmp/
 web/tsconfig.tsbuildinfo
 wechatauto_logs/
+content.md

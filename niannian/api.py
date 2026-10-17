@@ -1,4 +1,4 @@
-"""FastAPI 应用：REST 接口 + 前端构建产物托管。阶段一只提供看板所需接口。"""
+"""FastAPI 应用：REST 接口 + 前端构建产物托管。含看板与提炼的触发、状态、任务查询接口。"""
 
 from __future__ import annotations
 
@@ -13,6 +13,7 @@ from fastapi.staticfiles import StaticFiles
 from .config import (EDITABLE_KEYS, KEY_LABELS, RESTART_KEYS, load_config,
                      mask_api_key, merge_api_key, save_config, validate)
 from .describe import KIND_LABEL
+from .extractor import Extractor
 from .llm import test_connection
 from .media import media_root, safe_media_path
 from .storage import Database
@@ -77,6 +78,7 @@ def create_app(root: Path | None = None) -> FastAPI:
     store = Database(root / "data" / "niannian.db")
     store.init()
     collector = Collector(store, settings, root)
+    extractor = Extractor(store, settings)
 
     @asynccontextmanager
     async def lifespan(_: FastAPI):
@@ -84,12 +86,14 @@ def create_app(root: Path | None = None) -> FastAPI:
         try:
             yield
         finally:
+            extractor.stop()
             collector.stop()
 
     app = FastAPI(title="Niannian 看板", lifespan=lifespan)
     app.state.settings = settings
     app.state.store = store
     app.state.collector = collector
+    app.state.extractor = extractor
 
     @app.get("/api/status")
     def api_status():
@@ -188,6 +192,37 @@ def create_app(root: Path | None = None) -> FastAPI:
         for item in items:
             item["type_label"] = type_label(item)
         return {"items": items, "query": str(q or "").strip()}
+
+    @app.post("/api/extract")
+    def api_extract_start(payload: dict = Body(default=None)):
+        """起一轮提炼：立刻回状态，不等模型。``session_id`` 空表示所有关注会话。
+
+        模型那边一次只能问一批（一批最长等 180 秒），所以这活放后台线程做，界面按
+        ``GET /api/extract/status`` 轮进度。已经在跑就回 ``accepted=false``，不排队第二轮。
+        """
+        session_id = str((payload or {}).get("session_id") or "").strip()
+        if session_id and not store.session(session_id):
+            raise HTTPException(404, "会话不存在")
+        try:
+            return extractor.start(session_id)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+
+    @app.get("/api/extract/status")
+    def api_extract_status():
+        return extractor.status()
+
+    @app.get("/api/tasks")
+    def api_tasks(session_id: str = Query(""), status: str = Query("pending"),
+                  priority: str = Query(""), q: str = Query(""),
+                  limit: int = Query(100, ge=1, le=200)):
+        """任务清单（纯读）。``status`` 给 ``all`` 不过滤状态。
+
+        ``sources`` 是依据消息的 sort_seq 列表，点它跳原文照消息列表那套游标走，
+        不需要为任务再加接口。
+        """
+        return {"items": store.list_tasks(session_id=session_id, status=status,
+                                          priority=priority, query=q, limit=limit)}
 
     def _attach_quote_targets(session_id: str, items: list[dict]) -> None:
         """给引用行挂 ``quote_target``：被引那条在本库里存在才给，否则为 None。

@@ -1,4 +1,4 @@
-"""SQLite 存储层：会话目录、消息、采集水位。全部查询走显式参数绑定。"""
+"""SQLite 存储层：会话目录、消息、采集水位、提炼出来的任务。全部查询走显式参数绑定。"""
 
 from __future__ import annotations
 
@@ -36,7 +36,8 @@ CREATE TABLE IF NOT EXISTS messages (
   kind TEXT NOT NULL DEFAULT '',
   media_md5 TEXT NOT NULL DEFAULT '',
   local_file TEXT NOT NULL DEFAULT '',
-  tier TEXT NOT NULL DEFAULT ''
+  tier TEXT NOT NULL DEFAULT '',
+  extracted_at TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id, sort_seq, id);
 -- 采集线程每轮取图片活的两条工作清单。这两条**每轮都跑**（默认 3 秒），而 messages
@@ -54,10 +55,28 @@ CREATE TABLE IF NOT EXISTS checkpoints (
   updated_at TEXT NOT NULL DEFAULT '',
   PRIMARY KEY (account, session_id)
 );
+CREATE TABLE IF NOT EXISTS tasks (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+  title TEXT NOT NULL,
+  description TEXT NOT NULL DEFAULT '',
+  deadline TEXT,
+  priority TEXT NOT NULL DEFAULT 'medium',
+  status TEXT NOT NULL DEFAULT 'pending',
+  sources TEXT NOT NULL DEFAULT '[]',
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  CHECK(priority IN ('high','medium','low')),
+  CHECK(status IN ('pending','completed','cancelled'))
+);
+CREATE INDEX IF NOT EXISTS idx_tasks_session ON tasks(session_id, status, id);
 """
 
 # 老库缺这四列时给一句话说明，而不是让每轮采集撞在 "no such column: kind" 上。
 PROJECTION_COLUMNS = ("kind", "media_md5", "local_file", "tier")
+# 提炼轮次加的那一列不属于 metadata 投影，但同样要求老库重建：
+# 没有它就无法回答"哪些消息还没喂过模型"。
+EXTRACTION_COLUMNS = ("extracted_at",)
 
 
 def now_utc() -> str:
@@ -131,7 +150,8 @@ class Database:
             if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' "
                             "AND name='messages'").fetchone():
                 have = {row[1] for row in conn.execute("PRAGMA table_info(messages)")}
-                missing = [name for name in PROJECTION_COLUMNS if name not in have]
+                missing = [name for name in PROJECTION_COLUMNS + EXTRACTION_COLUMNS
+                           if name not in have]
                 if missing:
                     # CREATE TABLE IF NOT EXISTS 不会给已有的表补列，所以这是老库。
                     raise RuntimeError(
@@ -384,3 +404,117 @@ class Database:
                           local_file=?, tier=? WHERE id=?""",
                 (json.dumps(metadata, ensure_ascii=False), kind, digest, local_file,
                  tier, int(message_id)))
+
+    # ------------------------------------------------------------------ 提炼
+    def pending_extraction(self, session_id: str = "", limit: int = 200) -> list[dict]:
+        """关注会话里还没喂过模型的消息，按会话分组、组内从旧到新。
+
+        判据只有 ``extracted_at=''`` 这一条：会话被"重新导入"拉进来的更旧消息因此
+        照样会被追上，这是会话级游标做不到的。这条查询只在人点「提炼」时跑，不是
+        每轮都要跑的清单，所以**不给它建索引**（SCHEMA 里那两个部分索引才是每轮的）。
+        """
+        sql = """SELECT m.id, m.session_id, m.sort_seq, m.sender_name, m.is_self,
+                        m.content, m.created_at, s.name AS session_name
+                 FROM messages m JOIN sessions s ON s.id = m.session_id
+                 WHERE m.extracted_at='' AND s.monitored=1"""
+        args: list = []
+        if session_id:
+            sql += " AND m.session_id=?"
+            args.append(session_id)
+        sql += " ORDER BY m.session_id, m.sort_seq, m.id LIMIT ?"
+        args.append(max(1, int(limit)))
+        with self.connect() as conn:
+            rows = conn.execute(sql, args).fetchall()
+        out = []
+        for row in rows:
+            item = dict(row)
+            item["is_self"] = bool(item["is_self"])
+            out.append(item)
+        return out
+
+    def extraction_history(self, session_id: str, before_seq: int,
+                           before_id: int, limit: int) -> list[dict]:
+        """这批消息之前的 ``limit`` 条，从旧到新；只当上下文，不带编号。
+
+        已提炼过的也在里面：上文要的是"最近说过什么"，跟喂没喂过无关。
+        """
+        with self.connect() as conn:
+            rows = conn.execute(
+                """SELECT sender_name, content, created_at FROM messages
+                   WHERE session_id=? AND (sort_seq<? OR (sort_seq=? AND id<?))
+                   ORDER BY sort_seq DESC, id DESC LIMIT ?""",
+                (session_id, int(before_seq), int(before_seq), int(before_id),
+                 max(0, int(limit)))).fetchall()
+        return [dict(row) for row in reversed(rows)]
+
+    def commit_extraction(self, tasks: list[dict], message_ids: list[int]) -> int:
+        """任务与"这批已提炼"**同事务**落库。
+
+        分两个事务的话，崩在中间会让下一轮把这批消息再喂一次、再建一遍重复任务。
+        没有任务也算处理过：一批消息判出"没有本人要做的事"是正常结果，不能每轮重问。
+        """
+        stamp = now_utc()
+        with self._write_lock, self.connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            for task in tasks:
+                conn.execute(
+                    """INSERT INTO tasks(session_id, title, description, deadline,
+                                         priority, sources, created_at, updated_at)
+                       VALUES(?,?,?,?,?,?,?,?)""",
+                    (task["session_id"], task["title"], task.get("description") or "",
+                     task.get("deadline"), task.get("priority") or "medium",
+                     json.dumps(sorted({int(s) for s in task.get("sources") or []})),
+                     stamp, stamp))
+            if message_ids:
+                marks = ",".join("?" * len(message_ids))
+                conn.execute(
+                    f"UPDATE messages SET extracted_at=? WHERE id IN ({marks})",
+                    [stamp, *[int(i) for i in message_ids]])
+        return len(tasks)
+
+    def list_tasks(self, session_id: str = "", status: str = "pending",
+                   priority: str = "", query: str = "",
+                   limit: int = 200) -> list[dict]:
+        """任务清单，新→旧；``status='all'`` 不过滤状态。
+
+        ``sources`` 存的是**依据消息的 sort_seq**（会话内唯一、也正是翻页游标），
+        前端点依据跳原文要照消息列表那条路走，不需要新接口。
+        """
+        sql = """SELECT t.*, s.name AS session_name FROM tasks t
+                 JOIN sessions s ON s.id=t.session_id WHERE 1=1"""
+        args: list = []
+        if session_id:
+            sql += " AND t.session_id=?"
+            args.append(session_id)
+        if status in ("pending", "completed", "cancelled"):
+            sql += " AND t.status=?"
+            args.append(status)
+        if priority in ("high", "medium", "low"):
+            sql += " AND t.priority=?"
+            args.append(priority)
+        text = str(query or "").strip()
+        if text:
+            sql += " AND (t.title LIKE ? ESCAPE '\\' OR t.description LIKE ? ESCAPE '\\')"
+            args += [like_pattern(text), like_pattern(text)]
+        sql += " ORDER BY t.id DESC LIMIT ?"
+        args.append(max(1, min(int(limit), 500)))
+        with self.connect() as conn:
+            rows = conn.execute(sql, args).fetchall()
+        out = []
+        for row in rows:
+            item = dict(row)
+            # sources 是 sort_seq 的 JSON 数组（load_metadata 只认 dict，这里不能用它）；
+            # 认不出的元素丢掉，不能让一行坏数据把整个清单查询打死。
+            try:
+                raw = json.loads(item["sources"] or "[]")
+            except json.JSONDecodeError:
+                raw = []
+            seqs = []
+            for value in raw if isinstance(raw, list) else []:
+                try:
+                    seqs.append(int(value))
+                except (TypeError, ValueError):
+                    continue
+            item["sources"] = seqs
+            out.append(item)
+        return out
