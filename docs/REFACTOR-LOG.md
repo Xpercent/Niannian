@@ -708,3 +708,10 @@ policy、`test_extractor` 2 条设置生效与一轮快照、`test_api_settings`
 `pytest` **274 passed / 6 skipped**（+7：`tests/test_diagnostics.py` 逐字留档形状、
 列表不带正文、失败也记、跑一半就有进度、只留最近 30 轮 + 级联不留孤儿、三条接口、404）、
 `tsc --noEmit` 干净、`npm run build` 通过。
+
+**补（同日，用户看过界面之后）**：「模型回了什么」这一栏改成**读得成 JSON 就缩进显示**——
+先剥代码围栏再 `JSON.parse`，成功就 `JSON.stringify(parsed, null, 2)`，逐字那一份收进
+「原始回复（逐字）」折叠；**读不懂就照原样贴**并写明为什么不加工（半截 JSON 正是整批失败的
+常见形状，为了好看替服务商补括号会把要看的东西藏掉）。缩进只发生在显示这一头，
+库里存的仍是逐字那份，「复制原始回复」交的也还是逐字。沙箱里三种形状都看过：
+正常一份、带 ```json 围栏的一份、半截 JSON 的一份。`npm run build` 通过，后端一行没改。

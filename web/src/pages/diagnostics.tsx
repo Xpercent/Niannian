@@ -111,6 +111,20 @@ function durationText(ms: number) {
   return ms < 1000 ? `${ms} 毫秒` : `${(ms / 1000).toFixed(1)} 秒`;
 }
 
+/**
+ * 回复里那段 JSON 缩进一下再给人看。**读不懂就交空串**，由界面按原样贴出来：
+ * 半截 JSON 正是这一页最该看的形状，不能为了好看替服务商把括号补上。
+ */
+function prettyJson(text: string) {
+  const body = text.trim().replace(/^```(?:json)?\s*([\s\S]*?)\s*```$/, "$1");
+  try {
+    const parsed = JSON.parse(body) as unknown;
+    return parsed && typeof parsed === "object" ? JSON.stringify(parsed, null, 2) : "";
+  } catch {
+    return "";
+  }
+}
+
 /** 一轮活了多久：没盖上结束时间就别说耗时，那一行本身在说的是"还没完"。 */
 function runDuration(row: ExtractRunRow) {
   if (!row.finished_at) return "";
@@ -384,6 +398,7 @@ function CallInspector({
   const failed = call.status === "error";
   const system = call.request.find((item) => item.role === "system")?.content ?? "";
   const user = call.request.find((item) => item.role === "user")?.content ?? "";
+  const pretty = prettyJson(call.response);
 
   return (
     <div className="space-y-5">
@@ -468,9 +483,19 @@ function CallInspector({
           {call.response ? (
             <div>
               <p className="mb-1.5 text-[11px] tracking-wide text-stone-400">
-                原始文本（未去代码围栏，逐字保留）
+                {pretty ? "回复的 JSON（缩进显示）" : "原始文本（读不出完整 JSON，按原样贴出）"}
               </p>
-              <Code text={call.response} />
+              <Code text={pretty || call.response} />
+              {pretty ? (
+                <Fold label="原始回复（逐字）" hint="库里存的就是这一份，缩进只是显示">
+                  <Code text={call.response} />
+                </Fold>
+              ) : (
+                <p className="mt-2 text-[11px] leading-5 text-amber-700">
+                  这份回复读不出 JSON——半截 JSON 正是整批失败的常见形状，
+                  所以这里不缩进、不加工，看到的就是服务商回的那串字。
+                </p>
+              )}
             </div>
           ) : (
             <p className="text-stone-400">
