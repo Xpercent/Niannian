@@ -1,6 +1,14 @@
 # HANDOFF.md — 交接
 
 ## 当前状态
+**名片消息不再贴原始 XML**（2026-10-20）：库里最后一条 XML 是 `message_type` 42 那张名片，
+原因是它**没有子节点**——昵称与介绍全挂在根节点 `<msg>` 的属性上，`describe()` 按子节点
+分发那一圈碰不到它。新增 `describe._contact()`（无 `nickname` 仍判不认），介绍优先
+`certinfo`、空了回落 `sign`（**sign 那档没有第二例可验**，只有 certinfo 有真样本），
+措辞照用户原话 `[名片] ENTAI 智医 (…)`；`KIND_LABEL` 加 `contact` 后类型徽标与气泡都自动跟上，
+前端没改。已清库重采（旧库 `data/backup-pre-card/`、清单 `data/_before_rebuild.json`）：
+100 条**正文 XML 归零**，图片 12/12 有链接、引用定位全在，浏览器搜「名片」实测过。
+`pytest` **244 passed / 6 skipped**。
 **换服务商：思考参数按域名出形状**（2026-10-20）：设置页指向 Google 后「测试连接」400
 （`Unknown name "enable_thinking"`）。假 key 探同一 URL 报同一句 → **400 出在 body 解析、
 在鉴权之前**，与地址和 key 都无关：那家严格 proto-JSON，OpenAI 规范外的顶层字段一律拒收。

@@ -1239,3 +1239,40 @@ Unknown name "enable_thinking": Cannot find field.
   真服务商端到端复跑：`gemini-3.6-flash` 关思考 4.3 秒通、开思考 2.9 秒通带那句 note；
   模型名不改则回 404 那句中文。`pytest` **243 passed / 6 skipped**（上一轮 239 + 这 4 条）。
 
+
+## 名片消息不再贴原始 XML（2026-10-20）
+
+用户指着界面上那条「班长林欣桐 · 10/19 09:28 · `<?xml version="1.0"?>`」说：改成
+`[名片] ENTAI 智医 (乡邻耳康团队心怀民生热忱，深耕耳鼻喉 AI 健康领域。…)`。
+
+### 先定位：全库只剩这一条是 XML，而它形状特殊
+
+扫存量：`content LIKE '<%xml%'` **只有 1 行**（`message_type` 42）。拿它的正文一看就知道
+为什么前面十类都认得、唯独它漏了——**名片没有子节点**，昵称、介绍、账号全挂在根节点
+`<msg>` 的属性上（`nickname` / `certinfo` / `sign` / `username` / `bigheadimgurl`…），
+而 `describe()` 是按子节点找 handler（`img`/`emoji`/`videomsg`/`appmsg`）的，
+它一个都碰不到，走到最后 `return None`，正文就回落成上游原文。
+
+### 落成代码
+
+- `describe._contact(root)`：子节点那一圈没认出来时再读根节点属性；**没有 `nickname`
+  仍然判不认**（不把一张空壳名片贴进气泡）。介绍优先 `certinfo`（认证账号/服务号的
+  功能介绍），空了才回落 `sign`（个人名片那一格是空的、自我介绍写在个性签名）。
+  **诚实记下**：certinfo 那档有真样本，sign 那档只是按字段名给的回落，本机没有第二例可验。
+- 措辞照用户给的原话：`[名片] 名字 (介绍)`，介绍用括号而不是 ` · `（那读起来像链接的来源）。
+- `KIND_LABEL` 加 `"contact": "名片"` 之后**前端一行都没改**：类型徽标走
+  `api.type_label` → `KIND_LABEL`，气泡走 `content`，两边都自动跟上。
+- 用例 1 条四组断言（`test_contact_card_reads_the_attributes_on_msg`）：certinfo 那条
+  整句摘要、sign 回落、无昵称不认、两格都空时不写出空括号。
+
+### 存量：清库重采
+
+- 停服务 → `wal_checkpoint(TRUNCATE)`（wal/shm 折进主文件）→ 旧库归档
+  `data/backup-pre-card/niannian.db` → 起服务 → 按 `data/_before_rebuild.json`
+  存的那 1 个关注会话重新关注并导 100 条。
+- 重采后 100 条：**正文 XML 归零**；图片 12/12 仍有本机链接（mid 10 / thumb 2）、
+  5 条引用行的 `quoted.sort_seq` 全部定位到，名片那条形如
+  `[名片] ENTAI 智医 (乡邻耳康团队…)`，`metadata.attachment.kind == "contact"`。
+- 浏览器实测：会话内搜「名片」命中那条，气泡与类型徽标都是「名片」。
+
+`pytest` **244 passed / 6 skipped**（上一轮 243 + 这 1 条）。

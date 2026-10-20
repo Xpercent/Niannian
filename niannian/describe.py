@@ -22,6 +22,7 @@ APPMSG_KIND = {4: "link", 5: "link", 6: "file", 19: "merged", 33: "miniapp",
 KIND_LABEL = {"image": "图片", "emoji": "动画表情", "video": "视频", "file": "文件",
               "link": "链接", "miniapp": "小程序", "merged": "聊天记录",
               "transfer": "转账", "card": "卡片", "pat": "拍一拍", "quote": "引用",
+              "contact": "名片",
               "recall": "撤回", "notice": "群动态"}
 # 这几类微信自己已经把话说成整句了，正文直接用那句话，不再套方括号。
 SENTENCE_KINDS = ("pat", "recall", "notice")
@@ -91,7 +92,23 @@ def describe(body: str) -> dict | None:
             found = handler(child)
             if found:
                 return found
-    return None
+    # 名片（上游 type 42）没有子节点，全部信息挂在 <msg> 的属性上。
+    return _contact(root)
+
+
+def _contact(root: ElementTree.Element) -> dict | None:
+    """别人分享的名片：昵称 + 一句自我介绍。
+
+    介绍取自 ``certinfo``（认证账号/服务号的功能介绍），个人名片那格是空的、
+    自我介绍写在 ``sign``（个性签名）。没有 ``nickname`` 就判不认：认不出是谁的名片，
+    不编内容，交回调用方按上游文本入库。
+    """
+    nickname = _attr(root, "nickname")
+    if not nickname:
+        return None
+    note = _attr(root, "certinfo") or _attr(root, "sign")
+    return {"kind": "contact", "name": nickname, "note": note,
+            "username": _attr(root, "username")}
 
 
 def _image(node: ElementTree.Element) -> dict:
@@ -263,6 +280,10 @@ def summarize(desc: dict | None) -> str:
         return f"[{label}] {detail}" if detail else f"[{label}]"
     if kind in SENTENCE_KINDS:
         return desc.get("text") or f"[{label}]"
+    if kind == "contact":
+        # 措辞由用户定：介绍用括号跟在名字后面，不是 " · "（那读起来像链接的来源）
+        note = f" ({desc['note']})" if desc.get("note") else ""
+        return f"[{label}] {desc.get('name') or ''}{note}"
     name = desc.get("name") or ""
     tail = ""
     if kind == "file":

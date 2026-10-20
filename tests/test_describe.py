@@ -72,8 +72,18 @@ VIDEO_XML = (
     "<extcommoninfo><media_expire_at>1792898502</media_expire_at></extcommoninfo>\n</msg>"
 )
 
-REVOKE_XML = (
-    '<?xml version="1.0"?><sysmsg type="revokemsg"><revokemsg>'
+# 名片（上游 type 42）：整条消息就是 <msg> 上的一串属性，没有子节点。
+CARD_XML = (
+    '<?xml version="1.0"?>\n<msg bigheadimgurl="http://wx.qlogo.cn/mmhead/abc/0" '
+    'username="v3_020b3826fd03010000@stranger" nickname="ENTAI 智医" alias="" '
+    'province="Guangdong" city="Guangzhou" sign="" certflag="8" '
+    'certinfo="乡邻耳康团队心怀民生热忱，深耕耳鼻喉 AI 健康领域。" />'
+)
+
+CARD_SIGN_XML = CARD_XML.replace('sign=""', 'sign="慢慢来，比较快"').replace(
+    'certinfo="乡邻耳康团队心怀民生热忱，深耕耳鼻喉 AI 健康领域。"', 'certinfo=""')
+
+REVOKE_XML = (    '<?xml version="1.0"?><sysmsg type="revokemsg"><revokemsg>'
     "<content>\"甲\" 撤回了一条消息</content><revoketime>1791945886</revoketime>"
     "</revokemsg></sysmsg>"
 )
@@ -181,6 +191,21 @@ def test_video_fields():
     video = describe(VIDEO_XML)
     assert video["seconds"] == 6 and video["new_md5"] == "abc89981ee881193"
     assert summarize(video) == "[视频] 0:06"
+
+
+def test_contact_card_reads_the_attributes_on_msg():
+    desc = describe(CARD_XML)
+    assert desc["kind"] == "contact" and desc["name"] == "ENTAI 智医"
+    assert desc["username"] == "v3_020b3826fd03010000@stranger"
+    assert summarize(desc) == "[名片] ENTAI 智医 (乡邻耳康团队心怀民生热忱，深耕耳鼻喉 AI 健康领域。)"
+    # 个人名片没有认证介绍，自我介绍在 sign（个性签名）那一格
+    assert summarize(describe(CARD_SIGN_XML)) == "[名片] ENTAI 智医 (慢慢来，比较快)"
+    bare = CARD_XML.replace('nickname="ENTAI 智医"', 'nickname=""')
+    assert describe(bare) is None
+    # 两格都空：只剩一个名字，不写出空括号
+    plain = CARD_XML.replace('certinfo="乡邻耳康团队心怀民生热忱，深耕耳鼻喉 AI 健康领域。"',
+                             'certinfo=""')
+    assert summarize(describe(plain)) == "[名片] ENTAI 智医"
 
 
 def test_system_messages_render_as_sentences():
