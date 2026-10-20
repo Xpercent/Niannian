@@ -150,7 +150,8 @@ class Extractor:
         history = self.db.extraction_history(session_id, first["sort_seq"], first["id"],
                                              plan.history_limit)
         messages = [{"role": "system", "content": plan.prompt},
-                    {"role": "user", "content": extract.render(session_name, history, chunk)}]
+                    {"role": "user",
+                     "content": extract.render(session_name, history, chunk, plan.profile)}]
         timeout = request_timeout(self.settings)
         with self._lock:
             self.state["session"] = session_name or session_id

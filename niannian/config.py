@@ -12,6 +12,9 @@ from .extract import (DEFAULT_BATCH_LIMIT, DEFAULT_HISTORY_LIMIT,
 
 # 提示词整段交出去改，长度得有个边界（再长就是粘贴错东西了）
 PROMPT_LIMIT = 8000
+# 用户画像每批都要跟着正文走（不像提示词只占系统那一条），所以给得更紧：
+# 2000 字写"我叫什么、在哪几个组、住哪间宿舍"绰绰有余，超了就是拿它粘通知原文了。
+PROFILE_LIMIT = 2000
 
 DEFAULTS: dict = {
     "host": "127.0.0.1",       # 仅监听本机，避免对外暴露微信数据
@@ -34,6 +37,9 @@ DEFAULTS: dict = {
     "extract_batch_limit": DEFAULT_BATCH_LIMIT,
     "extract_history_limit": DEFAULT_HISTORY_LIMIT,
     "extract_prompt": "",
+    # 用户画像：一段自由文本，说"我是谁、我在哪个组"。没有内置默认（谁都不能替用户
+    # 编自己的身份），空着就是每批正文里不带那一段。
+    "extract_profile": "",
 }
 
 # 设置页开放这些键：host 改了会把本机微信数据暴露到局域网且容易把自己关在
@@ -43,7 +49,7 @@ EDITABLE_KEYS = ("history_limit", "poll_seconds", "port",
                  "llm_base_url", "llm_model", "llm_api_key",
                  "llm_thinking", "llm_include_images", "llm_temperature",
                  "extract_round_limit", "extract_batch_limit",
-                 "extract_history_limit", "extract_prompt")
+                 "extract_history_limit", "extract_prompt", "extract_profile")
 # 这些键改了必须重启才生效，界面上要如实标出来，不能假装已应用。
 RESTART_KEYS = ("port",)
 BOOL_KEYS = ("llm_thinking", "llm_include_images")
@@ -72,6 +78,7 @@ KEY_LABELS = {
     "extract_batch_limit": "一批请求条数",
     "extract_history_limit": "上文条数",
     "extract_prompt": "提炼提示词",
+    "extract_profile": "用户画像",
 }
 
 TRUE_WORDS = ("true", "1", "on", "yes")
@@ -243,6 +250,12 @@ def validate(values: dict) -> dict:
     # 提交的与内置那段一字不差 → 落**空串**：config.json 里不留一份副本，
     # 日后内置改了（比如又撞出一个要把 JSON 写坏的形状）不会被自己存的那份挡住。
     out["extract_prompt"] = "" if prompt == DEFAULT_SYSTEM_PROMPT.strip() else prompt
+
+    # 画像与提示词不同：它没有"内置默认"可比，用户写什么就是什么，空着就是不发那一段。
+    profile = str(values.get("extract_profile") or "").strip()
+    if len(profile) > PROFILE_LIMIT:
+        raise ValueError(f"用户画像太长了（{len(profile)} 字，上限 {PROFILE_LIMIT} 字）")
+    out["extract_profile"] = profile
     return out
 
 
@@ -284,7 +297,7 @@ def load_config(root: Path) -> dict:
         settings["poll_seconds"] = max(1.0, float(settings.get("poll_seconds", 3.0)))
     except (TypeError, ValueError):
         settings["poll_seconds"] = DEFAULTS["poll_seconds"]
-    for field in ("llm_base_url", "llm_model", "llm_api_key"):
+    for field in ("llm_base_url", "llm_model", "llm_api_key", "extract_profile"):
         if not isinstance(settings.get(field), str):
             settings[field] = DEFAULTS[field]
     for field in BOOL_KEYS:

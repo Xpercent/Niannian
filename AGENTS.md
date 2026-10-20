@@ -228,10 +228,10 @@ cd web && npm run dev                   # 前端热更新，/api 代理到 8765
   必须清库重采才对存量生效。
 
 ## 设置页与配置（`config.py` / `api.py`）
-- 设置页开放**十三项**：采集侧 `history_limit`、`poll_seconds`、`port`，模型侧
+- 设置页开放**十四项**：采集侧 `history_limit`、`poll_seconds`、`port`，模型侧
   `llm_base_url`、`llm_model`、`llm_api_key`、`llm_thinking`、`llm_include_images`、
   `llm_temperature`，提炼侧 `extract_round_limit`、`extract_batch_limit`、
-  `extract_history_limit`、`extract_prompt`（2026-10-20 上）。
+  `extract_history_limit`、`extract_prompt`、`extract_profile`（2026-10-20 上）。
   提炼那三个数**写在这四个键里而不是写回 `extract.py`**：`extract.DEFAULT_*` 仍是
   唯一的默认值来源，`config.DEFAULTS` 直接引它，两处不各存一份。
   `host` 刻意不放（改成非 127.0.0.1 会把本机微信数据暴露到局域网，且改错会把自己关在门外）；
@@ -351,6 +351,16 @@ cd web && npm run dev                   # 前端热更新，/api 代理到 8765
 - **一轮起头取一次策略快照**（`extract.policy(settings)` → `extractor._run(sid, plan)`）：
   一轮要跑几分钟，中途在设置页改批次或提示词不该让后半批换个问法，否则失败重跑时
   说不清是哪条规则把 JSON 写坏的。保存只对**下一轮**生效，这条要说给界面。
+  画像（`extract_profile`）与提示词同进退，所以也在快照里。
+- **用户画像进正文、不进提示词**（`extract.render(..., profile)` → `<profile>` 段）：
+  提示词整段可在设置页改，写进提示词就等于"改提示词时顺手把我是谁改没"。段内自带一句
+  `PROFILE_NOTE` 说明这是本人信息，模型不靠提示词认识这个标签。**空着就整段不发**
+  （不给模型一个空壳让它以为"查不到我"）。上限 `config.PROFILE_LIMIT`（2000 字，
+  每批都要跟着走，比提示词那道 8000 紧）。
+  为什么非要有这一格：真机那 100 条里有一条「@Carson 吴承骏 @刘肇楷 @20李健浩 **@YX**
+  @28 李辉业 郑博怀 请尽快提交考试结果截图」，模型整批回了 `{"tasks":[]}`——它没有任何
+  地方可以知道 YX 就是本人（那几天用户没在群里发过言，`sender="我"` 一次都没出现），
+  而提示词那条"点名别人就不建"反而把该建的挡掉了。判不出就**不猜**是这一层的定死的规矩。
 - 等待**分两档**（关 60s、开 180s），理由跟"测试连接"那条实测一样；**不发 `max_tokens`**
   （2026-10-20 起四道全去掉，长度上限交回服务商），所以一轮的最坏耗时就是
   「批数 × 这一档」，没有额度那道闸帮着截。

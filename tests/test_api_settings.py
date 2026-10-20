@@ -140,6 +140,18 @@ def test_put_settings_stores_a_custom_prompt_and_the_numbers(tmp_path, monkeypat
                                    "extract_history_limit"}
 
 
+def test_put_settings_stores_the_profile_and_shows_it_back(tmp_path, monkeypatch):
+    """画像这格回的就是库里那份原话：它没有"内置默认"，空着就是真的没填。"""
+    app = make_app(tmp_path, monkeypatch)
+
+    got = endpoint(app, "/api/settings", "PUT")(
+        {**BASE, "extract_profile": "我叫 YX，心理课第 5 组，宿舍 4 号楼 301"})
+
+    assert got["values"]["extract_profile"] == "我叫 YX，心理课第 5 组，宿舍 4 号楼 301"
+    assert got["applied"] == ["extract_profile"]
+    assert read_config(tmp_path)["extract_profile"] == "我叫 YX，心理课第 5 组，宿舍 4 号楼 301"
+
+
 def test_saving_the_default_prompt_untouched_writes_no_copy(tmp_path, monkeypatch):
     """原样把内置那段提交回来 → 落**空串**：库里不存副本，日后内置改了才挡不住。"""
     app = make_app(tmp_path, monkeypatch)

@@ -318,6 +318,8 @@ export type SettingsValues = {
   extract_history_limit: number;
   /** 回的是**真正生效的那段**：库里存空串意思是"用内置"，界面得看到全文才谈得上改。 */
   extract_prompt: string;
+  /** 用户画像：库里存什么就回什么，它没有"内置默认"（没人能替用户编自己的身份）。 */
+  extract_profile: string;
 };
 
 export type SettingsResponse = {

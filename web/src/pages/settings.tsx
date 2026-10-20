@@ -60,6 +60,7 @@ type Form = {
   extract_batch_limit: string;
   extract_history_limit: string;
   extract_prompt: string;
+  extract_profile: string;
 };
 
 const EMPTY: Form = {
@@ -76,6 +77,7 @@ const EMPTY: Form = {
   extract_batch_limit: "20",
   extract_history_limit: "15",
   extract_prompt: "",
+  extract_profile: "",
 };
 
 // 哪些键要重启由**后端**说（`restart_required` 来自 config.RESTART_KEYS），这里不写死：
@@ -249,6 +251,7 @@ export function SettingsPage({ notify }: Props) {
           extract_batch_limit: String(data.values.extract_batch_limit),
           extract_history_limit: String(data.values.extract_history_limit),
           extract_prompt: data.values.extract_prompt,
+          extract_profile: data.values.extract_profile,
         });
         setError("");
       })
@@ -277,6 +280,7 @@ export function SettingsPage({ notify }: Props) {
       extract_batch_limit: numberOrNull(form.extract_batch_limit),
       extract_history_limit: numberOrNull(form.extract_history_limit),
       extract_prompt: form.extract_prompt,
+      extract_profile: form.extract_profile.trim(),
     };
   }
 
@@ -593,6 +597,31 @@ export function SettingsPage({ notify }: Props) {
           </Button>
         </CardHeader>
         <CardContent className="space-y-5">
+          <label className="block">
+            <span className="flex flex-wrap items-center gap-2 text-sm font-medium text-stone-700">
+              用户画像
+              <Badge>即时生效</Badge>
+            </span>
+            <Textarea
+              className="mt-2 text-sm leading-6"
+              rows={4}
+              aria-label="用户画像"
+              placeholder="例如：我叫 YX，26 软工 3 班学生；心理课第 5 组、信创课第 3 组；4 号楼 301 宿舍；邮箱 12345678@qq.com。不参加社团和竞赛类招新。"
+              value={form.extract_profile}
+              onChange={(event) =>
+                setForm((old) => ({ ...old, extract_profile: event.target.value }))
+              }
+            />
+            <span className="mt-1 block text-xs leading-5 text-stone-500">
+              一句话说明<strong className="font-medium">你是谁</strong>，模型拿它判断消息点的是不是你：
+              名字与群里被叫的称呼、班级、小组、宿舍、职务、邮箱都写进去。
+              <strong className="font-medium">留空的话它只认得出 sender="我"</strong>
+              （也就是你自己发出去的那几条），别人 @ 你、点到"第 5 组"这类一概判不出，只会一句"与我无关"。
+              这一段随每批正文一起发（不写在提示词里，所以改提示词不会把它改没），上限 2000 字，
+              <strong className="font-medium">保存后下一轮生效</strong>。
+            </span>
+          </label>
+
           <div className="grid gap-6 sm:grid-cols-2 xl:grid-cols-3">
             {EXTRACT_FIELDS.map((item) => (
               <NumberField

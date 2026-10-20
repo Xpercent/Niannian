@@ -207,6 +207,17 @@ def test_settings_decide_the_batch_the_history_and_the_prompt(db, fake):
     assert fake.calls[0]["user"].count("<msg id=") == 2
 
 
+def test_the_profile_goes_out_with_every_batch(db, fake):
+    """画像在每批的正文里（不在提示词里），一批一条也要条条带得上"我是谁"。"""
+    sid = session_key(ACCOUNT, "room_a")
+    seed(db, sid, count=3)
+
+    run(db, settings={**CFG, "extract_batch_limit": 1, "extract_profile": "我叫 YX，心理课第 5 组"})
+
+    assert len(fake.calls) == 3
+    assert all("我叫 YX，心理课第 5 组" in call["user"] for call in fake.calls)
+
+
 def test_a_running_round_keeps_the_policy_it_started_with(db, fake):
     """一轮要跑好几分钟：中途保存设置不该让后半批换个问法，否则说不清是谁把 JSON 写坏的。"""
     hold = threading.Event()
@@ -223,11 +234,13 @@ def test_a_running_round_keeps_the_policy_it_started_with(db, fake):
         time.sleep(0.005)
     settings["extract_batch_limit"] = 50
     settings["extract_prompt"] = "后半批改的这个不该被读到"
+    settings["extract_profile"] = "后半批改的画像也不该被读到"
     hold.set()
     assert ex._worker.join(timeout=20) is None       # noqa: 只是等后台那一轮结束
 
     assert len(fake.calls) == 2                      # 仍是按 2 条一切
     assert all(call["system"] != "后半批改的这个不该被读到" for call in fake.calls)
+    assert all("后半批改的画像" not in call["user"] for call in fake.calls)
 
 
 def test_only_monitored_sessions_are_read(db, fake):

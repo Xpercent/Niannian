@@ -28,7 +28,8 @@ def test_validate_normalizes_types():
                               "port": 9000, **LLM_GOOD,
                               "extract_round_limit": 80, "extract_batch_limit": 10,
                               "extract_history_limit": 5,
-                              "extract_prompt": "只要学习相关的"}
+                              "extract_prompt": "只要学习相关的",
+                              "extract_profile": ""}
 
 
 def test_validate_only_returns_editable_keys():
@@ -102,6 +103,7 @@ def test_llm_api_key_may_be_empty_at_save_time():
     ("extract_batch_limit", "两批", "整数"),
     ("extract_history_limit", 101, "0 到 100"),
     ("extract_prompt", "x" * 8001, "太长"),
+    ("extract_profile", "我" * 2001, "用户画像太长"),
 ])
 def test_validate_rejects_bad_extract_values_with_plain_words(key, bad, phrase):
     with pytest.raises(ValueError) as caught:
@@ -128,17 +130,25 @@ def test_prompt_identical_to_the_built_in_is_stored_blank():
     assert validate({**GOOD, "extract_prompt": DEFAULT_SYSTEM_PROMPT})["extract_prompt"] == ""
 
 
+def test_profile_is_stored_exactly_as_written():
+    """画像与提示词不同：它没有"内置默认"可比，写什么就落什么（只剥两侧空白）。"""
+    got = validate({**GOOD, "extract_profile": "\n  我叫 YX，心理课第 5 组 \n"})
+    assert got["extract_profile"] == "我叫 YX，心理课第 5 组"
+
+
 def test_load_config_clamps_extract_numbers_instead_of_refusing_to_start(tmp_path):
     """读文件那一头宽容：手工写在 config.json 里的越界值夹回边界，服务照样起得来。"""
     (tmp_path / "config.json").write_text(
         json.dumps({"extract_round_limit": 99999, "extract_batch_limit": "abc",
-                    "extract_history_limit": -3, "extract_prompt": 42}),
+                    "extract_history_limit": -3, "extract_prompt": 42,
+                    "extract_profile": 42}),
         encoding="utf-8")
     settings = load_config(tmp_path)
     assert settings["extract_round_limit"] == 1000                    # 夹到上界
     assert settings["extract_batch_limit"] == DEFAULT_BATCH_LIMIT     # 认不出来退默认
     assert settings["extract_history_limit"] == 0                     # 夹到下界
     assert settings["extract_prompt"] == ""                           # 非字符串当没填
+    assert settings["extract_profile"] == ""                          # 同上：不把数字当身份
 
 
 def test_load_config_treats_an_unreadable_temperature_as_not_filled(tmp_path):
@@ -257,7 +267,7 @@ def test_only_port_needs_restart():
         "llm_base_url", "llm_model", "llm_api_key",
         "llm_thinking", "llm_include_images", "llm_temperature",
         "extract_round_limit", "extract_batch_limit",
-        "extract_history_limit", "extract_prompt"}
+        "extract_history_limit", "extract_prompt", "extract_profile"}
 
 
 def test_every_editable_key_has_a_chinese_label():
