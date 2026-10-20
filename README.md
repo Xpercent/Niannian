@@ -4,7 +4,8 @@
 已完成：**待办事项页**（默认页：指标卡、筛选、右侧抽屉看依据原文并跳回会话、改状态与期限）、
 微信会话页（关注、看消息与图片、会话内搜索、引用跳转、重新导入）、设置页、
 **模型接入**（OpenAI 兼容服务商 + 思考模式开关 + 设置页"测试连接"），以及**第一轮消息提炼**
-（关注会话的消息 → 模型 → `tasks` 表，手动点「立即提炼」起一轮、后台线程跑）。
+（关注会话的消息 → 模型 → `tasks` 表，手动点「立即提炼」起一轮、后台线程跑）、
+**提炼诊断页**（一轮一批一条：回看每一次请求发出去的原文与模型的原样回复）。
 下一步是第二轮对齐（同一件事被不同批次重复建出来，要靠合并收掉）。阶段编号不再写在界面与
 文档标题里（历史文档按当时的叫法，见 `docs/REFACTOR-LOG.md`）。
 
@@ -80,6 +81,9 @@ cd ..
 - **提炼的进度按每条消息记（`extracted_at`）**：一轮吃过的消息不会重问，判出"这批没有我
   要做的事"也算吃过；某批请求失败或回复读不懂时**那批不标记**，下一轮照旧取到，
   所以服务商限流（429）不会静默吞掉消息。
+- **每一批都留档**：发出去的正文（系统提示词 + 本批 XML）与模型的原样回复逐字存进本机
+  `extract_runs` / `model_calls` 两张表，**只留最近 30 轮**，失败的请求也在里面（连服务商
+  那句话）。服务商地址与 API Key 不入库、也不从诊断接口下发。
 - 其余非纯文本消息由 `describe.py` 解析成中文摘要：文件/视频/链接/小程序/卡片/
   聊天记录/转账/拍一拍/引用/名片/撤回/群动态；语音与位置本机暂无样本，保持上游文本原样，
   认不出的 XML 一律不猜结构。
@@ -101,14 +105,18 @@ cd ..
 | GET | `/api/tasks/{id}` | 一条待办 + **依据消息原文**（按 sort_seq 升序，形状与消息列表一致） |
 | PATCH | `/api/tasks/{id}` | 改标题/说明/优先级/期限/状态；认不出来的中文报错，期限与模型那份过同一个解析器 |
 | POST | `/api/extract` | 起一轮提炼（body 可带 `session_id`，空=所有关注会话）。**立刻回状态**，不等模型；已经在跑就 `accepted=false`，不排队第二轮；配置没填齐直接 400，不出网 |
-| GET | `/api/extract/status` | 这一轮跑到哪儿了（`total/done/batches/created/failed_batches/error`） |
+| GET | `/api/extract/status` | 这一轮跑到哪儿了（`total/done/batches/created/failed_batches/error`，另带本轮那一行的 `run_id`） |
+| GET | `/api/diagnostics/runs?limit=` | 最近的提炼轮次（新→旧，每轮带请求数与失败数） |
+| GET | `/api/diagnostics/runs/{run_id}` | 一轮的请求序列（概要 + 字符数，**不带正文**） |
+| GET | `/api/diagnostics/calls/{call_id}` | 一次请求的原始内容：发出去的 system/user 正文、模型原样回复与思考内容 |
 | GET / PUT | `/api/settings` | 读 / 存设置页的十二项（返回哪些已生效、哪些需重启；密钥只回掩码，`extract_prompt` 那格回的是**正在生效的那段**提示词，顶层另给 `extract_prompt_default` 供「恢复默认」） |
 | POST | `/api/settings/test-connection` | 用界面上当前那份参数试一次服务商，**不需要先保存**；通不通都回 200，结果在 `ok`/`error` 里 |
 
 ## 目录结构
 
 ```
-niannian/        后端：config / storage（含 tasks 表）/ ids（账号指纹与会话主键）/
+niannian/        后端：config / storage（含 tasks 表与提炼诊断的 extract_runs、
+                 model_calls）/ ids（账号指纹与会话主键）/
                  wechat_db（建上游读取器 + 分片补查）/ wechat（采集线程）/
                  normalize（上游行→本地记录）/ contacts / describe / media /
                  llm（发一次模型请求）/ extract（提炼输入契约，纯函数）/
@@ -116,7 +124,8 @@ niannian/        后端：config / storage（含 tasks 表）/ ids（账号指�
 web/             前端（React 19 + Vite 7 + Tailwind 4，自建组件集）
 wechatauto-replica/  上游微信只读库（git submodule，锁定 1.2.6.1）
 tests/           pytest（存储、规范化、图片与钥匙闸门、采集线程状态机、
-                 上游私有接口契约、真机 fixture 离线回放、提炼的输入契约与轮次）
+                 上游私有接口契约、真机 fixture 离线回放、提炼的输入契约与轮次、
+                 提炼诊断的留档与只读接口）
 docs/            重构记录与阶段文档
 data/            运行时数据（不入库：niannian.db、解密缓存）
 ```

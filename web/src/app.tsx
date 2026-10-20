@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
+  Activity,
   CheckCircle2,
   Leaf,
   Loader2,
@@ -12,6 +13,7 @@ import {
 import { Button, cn } from "./components/ui";
 import { TaskDrawer } from "./components/task-drawer";
 import { SessionsPage } from "./pages/sessions";
+import { DiagnosticsPage } from "./pages/diagnostics";
 import { SettingsPage } from "./pages/settings";
 import { TasksPage } from "./pages/tasks";
 import {
@@ -30,6 +32,7 @@ import {
 const NAV = [
   { hash: "#tasks", label: "待办事项", icon: CheckCircle2 },
   { hash: "#sessions", label: "微信会话", icon: MessageCircle },
+  { hash: "#diagnostics", label: "提炼诊断", icon: Activity },
   { hash: "#settings", label: "设置", icon: Settings },
 ] as const;
 
@@ -357,6 +360,12 @@ export function App() {
             />
           ) : page === "#settings" ? (
             <SettingsPage notify={notify} />
+          ) : page === "#diagnostics" ? (
+            <DiagnosticsPage
+              liveRunId={running ? extract?.run_id ?? null : null}
+              revision={revision}
+              notify={notify}
+            />
           ) : (
             <SessionsPage
               sessions={sessions}

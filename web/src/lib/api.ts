@@ -129,6 +129,53 @@ export type ExtractStatus = {
   session: string | null;
   error: string | null;
   accepted?: boolean;
+  /** 本轮在 `extract_runs` 里的那一行；诊断页据此知道哪一轮是当下这轮。 */
+  run_id: number | null;
+};
+
+/** 诊断页左侧的轮次：每轮一行，`calls`/`failures` 是那轮记下来的请求数与失败数。 */
+export type ExtractRun = {
+  id: number;
+  session_id: string;
+  started_at: string;
+  finished_at: string | null;
+  total: number;
+  done: number;
+  created: number;
+  failed_batches: number;
+  error: string | null;
+};
+
+export type ExtractRunRow = ExtractRun & { calls: number; failures: number };
+
+/**
+ * 一轮里的某一次请求：列表**不带正文**（一轮十几批、每批几 KB），
+ * 字符数由后端用 `LENGTH()` 现算，点开哪一条才把那一条的正文取回来。
+ */
+export type ExtractCallRow = {
+  id: number;
+  session_id: string;
+  session_name: string;
+  started_at: string;
+  duration_ms: number;
+  status: "ok" | "error";
+  model: string;
+  messages: number;
+  error: string;
+  request_chars: number;
+  response_chars: number;
+};
+
+export type ExtractRunDetail = { run: ExtractRun; calls: ExtractCallRow[] };
+
+/** 一次调用的完整正文：`request` 就是发出去的那两条 message，逐字。 */
+export type ExtractCallDetail = Omit<
+  ExtractCallRow,
+  "request_chars" | "response_chars"
+> & {
+  request: { role: string; content: string }[];
+  response: string;
+  reasoning: string;
 };
 
 export const PRIORITY_NAMES: Record<TaskPriority, string> = {

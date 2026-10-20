@@ -70,6 +70,35 @@ CREATE TABLE IF NOT EXISTS tasks (
   CHECK(status IN ('pending','completed','cancelled'))
 );
 CREATE INDEX IF NOT EXISTS idx_tasks_session ON tasks(session_id, status, id);
+-- 提炼诊断：一轮一行，一次请求一行。请求正文与模型回复**逐字**存，别的都不存
+-- （服务商地址与密钥不入这两张表，也不出接口）。
+CREATE TABLE IF NOT EXISTS extract_runs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  session_id TEXT NOT NULL DEFAULT '',
+  started_at TEXT NOT NULL,
+  finished_at TEXT,
+  total INTEGER NOT NULL DEFAULT 0,
+  done INTEGER NOT NULL DEFAULT 0,
+  created INTEGER NOT NULL DEFAULT 0,
+  failed_batches INTEGER NOT NULL DEFAULT 0,
+  error TEXT
+);
+CREATE TABLE IF NOT EXISTS model_calls (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  run_id INTEGER NOT NULL REFERENCES extract_runs(id) ON DELETE CASCADE,
+  session_id TEXT NOT NULL DEFAULT '',
+  session_name TEXT NOT NULL DEFAULT '',
+  started_at TEXT NOT NULL,
+  duration_ms INTEGER NOT NULL DEFAULT 0,
+  status TEXT NOT NULL,
+  model TEXT NOT NULL DEFAULT '',
+  messages INTEGER NOT NULL DEFAULT 0,
+  request TEXT NOT NULL DEFAULT '',
+  response TEXT NOT NULL DEFAULT '',
+  reasoning TEXT NOT NULL DEFAULT '',
+  error TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_model_calls_run ON model_calls(run_id, id);
 """
 
 # 老库缺这四列时给一句话说明，而不是让每轮采集撞在 "no such column: kind" 上。
@@ -79,6 +108,13 @@ PROJECTION_COLUMNS = ("kind", "media_md5", "local_file", "tier")
 EXTRACTION_COLUMNS = ("extracted_at",)
 # 待办页能改的也就这几列；`sources`、`session_id`、时间戳由程序自己写。
 TASK_EDITABLE_FIELDS = ("title", "description", "deadline", "priority", "status")
+# 诊断页只留最近这么多轮，超出的连同那一轮的请求正文一起删（一轮最长 200 条，十几 KB）。
+EXTRACT_RUNS_KEPT = 30
+# 一次调用能写的列：列名要拼进 SQL，这张白名单就是注入防线；`run_id` 由入参给。
+CALL_FIELDS = ("session_id", "session_name", "started_at", "duration_ms", "status",
+               "model", "messages", "request", "response", "reasoning", "error")
+# 一轮的进度：诊断页不等轮次跑完，也要能看到已经发出的那几批。
+RUN_FIELDS = ("total", "done", "created", "failed_batches", "error")
 
 
 def now_utc() -> str:
@@ -630,3 +666,95 @@ class Database:
                 "messages": int(messages["total"] or 0),
                 "queued": int(messages["queued"] or 0),
                 "monitored": int(monitored["n"] or 0)}
+
+    # ------------------------------------------------------------------ 诊断
+    def start_extract_run(self, session_id: str = "") -> int:
+        """记下一轮的开头，返回它的 id（每次请求按这个 id 挂上来）。"""
+        with self._write_lock, self.connect() as conn:
+            cur = conn.execute("INSERT INTO extract_runs(session_id, started_at) VALUES(?,?)",
+                               (session_id, now_utc()))
+        return int(cur.lastrowid)
+
+    def add_extract_call(self, run_id: int, values: dict) -> int:
+        """一批一次请求：发出去的 ``messages`` 与模型**原样**回复逐字落库。
+
+        只存文本：服务商地址与密钥不进这两张表，也不出接口。
+        """
+        names = ",".join(CALL_FIELDS)
+        marks = ",".join("?" * len(CALL_FIELDS))
+        with self._write_lock, self.connect() as conn:
+            cur = conn.execute(
+                f"INSERT INTO model_calls(run_id, {names}) VALUES(?, {marks})",
+                [int(run_id), *[values.get(key) for key in CALL_FIELDS]])
+        return int(cur.lastrowid)
+
+    def update_extract_run(self, run_id: int, values: dict) -> None:
+        """写回这一轮的进度；列名拼进 SQL，白名单 :data:`RUN_FIELDS` 就是防线。"""
+        fields = {key: values[key] for key in RUN_FIELDS if key in values}
+        if not fields:
+            return
+        sets = ",".join(f"{column}=?" for column in fields)
+        with self._write_lock, self.connect() as conn:
+            conn.execute(f"UPDATE extract_runs SET {sets} WHERE id=?",
+                         [*fields.values(), int(run_id)])
+
+    def finish_extract_run(self, run_id: int, values: dict) -> None:
+        """收尾：进度 + 结束时间，再把超出保留数的旧轮次连同正文一起删掉。
+
+        删的只有 `extract_runs`，那一轮的 `model_calls` 靠 ``ON DELETE CASCADE`` 跟着走。
+        """
+        self.update_extract_run(run_id, values)
+        with self._write_lock, self.connect() as conn:
+            conn.execute("UPDATE extract_runs SET finished_at=? WHERE id=?",
+                         (now_utc(), int(run_id)))
+            conn.execute("DELETE FROM extract_runs WHERE id NOT IN "
+                         "(SELECT id FROM extract_runs ORDER BY id DESC LIMIT ?)",
+                         (EXTRACT_RUNS_KEPT,))
+
+    def extract_runs(self, limit: int = 50) -> list[dict]:
+        """诊断页左侧那一列轮次，新→旧；带每轮记下来的请求数与失败数。"""
+        with self.connect() as conn:
+            rows = conn.execute(
+                """SELECT r.*, COUNT(c.id) AS calls,
+                          SUM(c.status='error') AS failures
+                   FROM extract_runs r LEFT JOIN model_calls c ON c.run_id=r.id
+                   GROUP BY r.id ORDER BY r.id DESC LIMIT ?""",
+                (max(1, min(int(limit), 100)),)).fetchall()
+        return [{**dict(row), "calls": int(row["calls"] or 0),
+                 "failures": int(row["failures"] or 0)} for row in rows]
+
+    def extract_run(self, run_id: int) -> dict | None:
+        """一轮详情：轮次本身 + 它发过的每一次请求。
+
+        这里**不带正文**（一轮十几批、每批几 KB，一屏取回来没必要），
+        正文由 :meth:`model_call` 单条取。字符数用 `LENGTH()` 现算，
+        所以不必为它多存一列、也就不会和正文漂开。
+        """
+        with self.connect() as conn:
+            run = conn.execute("SELECT * FROM extract_runs WHERE id=?",
+                               (int(run_id),)).fetchone()
+            if not run:
+                return None
+            rows = conn.execute(
+                """SELECT id, session_id, session_name, started_at, duration_ms,
+                          status, model, messages, error,
+                          LENGTH(request) AS request_chars,
+                          LENGTH(response) AS response_chars
+                   FROM model_calls WHERE run_id=? ORDER BY id""",
+                (int(run_id),)).fetchall()
+        return {"run": dict(run), "calls": [dict(row) for row in rows]}
+
+    def model_call(self, call_id: int) -> dict | None:
+        """一次调用的完整正文：``request`` 交回发出去的那几条 message。"""
+        with self.connect() as conn:
+            row = conn.execute("SELECT * FROM model_calls WHERE id=?",
+                               (int(call_id),)).fetchone()
+        if not row:
+            return None
+        call = dict(row)
+        try:
+            parsed = json.loads(call["request"] or "[]")
+        except json.JSONDecodeError:
+            parsed = []
+        call["request"] = parsed if isinstance(parsed, list) else []
+        return call

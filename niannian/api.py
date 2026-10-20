@@ -1,4 +1,4 @@
-"""FastAPI 应用：REST 接口 + 前端构建产物托管。含看板与提炼的触发、状态、任务查询接口。"""
+"""FastAPI 应用：REST 接口 + 前端构建产物托管。含看板、提炼的触发与状态、任务查询、提炼诊断。"""
 
 from __future__ import annotations
 
@@ -220,6 +220,29 @@ def create_app(root: Path | None = None) -> FastAPI:
     @app.get("/api/extract/status")
     def api_extract_status():
         return extractor.status()
+
+    # 诊断这三条全是**纯读自己的库**：正文一轮十几批、每批几 KB，所以列表不带正文，
+    # 点开哪一条才取那一条。不碰微信缓存，也不碰图片钥匙。
+    @app.get("/api/diagnostics/runs")
+    def api_diagnostics_runs(limit: int = Query(30, ge=1, le=100)):
+        """最近跑过的提炼轮次（新→旧），带每轮记下来的请求数。"""
+        return {"items": store.extract_runs(limit=limit)}
+
+    @app.get("/api/diagnostics/runs/{run_id}")
+    def api_diagnostics_run(run_id: int):
+        """一轮的请求序列：这一轮本身的数字 + 每一次请求的概要。"""
+        detail = store.extract_run(run_id)
+        if not detail:
+            raise HTTPException(404, "提炼轮次不存在")
+        return detail
+
+    @app.get("/api/diagnostics/calls/{call_id}")
+    def api_diagnostics_call(call_id: int):
+        """一次请求的原始内容：发出去的 system/user 正文，与模型**逐字**回复。"""
+        call = store.model_call(call_id)
+        if not call:
+            raise HTTPException(404, "调用记录不存在")
+        return call
 
     @app.get("/api/tasks")
     def api_tasks(session_id: str = Query(""), status: str = Query("pending"),

@@ -3,11 +3,14 @@
 这一层只管"批次怎么切、请求怎么发、结果怎么落"，输入契约与判定规则在 :mod:`extract`。
 它只读自己的库、只打外部 HTTPS，不碰微信解密缓存也不碰图片钥匙，所以不需要走采集线程
 的命令队列，也不会把谁的线路占住（"请求线程一律纯读"那条针对的是微信那份缓存）。
+每一次请求发出去的正文与模型原样回复都逐字记进 `model_calls`，供提炼诊断页回查。
 """
 
 from __future__ import annotations
 
+import json
 import threading
+import time
 
 from . import extract
 from .llm import chat, error_text, split_config
@@ -60,7 +63,8 @@ class Extractor:
         self._worker: threading.Thread | None = None
         self.state: dict = {"running": False, "started_at": None, "finished_at": None,
                             "total": 0, "done": 0, "batches": 0, "created": 0,
-                            "failed_batches": 0, "session": None, "error": None}
+                            "failed_batches": 0, "session": None, "error": None,
+                            "run_id": None}
 
     def status(self) -> dict:
         with self._lock:
@@ -86,7 +90,8 @@ class Extractor:
             self._stop.clear()
             self.state = {"running": True, "started_at": now_utc(), "finished_at": None,
                           "total": backlog, "done": 0, "batches": 0, "created": 0,
-                          "failed_batches": 0, "session": None, "error": None}
+                          "failed_batches": 0, "session": None, "error": None,
+                          "run_id": None}
             snapshot = {**self.state, "accepted": True}
         self._worker = threading.Thread(target=self._run, args=(session_id, plan),
                                         name="extractor", daemon=True)
@@ -101,16 +106,22 @@ class Extractor:
 
     def _run(self, session_id: str, plan: extract.Policy) -> None:
         error: str | None = None
+        run_id = 0
         try:
+            # 先落一行轮次，请求才有地方挂；id 也要放进状态，诊断页才知道哪一轮是当下这轮
+            run_id = self.db.start_extract_run(session_id)
+            with self._lock:
+                self.state["run_id"] = run_id
             rows = self.db.pending_extraction(session_id, plan.round_limit)
             with self._lock:
                 self.state["total"] = len(rows)
+            self._sync_run(run_id)
             for sid, name, group in group_by_session(rows):
                 for chunk in batches(group, plan.batch_limit):
                     if self._stop.is_set():
                         error = "已取消，未发出的批次一条都没标记，下次照旧重试"
                         break
-                    self._one_batch(sid, name, chunk, plan)
+                    self._one_batch(sid, name, chunk, plan, run_id)
                 if self._stop.is_set():
                     break
         except Exception as exc:                      # 查库崩了这类轮次级意外
@@ -120,9 +131,20 @@ class Extractor:
             self.state["finished_at"] = now_utc()
             if error:
                 self.state["error"] = error
+        if run_id:
+            self.db.finish_extract_run(run_id, self._progress() | {"error": error})
+
+    def _progress(self) -> dict:
+        with self._lock:
+            return {key: self.state[key] for key in ("total", "done", "created",
+                                                     "failed_batches")}
+
+    def _sync_run(self, run_id: int) -> None:
+        """把进度写回轮次那一行：一轮跑到一半时诊断页也能看到已经发出的那几批。"""
+        self.db.update_extract_run(run_id, self._progress())
 
     def _one_batch(self, session_id: str, session_name: str, chunk: list[dict],
-                   plan: extract.Policy) -> None:
+                   plan: extract.Policy, run_id: int) -> None:
         """一批一次请求。失败**不标记**这批：下一轮还会取到它们，不会静默丢消息。"""
         first = chunk[0]
         history = self.db.extraction_history(session_id, first["sort_seq"], first["id"],
@@ -132,15 +154,28 @@ class Extractor:
         timeout = request_timeout(self.settings)
         with self._lock:
             self.state["session"] = session_name or session_id
+        started_at = now_utc()          # 记的是**发出去那一刻**，不是这一行写库那一刻
+        started = time.perf_counter()
+        reply = {"text": "", "reasoning": "", "model": ""}
+        error = ""
         try:
             reply = chat(self.settings, messages, timeout=timeout)
             tasks = extract.parse_tasks(reply["text"], len(chunk))
         except ValueError as exc:                     # 契约层的问题，不用翻服务商话术
-            self._fail(str(exc))
-            return
+            error = str(exc)
         except Exception as exc:
-            self._fail(error_text(exc, str(self.settings.get("llm_api_key") or ""),
-                                  timeout))
+            error = error_text(exc, str(self.settings.get("llm_api_key") or ""),
+                               timeout)
+        self.db.add_extract_call(run_id, {
+            "session_id": session_id, "session_name": session_name,
+            "started_at": started_at,
+            "duration_ms": int((time.perf_counter() - started) * 1000),
+            "status": "error" if error else "ok", "model": reply["model"],
+            "messages": len(chunk), "request": json.dumps(messages, ensure_ascii=False),
+            "response": reply["text"], "reasoning": reply["reasoning"], "error": error})
+        if error:
+            self._fail(error)
+            self._sync_run(run_id)
             return
         created = self.db.commit_extraction(
             [{**task, "session_id": session_id,
@@ -151,6 +186,7 @@ class Extractor:
             self.state["batches"] += 1
             self.state["done"] += len(chunk)
             self.state["created"] += created
+        self._sync_run(run_id)
 
     def _fail(self, reason: str) -> None:
         """记下中文原因；``total`` 仍是本轮取到的条数，缺口由失败批数与错误解释。"""
