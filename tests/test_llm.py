@@ -104,14 +104,17 @@ def test_a_googleapis_lookalike_host_is_not_treated_as_google(provider):
     assert provider.calls[0]["extra_body"] == {"enable_thinking": False}
 
 
-def test_thinking_on_gets_a_bigger_token_ceiling_and_wait(provider):
-    """开思考时 64 的上限会被思考吃光、单次能跑到 20 秒以上（真机踩过），两档分开。"""
+def test_thinking_on_widens_the_wait_and_never_sends_a_ceiling(provider):
+    """开思考的单次能跑到 20 秒以上（真机踩过），所以只放宽等待。
+
+    回复长度不设上限（用户 2026-10-20 定）：请求体里出现 ``max_tokens`` 就是回归。
+    """
     llm.test_connection({**CFG, "llm_thinking": True})
-    assert provider.calls[0]["max_tokens"] == llm.TEST_MAX_TOKENS_THINKING
+    assert "max_tokens" not in provider.calls[0]
     assert provider.constructed[0]["timeout"] == llm.TEST_TIMEOUT_THINKING_SECONDS
 
     llm.test_connection(CFG)
-    assert provider.calls[1]["max_tokens"] == llm.TEST_MAX_TOKENS
+    assert "max_tokens" not in provider.calls[1]
     assert provider.constructed[1]["timeout"] == llm.TEST_TIMEOUT_SECONDS
 
 
@@ -142,8 +145,8 @@ def test_test_connection_reports_reply_and_latency(provider):
     assert got["thinking"] is False
     assert got["note"] == ""
     assert isinstance(got["elapsed_ms"], int) and got["elapsed_ms"] >= 0
-    # 测试连接只该花一个来回的额度
-    assert provider.calls[0]["max_tokens"] == llm.TEST_MAX_TOKENS
+    # 一条最短请求而已：不带 max_tokens，也不该带别的服务商字段
+    assert "max_tokens" not in provider.calls[0]
     assert provider.calls[0]["messages"] == [
         {"role": "user", "content": llm.TEST_PROMPT}]
 

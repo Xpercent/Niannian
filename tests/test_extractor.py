@@ -50,9 +50,10 @@ class FakeChat:
         self.after = None
         self.hold = None
 
-    def __call__(self, settings, messages, *, max_tokens=None, timeout=None):
+    def __call__(self, settings, messages, **kwargs):
+        # 收 **kwargs 而不是写死形参：这样"又偷偷发 max_tokens"会被用例看见
         self.calls.append({"system": messages[0]["content"], "user": messages[1]["content"],
-                           "max_tokens": max_tokens, "timeout": timeout})
+                           **kwargs})
         if self.hold is not None:
             self.hold.wait(10)            # 让用例能把线程按在这一批上
         if self.after is not None:
@@ -128,19 +129,20 @@ def test_start_answers_with_the_backlog_before_the_first_reply(db, fake):
     ex._worker.join(timeout=20)                       # noqa
 
 
-def test_request_carries_the_policy_and_a_bounded_budget(db, fake):
+def test_request_carries_the_policy_and_no_token_ceiling(db, fake):
     seed(db, session_key(ACCOUNT, "room_a"))
 
     run(db)
 
     call = fake.calls[0]
     assert "只挑出**我本人**需要做的一件事" in call["system"]
-    assert call["max_tokens"] == extractor.MAX_TOKENS
     assert call["timeout"] == extractor.TIMEOUT_SECONDS
+    # 长度上限由服务商定（用户 2026-10-20 定），提炼这一层不许再发回去
+    assert "max_tokens" not in call
 
 
-def test_thinking_on_gets_more_room_and_a_longer_wait(db, fake):
-    """两档分开：思考内容能吃光小额度、单次能跑到 30 秒以上（真机踩过）。"""
+def test_thinking_on_only_widens_the_wait(db, fake):
+    """两档分开只剩等待这一档：开思考的单次能跑到 30 秒以上（真机踩过）。"""
     first = session_key(ACCOUNT, "room_a")
     second = session_key(ACCOUNT, "room_b")
     seed(db, first)
@@ -150,10 +152,9 @@ def test_thinking_on_gets_more_room_and_a_longer_wait(db, fake):
     run(db, session_id=second, settings={**CFG, "llm_thinking": True})
 
     plain, thinking = fake.calls
-    assert (plain["max_tokens"], plain["timeout"]) == (extractor.MAX_TOKENS,
-                                                       extractor.TIMEOUT_SECONDS)
-    assert (thinking["max_tokens"], thinking["timeout"]) == (
-        extractor.MAX_TOKENS_THINKING, extractor.TIMEOUT_THINKING_SECONDS)
+    assert plain["timeout"] == extractor.TIMEOUT_SECONDS
+    assert thinking["timeout"] == extractor.TIMEOUT_THINKING_SECONDS
+    assert "max_tokens" not in plain and "max_tokens" not in thinking
 
 
 def test_second_round_has_nothing_to_ask(db, fake):

@@ -16,12 +16,9 @@ from openai import (APIConnectionError, APIStatusError, APITimeoutError,
 
 # 测试连接是人在界面上等的：20 秒没回就该说话，不能让人盯着转圈。
 TEST_TIMEOUT_SECONDS = 20.0
-# 测试只花一个来回的额度：正文限长 64，够看出通没通、模型认不认。
-TEST_MAX_TOKENS = 64
-# 真机踩过的两个坑（2026-10-17，Qwen/Qwen3-8B）：开着思考时 64 的上限会被思考内容
-# 全吃光，正文一个字都没有，界面上成了"通了但没回话"；而开思考的单次耗时实测在
-# 3.5～21 秒之间晃过（20 秒那一次直接撞破超时）。所以**开思考时上限与超时一起放宽**。
-TEST_MAX_TOKENS_THINKING = 512
+# 开思考的单次耗时实测在 3.5～21 秒之间晃过（2026-10-17，Qwen/Qwen3-8B），20 秒那道线
+# 被直接撞破过，所以**开思考只放宽等待**。回复长度不设上限（用户 2026-10-20 定：请求体里
+# 一个 ``max_tokens`` 都不发），超时是这一层唯一的护栏。
 TEST_TIMEOUT_THINKING_SECONDS = 45.0
 TEST_PROMPT = "只回两个字：好的"
 
@@ -70,20 +67,18 @@ def split_config(settings: dict) -> tuple[str, str, str]:
 
 
 def chat(settings: dict, messages: list[dict], *,
-         max_tokens: int | None = None,
          timeout: float = TEST_TIMEOUT_SECONDS) -> dict:
     """发一次对话请求，回 ``{text, reasoning, model}``。
 
+    请求体里**不带** ``max_tokens``：长度上限由服务商自己定（用户 2026-10-20 定）。
     ``max_retries=0``：SDK 默认失败重试两次，那会把界面上的等待时间乘三，
     而"测试连接"要的是立刻告诉用户通不通。
     """
     base, model, key = split_config(settings)
     client = OpenAI(api_key=key, base_url=base, timeout=timeout, max_retries=0)
-    kwargs: dict = {"model": model, "messages": messages,
-                    "extra_body": thinking_body(settings.get("llm_thinking"), base)}
-    if max_tokens:
-        kwargs["max_tokens"] = int(max_tokens)
-    completion = client.chat.completions.create(**kwargs)
+    completion = client.chat.completions.create(
+        model=model, messages=messages,
+        extra_body=thinking_body(settings.get("llm_thinking"), base))
     if not getattr(completion, "choices", None):
         raise ValueError("服务商回了空响应")
     message = completion.choices[0].message
@@ -123,15 +118,14 @@ def error_text(exc: Exception, secret: str = "",
     return text
 
 
-def test_budget(settings: dict) -> tuple[int, float]:
-    """这一次测试给多少正文额度、等多久。
+def test_timeout(settings: dict) -> float:
+    """这一次测试最多等多久。
 
-    两档分开是因为实测：开着思考时 64 token 会被思考内容吃光（正文一个字都不剩），
-    单次耗时也在 3.5～21 秒之间晃，20 秒那道线被撞破过。
+    两档分开是实测：开思考的单次耗时在 3.5～21 秒之间晃，20 秒那道线被撞破过。
+    额度不设上限，所以等待是仅剩的护栏。
     """
-    if bool(settings.get("llm_thinking")):
-        return TEST_MAX_TOKENS_THINKING, TEST_TIMEOUT_THINKING_SECONDS
-    return TEST_MAX_TOKENS, TEST_TIMEOUT_SECONDS
+    return TEST_TIMEOUT_THINKING_SECONDS if bool(settings.get("llm_thinking")) \
+        else TEST_TIMEOUT_SECONDS
 
 
 def test_connection(settings: dict) -> dict:
@@ -141,11 +135,10 @@ def test_connection(settings: dict) -> dict:
     界面才知道该显示什么，而不是收到一个 500。
     """
     thinking = bool(settings.get("llm_thinking"))
-    tokens, timeout = test_budget(settings)
+    timeout = test_timeout(settings)
     started = time.perf_counter()
     try:
-        result = chat(settings, [{"role": "user", "content": TEST_PROMPT}],
-                      max_tokens=tokens, timeout=timeout)
+        result = chat(settings, [{"role": "user", "content": TEST_PROMPT}], timeout=timeout)
     except ValueError as exc:
         return {"ok": False, "error": str(exc), "elapsed_ms": _elapsed(started)}
     except Exception as exc:
@@ -158,8 +151,8 @@ def test_connection(settings: dict) -> dict:
     elif not thinking and result["reasoning"]:
         notes.append("没开思考却回了思考内容，服务商可能忽略了这个参数")
     if not result["text"]:
-        # 通了却没回话不算坏：额度被思考内容占满而已，这句得讲出来，不然看着像坏了
-        notes.append("正文是空的（多半被思考内容占满了输出额度），链路本身是通的")
+        # 通了却没回话不算坏，但这句得讲出来，不然看着像连接坏了
+        notes.append("服务商回了空正文，链路本身是通的")
     return {"ok": True, "elapsed_ms": _elapsed(started), "model": result["model"],
             "reply": result["text"], "thinking": thinking, "note": "；".join(notes)}
 

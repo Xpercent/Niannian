@@ -13,19 +13,17 @@ from . import extract
 from .llm import chat, error_text, split_config
 from .storage import now_utc
 
-# 一批最多 20 条消息要判，额度比"测试连接"大得多。开思考时上限与超时一起放宽
-# （真机实测：思考内容能吃光小额度，单次要跑到 30 秒）。
-MAX_TOKENS = 1200
+# 一批最多 20 条消息要判，等待比"测试连接"长得多；开思考放宽到 180 秒
+# （真机实测：单次要跑到 30 秒）。回复长度不设上限（用户 2026-10-20 定：一个
+# ``max_tokens`` 都不发），所以超时是这一层唯一的护栏。
 TIMEOUT_SECONDS = 60.0
-MAX_TOKENS_THINKING = 2400
 TIMEOUT_THINKING_SECONDS = 180.0
 
 
-def budget(settings: dict) -> tuple[int, float]:
-    """这次提炼给多少正文额度、等多久（跟 :func:`llm.test_budget` 一个道理）。"""
-    if bool(settings.get("llm_thinking")):
-        return MAX_TOKENS_THINKING, TIMEOUT_THINKING_SECONDS
-    return MAX_TOKENS, TIMEOUT_SECONDS
+def request_timeout(settings: dict) -> float:
+    """这一批最多等多久（与 :func:`llm.test_timeout` 同一个道理）。"""
+    return TIMEOUT_THINKING_SECONDS if bool(settings.get("llm_thinking")) \
+        else TIMEOUT_SECONDS
 
 
 def batches(rows: list[dict], size: int) -> list[list[dict]]:
@@ -127,11 +125,11 @@ class Extractor:
                                              extract.HISTORY_LIMIT)
         messages = [{"role": "system", "content": extract.SYSTEM_PROMPT},
                     {"role": "user", "content": extract.render(session_name, history, chunk)}]
-        tokens, timeout = budget(self.settings)
+        timeout = request_timeout(self.settings)
         with self._lock:
             self.state["session"] = session_name or session_id
         try:
-            reply = chat(self.settings, messages, max_tokens=tokens, timeout=timeout)
+            reply = chat(self.settings, messages, timeout=timeout)
             tasks = extract.parse_tasks(reply["text"], len(chunk))
         except ValueError as exc:                     # 契约层的问题，不用翻服务商话术
             self._fail(str(exc))
