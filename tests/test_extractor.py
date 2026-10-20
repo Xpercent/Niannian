@@ -2,6 +2,7 @@
 
 import sqlite3
 import threading
+import time
 
 import pytest
 from fastapi import HTTPException
@@ -181,15 +182,52 @@ def test_no_task_is_still_processed(db, fake):
 
 def test_batch_size_caps_one_request_and_numbering_restarts(db, fake):
     sid = session_key(ACCOUNT, "room_a")
-    seed(db, sid, count=extract.BATCH_LIMIT + 5)
+    seed(db, sid, count=extract.DEFAULT_BATCH_LIMIT + 5)
 
     state = run(db)
 
     assert len(fake.calls) == 2 and state["batches"] == 2
     first, second = fake.calls
-    assert first["user"].count('<msg id=') == extract.BATCH_LIMIT
+    assert first["user"].count('<msg id=') == extract.DEFAULT_BATCH_LIMIT
     assert '<msg id="0"' in second["user"]
     assert second["user"].count('<msg id=') == 5
+
+
+def test_settings_decide_the_batch_the_history_and_the_prompt(db, fake):
+    """三个数与提示词都从配置读：一批 2 条 → 5 条消息问三次；上文 0 条就不带上文。"""
+    sid = session_key(ACCOUNT, "room_a")
+    seed(db, sid, count=5)
+
+    run(db, settings={**CFG, "extract_batch_limit": 2, "extract_history_limit": 0,
+                      "extract_prompt": "只要学习相关的"})
+
+    assert len(fake.calls) == 3
+    assert all('<history />' in call["user"] for call in fake.calls)
+    assert all(call["system"] == "只要学习相关的" for call in fake.calls)
+    assert fake.calls[0]["user"].count("<msg id=") == 2
+
+
+def test_a_running_round_keeps_the_policy_it_started_with(db, fake):
+    """一轮要跑好几分钟：中途保存设置不该让后半批换个问法，否则说不清是谁把 JSON 写坏的。"""
+    hold = threading.Event()
+    fake.hold = hold
+    sid = session_key(ACCOUNT, "room_a")
+    seed(db, sid, count=4)
+    settings = {**CFG, "extract_batch_limit": 2}
+
+    ex = Extractor(db, settings)
+    ex.start("")
+    for _ in range(2000):                           # 等第一批真的进到请求里（最多 10 秒）
+        if fake.calls:
+            break
+        time.sleep(0.005)
+    settings["extract_batch_limit"] = 50
+    settings["extract_prompt"] = "后半批改的这个不该被读到"
+    hold.set()
+    assert ex._worker.join(timeout=20) is None       # noqa: 只是等后台那一轮结束
+
+    assert len(fake.calls) == 2                      # 仍是按 2 条一切
+    assert all(call["system"] != "后半批改的这个不该被读到" for call in fake.calls)
 
 
 def test_only_monitored_sessions_are_read(db, fake):
@@ -288,7 +326,7 @@ def test_unparsable_reply_is_a_failure_not_an_empty_round(db, fake):
 def test_cancel_between_batches(db, fake):
     """取消停在批与批之间：已回来的那批照常落库，没发出的那些不动。"""
     sid = session_key(ACCOUNT, "room_a")
-    seed(db, sid, count=extract.BATCH_LIMIT + 5)
+    seed(db, sid, count=extract.DEFAULT_BATCH_LIMIT + 5)
     ex = Extractor(db, CFG)
     fake.after = ex._stop.set                       # noqa: 只用来指定取消点
 
@@ -297,7 +335,7 @@ def test_cancel_between_batches(db, fake):
 
     state = ex.status()
     assert len(fake.calls) == 1
-    assert state["done"] == extract.BATCH_LIMIT
+    assert state["done"] == extract.DEFAULT_BATCH_LIMIT
     assert "已取消" in state["error"]
     assert len(db.pending_extraction()) == 5
 

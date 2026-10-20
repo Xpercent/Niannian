@@ -5,6 +5,7 @@ import json
 import pytest
 from fastapi import HTTPException
 
+from niannian import extract
 from niannian.api import create_app
 from niannian.config import EDITABLE_KEYS
 
@@ -89,6 +90,51 @@ def test_put_settings_rejects_bad_llm_values_in_plain_words(tmp_path, monkeypatc
         put({**BASE, "llm_thinking": "sometimes"})
     assert "思考模式只能是开或关" in caught.value.detail
     assert read_config(tmp_path)["llm_base_url"] == BASE["llm_base_url"]  # 没落盘
+
+
+def test_get_settings_shows_the_prompt_that_actually_runs(tmp_path, monkeypatch):
+    """配置里存空串的意思是"用内置"，界面得看到**真正生效的那段**才谈得上改它。"""
+    app = make_app(tmp_path, monkeypatch)
+    got = endpoint(app, "/api/settings", "GET")()
+
+    assert got["values"]["extract_prompt"] == extract.DEFAULT_SYSTEM_PROMPT
+    assert got["extract_prompt_default"] == extract.DEFAULT_SYSTEM_PROMPT.strip()
+
+
+def test_put_settings_stores_a_custom_prompt_and_the_numbers(tmp_path, monkeypatch):
+    app = make_app(tmp_path, monkeypatch)
+    put = endpoint(app, "/api/settings", "PUT")
+
+    got = put({**BASE, "extract_prompt": "只要教学相关的",
+               "extract_batch_limit": 8, "extract_history_limit": 0})
+
+    assert got["values"]["extract_prompt"] == "只要教学相关的"
+    saved = read_config(tmp_path)
+    assert (saved["extract_batch_limit"], saved["extract_history_limit"]) == (8, 0)
+    assert set(got["applied"]) == {"extract_prompt", "extract_batch_limit",
+                                   "extract_history_limit"}
+
+
+def test_saving_the_default_prompt_untouched_writes_no_copy(tmp_path, monkeypatch):
+    """原样把内置那段提交回来 → 落**空串**：库里不存副本，日后内置改了才挡不住。"""
+    app = make_app(tmp_path, monkeypatch)
+
+    got = endpoint(app, "/api/settings", "PUT")(
+        {**BASE, "extract_prompt": extract.DEFAULT_SYSTEM_PROMPT})
+
+    assert read_config(tmp_path)["extract_prompt"] == ""
+    assert got["unchanged"] is True
+
+
+def test_put_settings_rejects_an_out_of_range_batch_with_plain_words(tmp_path, monkeypatch):
+    """一批 51 条是"模型看不过来"，不是笔误能放过的：越界就不落盘。"""
+    app = make_app(tmp_path, monkeypatch)
+
+    with pytest.raises(HTTPException) as caught:
+        endpoint(app, "/api/settings", "PUT")({**BASE, "extract_batch_limit": 51})
+
+    assert "一批请求条数要在 1 到 50 之间" in caught.value.detail
+    assert "extract_batch_limit" not in read_config(tmp_path)
 
 
 def test_test_connection_uses_the_draft_and_the_stored_key(tmp_path, monkeypatch):

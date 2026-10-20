@@ -13,7 +13,7 @@ from fastapi.staticfiles import StaticFiles
 from .config import (EDITABLE_KEYS, KEY_LABELS, RESTART_KEYS, load_config,
                      mask_api_key, merge_api_key, save_config, validate)
 from .describe import KIND_LABEL
-from .extract import PRIORITIES, parse_deadline
+from .extract import DEFAULT_SYSTEM_PROMPT, PRIORITIES, parse_deadline, policy
 from .extractor import Extractor
 from .llm import test_connection
 from .media import media_root, safe_media_path
@@ -64,9 +64,12 @@ def editable_values(settings: dict) -> dict:
     """设置页开放的键；密钥那一格**永远回空串**（界面上留空的意思是不改）。
 
     读与存两个接口都要回同一份形状，这里出一次，避免两处各写各的。
+    提示词那一格回的是**真正生效的那段**（配置里存空串意思是"用内置"），界面才拿得到
+    内置规则去改；「恢复默认」用的那份原文由 GET 顶层的 ``extract_prompt_default`` 给。
     """
     values = {key: settings.get(key) for key in EDITABLE_KEYS}
     values["llm_api_key"] = ""
+    values["extract_prompt"] = policy(settings).prompt
     return values
 
 
@@ -125,6 +128,8 @@ def create_app(root: Path | None = None) -> FastAPI:
             "restart_required": list(RESTART_KEYS),
             # 中文名由后端给一份：界面再抄一张表就会和这里漂开
             "labels": KEY_LABELS,
+            # 「恢复默认」要的那段原文：与 values 里那格分开给，界面不用猜内置是什么
+            "extract_prompt_default": DEFAULT_SYSTEM_PROMPT.strip(),
             "config_file": path.name,
             "config_exists": path.is_file(),
             **api_key_fields(settings),

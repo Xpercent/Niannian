@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Loader2, PlugZap, Save } from "lucide-react";
+import { Loader2, PlugZap, RotateCcw, Save } from "lucide-react";
 import {
   Badge,
   Button,
@@ -9,6 +9,7 @@ import {
   CardTitle,
   Input,
   Switch,
+  Textarea,
 } from "../components/ui";
 import {
   api,
@@ -26,8 +27,16 @@ type Props = {
 
 // 键的中文名读后端那一份（`GET /api/settings` 的 `labels`）：这边再抄一张表的话，
 // 后端改了叫法界面不会跟着改，保存后的提示就会说出旧名字。
+type NumberKey =
+  | "history_limit"
+  | "poll_seconds"
+  | "port"
+  | "extract_round_limit"
+  | "extract_batch_limit"
+  | "extract_history_limit";
+
 type Field = {
-  key: "history_limit" | "poll_seconds" | "port";
+  key: NumberKey;
   title: string;
   min: number;
   max: number;
@@ -45,6 +54,10 @@ type Form = {
   llm_api_key: string;
   llm_thinking: boolean;
   llm_include_images: boolean;
+  extract_round_limit: string;
+  extract_batch_limit: string;
+  extract_history_limit: string;
+  extract_prompt: string;
 };
 
 const EMPTY: Form = {
@@ -56,6 +69,10 @@ const EMPTY: Form = {
   llm_api_key: "",
   llm_thinking: false,
   llm_include_images: false,
+  extract_round_limit: "200",
+  extract_batch_limit: "20",
+  extract_history_limit: "15",
+  extract_prompt: "",
 };
 
 // 哪些键要重启由**后端**说（`restart_required` 来自 config.RESTART_KEYS），这里不写死：
@@ -91,6 +108,48 @@ const FIELDS: Field[] = [
   },
 ];
 
+// 一轮取多少条、一批问几条、附带几条上文——这三个数各管一件事，合到一起就没法说"这轮跑到哪了"。
+const EXTRACT_FIELDS: Field[] = [
+  {
+    key: "extract_round_limit",
+    title: "一轮提炼条数",
+    min: 1,
+    max: 1000,
+    hint: (
+      <>
+        点一次「立即提炼」最多处理这么多条，攒多了分几轮跑。一条都没处理过的消息永远排在前面，
+        不会被新的挤掉。
+      </>
+    ),
+  },
+  {
+    key: "extract_batch_limit",
+    title: "一批请求条数",
+    min: 1,
+    max: 50,
+    hint: (
+      <>
+        一次请求带几条消息，模型看到的依据编号就是 0 到
+        <strong className="font-medium">条数减一</strong>
+        。调大省请求数，但一批越长越容易整批读不懂（回了半截 JSON），那一批会原样留给下一轮。20
+        是真机试出来的值。
+      </>
+    ),
+  },
+  {
+    key: "extract_history_limit",
+    title: "上文条数",
+    min: 0,
+    max: 100,
+    hint: (
+      <>
+        每批附带几条旧消息当参照：只帮模型看懂"这事之前说过没有"，
+        <strong className="font-medium">不带编号、不能据它建任务</strong>。填 0 就是不给上文。
+      </>
+    ),
+  },
+];
+
 function SwitchRow({
   title,
   hint,
@@ -110,6 +169,48 @@ function SwitchRow({
       </div>
       <Switch label={title} checked={checked} onChange={onChange} />
     </div>
+  );
+}
+
+/** 数字格留空 → 交 null，后端那一份的意思是"用默认"；0 必须原样交出去（上文 0 条是合法值）。 */
+function numberOrNull(value: string): number | null {
+  const text = value.trim();
+  if (!text) return null;
+  const parsed = Number(text);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+/** 一个数字输入格：采集那三项与提炼那三项长一样，出一次就好。 */
+function NumberField({
+  item,
+  value,
+  restart,
+  onChange,
+}: {
+  item: Field;
+  value: string;
+  restart: boolean;
+  onChange: (next: string) => void;
+}) {
+  return (
+    <label className="block">
+      <span className="flex flex-wrap items-center gap-2 text-sm font-medium text-stone-700">
+        {item.title}
+        <Badge tone={restart ? "warning" : "default"}>
+          {restart ? "需重启" : "即时生效"}
+        </Badge>
+      </span>
+      <Input
+        type="number"
+        min={item.min}
+        max={item.max}
+        step={item.step}
+        className="mt-2"
+        value={value}
+        onChange={(event) => onChange(event.target.value)}
+      />
+      <span className="mt-1 block text-xs leading-5 text-stone-500">{item.hint}</span>
+    </label>
   );
 }
 
@@ -140,6 +241,10 @@ export function SettingsPage({ notify }: Props) {
           llm_api_key: "",
           llm_thinking: data.values.llm_thinking,
           llm_include_images: data.values.llm_include_images,
+          extract_round_limit: String(data.values.extract_round_limit),
+          extract_batch_limit: String(data.values.extract_batch_limit),
+          extract_history_limit: String(data.values.extract_history_limit),
+          extract_prompt: data.values.extract_prompt,
         });
         setError("");
       })
@@ -162,6 +267,10 @@ export function SettingsPage({ notify }: Props) {
       clear_llm_api_key: clearKey,
       llm_thinking: form.llm_thinking,
       llm_include_images: form.llm_include_images,
+      extract_round_limit: numberOrNull(form.extract_round_limit),
+      extract_batch_limit: numberOrNull(form.extract_batch_limit),
+      extract_history_limit: numberOrNull(form.extract_history_limit),
+      extract_prompt: form.extract_prompt,
     };
   }
 
@@ -263,31 +372,15 @@ export function SettingsPage({ notify }: Props) {
         </CardHeader>
         <CardContent>
           <div className="grid gap-6 sm:grid-cols-2 xl:grid-cols-3">
-            {FIELDS.map((item) => {
-              const restart = (meta?.restart_required ?? []).includes(item.key);
-              return (
-              <label key={item.key} className="block">
-                <span className="flex flex-wrap items-center gap-2 text-sm font-medium text-stone-700">
-                  {item.title}
-                  <Badge tone={restart ? "warning" : "default"}>
-                    {restart ? "需重启" : "即时生效"}
-                  </Badge>
-                </span>
-                <Input
-                  type="number"
-                  min={item.min}
-                  max={item.max}
-                  step={item.step}
-                  className="mt-2"
-                  value={form[item.key]}
-                  onChange={(event) =>
-                    setForm((old) => ({ ...old, [item.key]: event.target.value }))
-                  }
-                />
-                <span className="mt-1 block text-xs leading-5 text-stone-500">{item.hint}</span>
-              </label>
-              );
-            })}
+            {FIELDS.map((item) => (
+              <NumberField
+                key={item.key}
+                item={item}
+                value={form[item.key]}
+                restart={(meta?.restart_required ?? []).includes(item.key)}
+                onChange={(next) => setForm((old) => ({ ...old, [item.key]: next }))}
+              />
+            ))}
           </div>
         </CardContent>
       </Card>
@@ -451,6 +544,60 @@ export function SettingsPage({ notify }: Props) {
             测试连接不打折扣地按界面上这份参数去问服务商（不用先保存）；
             但<strong className="font-medium">只有保存之后</strong>，下一轮的提炼才会读到它。
           </p>
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle>提炼</CardTitle>
+          <Button
+            variant="secondary"
+            size="sm"
+            onClick={() =>
+              setForm((old) => ({ ...old, extract_prompt: meta?.extract_prompt_default ?? "" }))
+            }
+          >
+            <RotateCcw className="size-4" />
+            恢复默认提示词
+          </Button>
+        </CardHeader>
+        <CardContent className="space-y-5">
+          <div className="grid gap-6 sm:grid-cols-2 xl:grid-cols-3">
+            {EXTRACT_FIELDS.map((item) => (
+              <NumberField
+                key={item.key}
+                item={item}
+                value={form[item.key]}
+                restart={(meta?.restart_required ?? []).includes(item.key)}
+                onChange={(next) => setForm((old) => ({ ...old, [item.key]: next }))}
+              />
+            ))}
+          </div>
+
+          <label className="block">
+            <span className="flex flex-wrap items-center gap-2 text-sm font-medium text-stone-700">
+              提炼提示词
+              <Badge>即时生效</Badge>
+            </span>
+            <Textarea
+              className="mt-2 font-mono text-xs leading-5"
+              rows={16}
+              aria-label="提炼提示词"
+              value={form.extract_prompt}
+              onChange={(event) =>
+                setForm((old) => ({ ...old, extract_prompt: event.target.value }))
+              }
+            />
+            <span className="mt-1 block text-xs leading-5 text-stone-500">
+              整段决定模型怎么判任务，这里给的是<strong className="font-medium">正在生效的那份</strong>
+              原文：改成什么样下一轮就问什么。留空即回到内置那段。
+              <strong className="font-medium">改坏最常见的结果</strong>
+              是整批 JSON 读不懂——那批消息不会标成已处理，下一轮照旧重问，不静默丢东西，
+              但界面上会一直报失败。三个数字与提示词都是
+              <strong className="font-medium">保存后下一轮生效</strong>
+              ：正在跑的那一轮继续用它起轮时那一份，不会跑一半换个问法。
+            </span>
+          </label>
         </CardContent>
       </Card>
 

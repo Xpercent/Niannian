@@ -264,6 +264,11 @@ export type SettingsValues = {
   llm_api_key: string;
   llm_thinking: boolean;
   llm_include_images: boolean;
+  extract_round_limit: number;
+  extract_batch_limit: number;
+  extract_history_limit: number;
+  /** 回的是**真正生效的那段**：库里存空串意思是"用内置"，界面得看到全文才谈得上改。 */
+  extract_prompt: string;
 };
 
 export type SettingsResponse = {
@@ -271,6 +276,8 @@ export type SettingsResponse = {
   restart_required: string[];
   /** 每个开放键的中文名，由后端给（界面不再抄第二张表）。 */
   labels: Record<string, string>;
+  /** 内置提示词原文：「恢复默认」那颗按钮把文本框设成它。 */
+  extract_prompt_default: string;
   config_file: string;
   config_exists: boolean;
   api_key_masked: string;

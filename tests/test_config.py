@@ -5,11 +5,15 @@ import pytest
 from niannian.config import (BOOL_KEYS, DEFAULTS, EDITABLE_KEYS, KEY_LABELS,
                              RESTART_KEYS, load_config, mask_api_key,
                              merge_api_key, save_config, to_bool, validate)
+from niannian.extract import (DEFAULT_BATCH_LIMIT, DEFAULT_HISTORY_LIMIT,
+                              DEFAULT_ROUND_LIMIT, DEFAULT_SYSTEM_PROMPT)
 
 GOOD = {"history_limit": "250", "poll_seconds": "5", "port": "9000",
         "llm_base_url": "https://api.siliconflow.cn/v1",
         "llm_model": "Qwen/Qwen3-8B", "llm_api_key": "sk-good",
-        "llm_thinking": "false", "llm_include_images": True}
+        "llm_thinking": "false", "llm_include_images": True,
+        "extract_round_limit": "80", "extract_batch_limit": "10",
+        "extract_history_limit": "5", "extract_prompt": "只要学习相关的"}
 
 # validate 严格：GOOD 得把设置页开放的键**全**带上，缺一个就是没提交。
 LLM_GOOD = {"llm_base_url": "https://api.siliconflow.cn/v1",
@@ -19,7 +23,10 @@ LLM_GOOD = {"llm_base_url": "https://api.siliconflow.cn/v1",
 
 def test_validate_normalizes_types():
     assert validate(GOOD) == {"history_limit": 250, "poll_seconds": 5.0,
-                              "port": 9000, **LLM_GOOD}
+                              "port": 9000, **LLM_GOOD,
+                              "extract_round_limit": 80, "extract_batch_limit": 10,
+                              "extract_history_limit": 5,
+                              "extract_prompt": "只要学习相关的"}
 
 
 def test_validate_only_returns_editable_keys():
@@ -72,6 +79,52 @@ def test_validate_rejects_bad_llm_values_with_plain_words(key, bad, phrase):
 def test_llm_api_key_may_be_empty_at_save_time():
     """没填密钥**能存**（先存地址与模型名是正常的），只是测连时会说还没填。"""
     assert validate({**GOOD, "llm_api_key": ""})["llm_api_key"] == ""
+
+
+@pytest.mark.parametrize("key,bad,phrase", [
+    ("extract_round_limit", 0, "1 到 1000"),
+    ("extract_round_limit", 1001, "1 到 1000"),
+    ("extract_batch_limit", 51, "1 到 50"),
+    ("extract_batch_limit", "两批", "整数"),
+    ("extract_history_limit", 101, "0 到 100"),
+    ("extract_prompt", "x" * 8001, "太长"),
+])
+def test_validate_rejects_bad_extract_values_with_plain_words(key, bad, phrase):
+    with pytest.raises(ValueError) as caught:
+        validate({**GOOD, key: bad})
+    assert phrase in str(caught.value)
+
+
+def test_blank_extract_numbers_fall_back_to_the_built_in_defaults():
+    """数字那三格**留空**的意思是"我不覆盖"，不是"我要 0 条"。"""
+    got = validate({**GOOD, "extract_round_limit": "", "extract_batch_limit": None,
+                    "extract_history_limit": "   "})
+    assert (got["extract_round_limit"], got["extract_batch_limit"],
+            got["extract_history_limit"]) == (DEFAULT_ROUND_LIMIT, DEFAULT_BATCH_LIMIT,
+                                              DEFAULT_HISTORY_LIMIT)
+
+
+def test_zero_history_limit_survives_because_zero_is_a_real_choice():
+    """上文 0 条是合法要求（只想看这一批），不能和"没填"混成一回事。"""
+    assert validate({**GOOD, "extract_history_limit": 0})["extract_history_limit"] == 0
+
+
+def test_prompt_identical_to_the_built_in_is_stored_blank():
+    """一字不差时落**空串**：配置文件里不留一份副本，否则日后内置改了会被旧的挡住。"""
+    assert validate({**GOOD, "extract_prompt": DEFAULT_SYSTEM_PROMPT})["extract_prompt"] == ""
+
+
+def test_load_config_clamps_extract_numbers_instead_of_refusing_to_start(tmp_path):
+    """读文件那一头宽容：手工写在 config.json 里的越界值夹回边界，服务照样起得来。"""
+    (tmp_path / "config.json").write_text(
+        json.dumps({"extract_round_limit": 99999, "extract_batch_limit": "abc",
+                    "extract_history_limit": -3, "extract_prompt": 42}),
+        encoding="utf-8")
+    settings = load_config(tmp_path)
+    assert settings["extract_round_limit"] == 1000                    # 夹到上界
+    assert settings["extract_batch_limit"] == DEFAULT_BATCH_LIMIT     # 认不出来退默认
+    assert settings["extract_history_limit"] == 0                     # 夹到下界
+    assert settings["extract_prompt"] == ""                           # 非字符串当没填
 
 
 @pytest.mark.parametrize("value,want", [
@@ -175,7 +228,9 @@ def test_only_port_needs_restart():
     assert set(EDITABLE_KEYS) - set(RESTART_KEYS) == {
         "history_limit", "poll_seconds",
         "llm_base_url", "llm_model", "llm_api_key",
-        "llm_thinking", "llm_include_images"}
+        "llm_thinking", "llm_include_images",
+        "extract_round_limit", "extract_batch_limit",
+        "extract_history_limit", "extract_prompt"}
 
 
 def test_every_editable_key_has_a_chinese_label():

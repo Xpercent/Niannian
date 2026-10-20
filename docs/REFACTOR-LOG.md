@@ -617,3 +617,45 @@ Unknown name "enable_thinking": Cannot find field.
 下次真机跑一轮提炼看一眼 `failed_batches` 就知道了。
 
 `pytest` **244 passed / 6 skipped**（条数不变：四条用例改名，没增删）。
+
+## 提炼的四个参数与提示词进设置页（2026-10-20）
+
+用户看完"有哪些参数"那份清单，指定：**把 `ROUND_LIMIT`、`BATCH_LIMIT`、`HISTORY_LIMIT`、
+`SYSTEM_PROMPT` 弄成可配置项放到设置中**。提示词怎么交出去问过一句（整段可改 / 只能追加 /
+整段可改但保存前校验契约），定的是**整段可改 + 带恢复默认**。
+
+**默认值只留一份。** 中途先写错过一版：给 `extract_history_limit` 用 `-1` 当"没填"的哨兵——
+可 **0 是合法值**（不想带上文），哨兵和合法值撞在同一个数上，那种设计迟早出事。改成
+`config.DEFAULTS` 直接引 `extract.DEFAULT_ROUND_LIMIT` / `DEFAULT_BATCH_LIMIT` /
+`DEFAULT_HISTORY_LIMIT`（原来的三个裸常数改名加 `DEFAULT_` 前缀），**留空 = 用默认、填进去的
+0 = 真的要 0**；前端 `numberOrNull()` 空框交 `null`，`extract.policy()` 只在键不存在或
+读不出整数时回落。
+
+**新形状 `extract.policy(settings) → Policy`**（NamedTuple：round/batch/history/prompt）。
+`Extractor.start()` 起轮时取**一次快照**，`_run(sid, plan)` 与 `_one_batch(..., plan)` 全程用它：
+一轮要跑几分钟，中途在设置页改批次或提示词不该让后半批换个问法，否则失败重跑时说不清是哪条
+规则把 JSON 写坏的。这条钉了一条用例（第一批进请求后改 settings，仍按 2 条一切、system 不换）。
+
+**提示词那一格的回显**：`GET /api/settings` 的 `values.extract_prompt` 回的是**正在生效的那段**
+（库里空串意思是"用内置"），顶层另给 `extract_prompt_default` 供「恢复默认」按钮用。
+`validate()` 里加了一条归一化：**提交的内容与内置一字不差就落空串**——否则 `config.json` 里会
+躺一份副本，日后内置改了（比如又撞出一个要把 JSON 写坏的形状）会被自己存的那份挡住。
+长度上限 8000 字；三个数的边界 1..1000 / 1..50 / 0..100，越界不落盘、说中文。
+
+**设置页多一张「提炼」卡片**：三个数字格 + 一个 `rows=16` 的提示词文本框 + 标题栏那颗
+「恢复默认提示词」。采集那三项与提炼这三项长得一样，把原来写在 map 里的那圈 JSX 抽成
+`NumberField`，只在这两个卡片里各用一次（没有第三处，不提前抽象）。
+
+**存量：不用清库重采**——四个键既不入库也不参与解析，下一轮读到的就是新形状。
+
+**真机验过什么**：重启服务后打开 `#settings`，结构快照里三个数字格的 `valuemin/valuemax/value`
+是 1/1000/200、1/50/20、0/100/15，文本框里就是内置全文 1200 字；填 51 保存 →
+`PUT /api/settings` 回 **400** 且 `config.json` 里没落这个键；填 8 保存 → 落 `8`，
+`extract_prompt` 保持空串、API Key 没被动；改回 20 保存；把文本框换成一句话再点「恢复默认」
+→ 框里回到 1200 字且仍带着"字符串值里不能出现英文双引号"那句。**没看到的**：应用内浏览器没有
+可见面板，截图拿不到，所以这张卡片的**像素与排版没验过**（只验了控件、值与回路）；保存后的那条
+提示 toast 也没抓到文本。
+
+`pytest` **267 passed / 6 skipped**（+23：`test_config` 11 条新键读写与边界、`test_extract` 4 条
+policy、`test_extractor` 2 条设置生效与一轮快照、`test_api_settings` 4 条接口形状）、
+`tsc --noEmit` 干净、`npm run build` 通过。

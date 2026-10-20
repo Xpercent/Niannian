@@ -228,10 +228,17 @@ cd web && npm run dev                   # 前端热更新，/api 代理到 8765
   必须清库重采才对存量生效。
 
 ## 设置页与配置（`config.py` / `api.py`）
-- 设置页开放**八项**：采集侧 `history_limit`、`poll_seconds`、`port`，模型侧
-  `llm_base_url`、`llm_model`、`llm_api_key`、`llm_thinking`、`llm_include_images`。
+- 设置页开放**十二项**：采集侧 `history_limit`、`poll_seconds`、`port`，模型侧
+  `llm_base_url`、`llm_model`、`llm_api_key`、`llm_thinking`、`llm_include_images`，
+  提炼侧 `extract_round_limit`、`extract_batch_limit`、`extract_history_limit`、
+  `extract_prompt`（2026-10-20 上）。
+  提炼那三个数**写在这四个键里而不是写回 `extract.py`**：`extract.DEFAULT_*` 仍是
+  唯一的默认值来源，`config.DEFAULTS` 直接引它，两处不各存一份。
   `host` 刻意不放（改成非 127.0.0.1 会把本机微信数据暴露到局域网，且改错会把自己关在门外）；
   数据目录/账号仍可手工写在 `config.json`。
+- **数字格留空 = 用默认**，不是"我要 0 条"：所以"上文 0 条"这个合法值必须是
+  填进去的 0，界面上空着交 `null`（`settings.tsx:numberOrNull`），`extract.policy()`
+  也只在**键不存在或读不出整数**时才回落。
 - **读宽容、写严格**：`load_config()` 遇到坏值退回默认或夹到边界，保证服务起得来；
   `validate()` 只在保存时用，越界直接抛中文错误、不落盘。别把两者合并。
 - `save_config()` 只更新提交的键并保留文件里其它键，先写 `.tmp` 再 `os.replace`。
@@ -328,8 +335,15 @@ cd web && npm run dev                   # 前端热更新，/api 代理到 8765
   读不懂才算**这批失败**——半截 JSON 不能当"这批没有任务"，那会静默把消息标成已处理。
 - 提示词末尾那句"字符串值里不能出现英文双引号，引用原文里的说法请改用「」"是真机逼出来的：
   `glm-5.2` 会照抄正文里的 `"学号+姓名"`，一整批 20 条因此 JSON 读不懂（5 批中 2 批；加完 0 失败）。
-- 三个数各管一件事，别合成一个：`ROUND_LIMIT=200`（一轮最多取几条）、`BATCH_LIMIT=20`
-  （一次请求带几条，编号就是 0..N-1）、`HISTORY_LIMIT=15`（上文几条，**不带编号、不能据它建任务**）。
+  **这句现在只活在内置默认里**——提示词整段可在设置页改，那一句也就可能被改没，
+  撞回同一个症状时先去看 `GET /api/settings` 回的那份是不是还带着它。
+- 三个数各管一件事，别合成一个：一轮取几条（`extract_round_limit`，默认 200）、
+  一次请求带几条（`extract_batch_limit`，默认 20，编号就是 0..N-1）、
+  上文几条（`extract_history_limit`，默认 15，**不带编号、不能据它建任务**）。
+  默认值只有 `extract.DEFAULT_*` 一份，界面与 `config.DEFAULTS` 都读它。
+- **一轮起头取一次策略快照**（`extract.policy(settings)` → `extractor._run(sid, plan)`）：
+  一轮要跑几分钟，中途在设置页改批次或提示词不该让后半批换个问法，否则失败重跑时
+  说不清是哪条规则把 JSON 写坏的。保存只对**下一轮**生效，这条要说给界面。
 - 等待**分两档**（关 60s、开 180s），理由跟"测试连接"那条实测一样；**不发 `max_tokens`**
   （2026-10-20 起四道全去掉，长度上限交回服务商），所以一轮的最坏耗时就是
   「批数 × 这一档」，没有额度那道闸帮着截。

@@ -72,9 +72,12 @@ class Extractor:
         配置没填齐在**出网之前**就抛中文错，别把"我没配好"拿去问服务商。
         """
         split_config(self.settings)
+        # 起轮时取一次策略快照，整轮用它：一轮要跑好几分钟，中途在设置页改批次或
+        # 提示词不该让后半批换个问法（那样失败重跑时也说不清是哪条规则写坏的 JSON）。
+        plan = extract.policy(self.settings)
         # 先读一次积压再回话（纯读自己的库，毫秒级）：不然接口立刻回的那份状态里
         # total 是 0，界面看着像"这轮什么都没找到"，等线程填上要好几个来回。
-        backlog = len(self.db.pending_extraction(session_id, extract.ROUND_LIMIT))
+        backlog = len(self.db.pending_extraction(session_id, plan.round_limit))
         with self._lock:
             if self.state["running"]:
                 # 已经在跑：不排队第二轮，把当前状态原样回过去，accepted=False 说明
@@ -85,7 +88,7 @@ class Extractor:
                           "total": backlog, "done": 0, "batches": 0, "created": 0,
                           "failed_batches": 0, "session": None, "error": None}
             snapshot = {**self.state, "accepted": True}
-        self._worker = threading.Thread(target=self._run, args=(session_id,),
+        self._worker = threading.Thread(target=self._run, args=(session_id, plan),
                                         name="extractor", daemon=True)
         self._worker.start()
         return snapshot
@@ -96,18 +99,18 @@ class Extractor:
         if self._worker and self._worker.is_alive():
             self._worker.join(timeout=1)
 
-    def _run(self, session_id: str) -> None:
+    def _run(self, session_id: str, plan: extract.Policy) -> None:
         error: str | None = None
         try:
-            rows = self.db.pending_extraction(session_id, extract.ROUND_LIMIT)
+            rows = self.db.pending_extraction(session_id, plan.round_limit)
             with self._lock:
                 self.state["total"] = len(rows)
             for sid, name, group in group_by_session(rows):
-                for chunk in batches(group, extract.BATCH_LIMIT):
+                for chunk in batches(group, plan.batch_limit):
                     if self._stop.is_set():
                         error = "已取消，未发出的批次一条都没标记，下次照旧重试"
                         break
-                    self._one_batch(sid, name, chunk)
+                    self._one_batch(sid, name, chunk, plan)
                 if self._stop.is_set():
                     break
         except Exception as exc:                      # 查库崩了这类轮次级意外
@@ -118,12 +121,13 @@ class Extractor:
             if error:
                 self.state["error"] = error
 
-    def _one_batch(self, session_id: str, session_name: str, chunk: list[dict]) -> None:
+    def _one_batch(self, session_id: str, session_name: str, chunk: list[dict],
+                   plan: extract.Policy) -> None:
         """一批一次请求。失败**不标记**这批：下一轮还会取到它们，不会静默丢消息。"""
         first = chunk[0]
         history = self.db.extraction_history(session_id, first["sort_seq"], first["id"],
-                                             extract.HISTORY_LIMIT)
-        messages = [{"role": "system", "content": extract.SYSTEM_PROMPT},
+                                             plan.history_limit)
+        messages = [{"role": "system", "content": plan.prompt},
                     {"role": "user", "content": extract.render(session_name, history, chunk)}]
         timeout = request_timeout(self.settings)
         with self._lock:

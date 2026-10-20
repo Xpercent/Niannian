@@ -7,15 +7,22 @@
 ## 当前状态
 
 阶段：**第一轮提炼与待办事项页都已上线，正等在真机上跑第二轮**。
-服务 `python -m niannian` → http://127.0.0.1:8765，`pytest` **244 passed / 6 skipped**，
+服务 `python -m niannian` → http://127.0.0.1:8765，`pytest` **267 passed / 6 skipped**，
 `tsc --noEmit` 干净。
 
 已跑通的闭环：只读采集本机微信 4.x → 非文本正文按类型出中文摘要（清单就是
 `describe.KIND_LABEL`）→ 图片凭本机文件解密落盘 → 手动起一轮提炼喂模型 →
-任务落 `tasks` 表 → 待办事项页（默认页）看、改、跳回原文。设置页八项（采集三项 + 模型五项）。
+任务落 `tasks` 表 → 待办事项页（默认页）看、改、跳回原文。设置页十二项（采集三项 + 模型五项 + 提炼四项）。
 
 最近三轮：
 
+- **提炼的四个数与提示词进设置页**（2026-10-20）：`ROUND_LIMIT`/`BATCH_LIMIT`/`HISTORY_LIMIT`
+  变成 `extract_round_limit`(200)/`extract_batch_limit`(20)/`extract_history_limit`(15) 三个键，
+  `SYSTEM_PROMPT` 改名 `extract.DEFAULT_SYSTEM_PROMPT` 并整段可改（`extract_prompt`，
+  空 = 内置；与内置一字不差时落空串，库里不留副本）。默认值只有 `extract.DEFAULT_*` 一份，
+  `config.DEFAULTS` 直接引它。新形状 `extract.policy(settings) → Policy`，**一轮起头取一次快照**
+  （正在跑的那轮不受中途保存影响）。设置页多一张「提炼」卡片：三个数字 + 提示词大文本框 +
+  「恢复默认提示词」。用例 267 条（新增 23 条）。
 - **四道 `max_tokens` 全部移除**（2026-10-20，用户定）：提炼那对（1200/2400）与测试连接那对
   （64/512）都删了，`llm.chat()` 连参数都不收，请求体里一个 `max_tokens` 都不发；
   `budget()`/`test_budget()` 收敛成只管等待的 `request_timeout()`/`test_timeout()`，两档
@@ -26,10 +33,6 @@
   `describe._contact()`，介绍优先 `certinfo`、空了回落 `sign`（**`sign` 那档没有第二例
   可验**，只有 `certinfo` 有真样本）。`KIND_LABEL` 加 `contact` 后气泡与类型徽标都自动
   跟上，前端一行没改。
-- **思考参数按服务商出形状**（2026-10-20）：`llm.py:thinking_body` 按 `base_url` 域名选
-  形状（`*.googleapis.com` 用 `reasoning_effort`，其余 `enable_thinking`）。Google 那家
-  对规范外的顶层字段一律 400 且**发生在鉴权之前**，所以"地址对、key 对、就是 400"是
-  参数形状问题。**没验的一半**：`reasoning_effort` 三档都收，但看不出真的改变了思考行为。
 
 **库里现在的样子**（2026-10-20 清库重采后）：1 个关注会话（26软工3班通知群）、100 条消息、
 **正文 XML 归零**、图片 12/12 有本机链接（`mid` 10 / `thumb` 2）、5 条引用行全部有定位。

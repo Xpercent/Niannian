@@ -146,5 +146,35 @@ def test_priority_only_has_three_values_and_unknown_is_medium():
     assert extract.parse_priority(None) == "medium"
 
 
+@pytest.mark.parametrize("bad", ["abc", None, [], {}])
+def test_unreadable_numbers_fall_back_instead_of_crashing_the_round(bad):
+    """这一层读的是过了 `validate` 的配置；手工写坏的文件也不能让起轮当场崩。"""
+    plan = extract.policy({"extract_batch_limit": bad})
+    assert plan.batch_limit == extract.DEFAULT_BATCH_LIMIT
+
+
+def test_policy_falls_back_to_the_built_in_numbers_and_prompt():
+    """没有那几个键（测试里直接打这一层时就是这样）→ 用内置默认，不猜。"""
+    plan = extract.policy({})
+
+    assert (plan.round_limit, plan.batch_limit, plan.history_limit) == (
+        extract.DEFAULT_ROUND_LIMIT, extract.DEFAULT_BATCH_LIMIT,
+        extract.DEFAULT_HISTORY_LIMIT)
+    assert plan.prompt == extract.DEFAULT_SYSTEM_PROMPT
+
+
+def test_policy_reads_the_configured_numbers_and_prompt():
+    plan = extract.policy({"extract_round_limit": "500", "extract_batch_limit": 8,
+                           "extract_history_limit": 0, "extract_prompt": "  只挑教学类的  "})
+
+    # 上文 0 条是合法选择，所以"读到了 0"与"没配"必须分清
+    assert (plan.round_limit, plan.batch_limit, plan.history_limit) == (500, 8, 0)
+    assert plan.prompt == "只挑教学类的"
+
+
+def test_blank_prompt_means_use_the_built_in_one():
+    assert extract.policy({"extract_prompt": "   "}).prompt == extract.DEFAULT_SYSTEM_PROMPT
+
+
 def test_empty_batch_is_a_valid_answer():
     assert extract.parse_tasks('{"tasks":[]}', 3) == []

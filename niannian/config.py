@@ -7,6 +7,12 @@ import os
 from pathlib import Path
 from urllib.parse import urlsplit
 
+from .extract import (DEFAULT_BATCH_LIMIT, DEFAULT_HISTORY_LIMIT,
+                      DEFAULT_ROUND_LIMIT, DEFAULT_SYSTEM_PROMPT)
+
+# 提示词整段交出去改，长度得有个边界（再长就是粘贴错东西了）
+PROMPT_LIMIT = 8000
+
 DEFAULTS: dict = {
     "host": "127.0.0.1",       # 仅监听本机，避免对外暴露微信数据
     "port": 8765,
@@ -14,13 +20,18 @@ DEFAULTS: dict = {
     "wechat_account": "",      # 留空则自动选择本机登录账号
     "history_limit": 100,      # 关注会话后自动导入的最近消息条数
     "poll_seconds": 3.0,       # 采集轮询间隔
-    # 阶段二的模型接入（OpenAI 兼容服务商）。这里只放"怎么跟服务商说话"的参数，
-    # 提炼的提示词与批次不在这一层。
+    # 阶段二的模型接入（OpenAI 兼容服务商）。这里只放"怎么跟服务商说话"的参数。
     "llm_base_url": "https://api.siliconflow.cn/v1",
     "llm_model": "Qwen/Qwen3-8B",
     "llm_api_key": "",
     "llm_thinking": False,         # 思考模式：服务商侧对 Qwen3 **默认是开的**，见 llm.py
     "llm_include_images": False,   # 图片喂不喂模型，默认关（用户 2026-10-16 定）
+    # 第一轮提炼的三个数与提示词：默认值**直接引 extract.py 那三个常量**，这一层不抄第二份。
+    # 提示词留空的意思就是"用内置那段"（extract.DEFAULT_SYSTEM_PROMPT）。
+    "extract_round_limit": DEFAULT_ROUND_LIMIT,
+    "extract_batch_limit": DEFAULT_BATCH_LIMIT,
+    "extract_history_limit": DEFAULT_HISTORY_LIMIT,
+    "extract_prompt": "",
 }
 
 # 设置页开放这些键：host 改了会把本机微信数据暴露到局域网且容易把自己关在
@@ -28,10 +39,17 @@ DEFAULTS: dict = {
 # 都留给你手工编辑 config.json。
 EDITABLE_KEYS = ("history_limit", "poll_seconds", "port",
                  "llm_base_url", "llm_model", "llm_api_key",
-                 "llm_thinking", "llm_include_images")
+                 "llm_thinking", "llm_include_images",
+                 "extract_round_limit", "extract_batch_limit",
+                 "extract_history_limit", "extract_prompt")
 # 这些键改了必须重启才生效，界面上要如实标出来，不能假装已应用。
 RESTART_KEYS = ("port",)
 BOOL_KEYS = ("llm_thinking", "llm_include_images")
+# 提炼那三个数的边界：上界是"这一轮还跑得完、一批还读得懂"的实用边界，不是数学边界。
+# 一轮 1000 条 ÷ 一批 20 条 = 50 次请求，最坏按开思考那档等，够人受的了。
+EXTRACT_BOUNDS = {"extract_round_limit": (1, 1000),
+                  "extract_batch_limit": (1, 50),
+                  "extract_history_limit": (0, 100)}
 
 # 界面显示与校验报错都说人话，所以每个开放键有一个中文名（设置页读 GET 回来的
 # 这份，不要再在前端抄第二张表）。`llm_api_key` 那一格由 api 抹空后回显。
@@ -44,6 +62,10 @@ KEY_LABELS = {
     "llm_api_key": "API Key",
     "llm_thinking": "思考模式",
     "llm_include_images": "图片喂给模型",
+    "extract_round_limit": "一轮提炼条数",
+    "extract_batch_limit": "一批请求条数",
+    "extract_history_limit": "上文条数",
+    "extract_prompt": "提炼提示词",
 }
 
 TRUE_WORDS = ("true", "1", "on", "yes")
@@ -99,6 +121,16 @@ def clamp_history_limit(value) -> int:
     except (TypeError, ValueError):
         return DEFAULTS["history_limit"]
     return max(1, min(limit, 1000))
+
+
+def clamp_extract(value, key: str) -> int:
+    """读文件时**宽容**：认不出来就退回默认，越界夹到边界（与 `clamp_history_limit` 一样）。"""
+    low, high = EXTRACT_BOUNDS[key]
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        return DEFAULTS[key]
+    return max(low, min(number, high))
 
 
 def validate(values: dict) -> dict:
@@ -159,6 +191,27 @@ def validate(values: dict) -> dict:
         except (KeyError, ValueError):
             raise ValueError(f"{KEY_LABELS[field]}只能是开或关") from None
 
+    # 提炼那三个数：界面上留空就是"用默认"，填了才校验（一轮 1000 条 ÷ 一批 20 条
+    # 已经够一轮跑十几分钟，再大只会让"这轮到底跑完没跑完"变得没法说）。
+    for field, (low, high) in EXTRACT_BOUNDS.items():
+        raw = values.get(field)
+        if raw is None or (isinstance(raw, str) and not raw.strip()):
+            out[field] = DEFAULTS[field]
+            continue
+        try:
+            number = int(raw)
+        except (TypeError, ValueError):
+            raise ValueError(f"{KEY_LABELS[field]}必须是整数") from None
+        if not low <= number <= high:
+            raise ValueError(f"{KEY_LABELS[field]}要在 {low} 到 {high} 之间")
+        out[field] = number
+
+    prompt = str(values.get("extract_prompt") or "").strip()
+    if len(prompt) > PROMPT_LIMIT:
+        raise ValueError(f"提炼提示词太长了（{len(prompt)} 字，上限 {PROMPT_LIMIT} 字）")
+    # 提交的与内置那段一字不差 → 落**空串**：config.json 里不留一份副本，
+    # 日后内置改了（比如又撞出一个要把 JSON 写坏的形状）不会被自己存的那份挡住。
+    out["extract_prompt"] = "" if prompt == DEFAULT_SYSTEM_PROMPT.strip() else prompt
     return out
 
 
@@ -205,4 +258,8 @@ def load_config(root: Path) -> dict:
             settings[field] = DEFAULTS[field]
     for field in BOOL_KEYS:
         settings[field] = to_bool(settings.get(field), default=DEFAULTS[field])
+    for field in EXTRACT_BOUNDS:
+        settings[field] = clamp_extract(settings.get(field), field)
+    if not isinstance(settings.get("extract_prompt"), str):
+        settings["extract_prompt"] = ""
     return settings
