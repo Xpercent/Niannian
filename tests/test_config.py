@@ -12,13 +12,15 @@ GOOD = {"history_limit": "250", "poll_seconds": "5", "port": "9000",
         "llm_base_url": "https://api.siliconflow.cn/v1",
         "llm_model": "Qwen/Qwen3-8B", "llm_api_key": "sk-good",
         "llm_thinking": "false", "llm_include_images": True,
+        "llm_temperature": "0.3",
         "extract_round_limit": "80", "extract_batch_limit": "10",
         "extract_history_limit": "5", "extract_prompt": "只要学习相关的"}
 
 # validate 严格：GOOD 得把设置页开放的键**全**带上，缺一个就是没提交。
 LLM_GOOD = {"llm_base_url": "https://api.siliconflow.cn/v1",
             "llm_model": "Qwen/Qwen3-8B", "llm_api_key": "sk-good",
-            "llm_thinking": False, "llm_include_images": True}
+            "llm_thinking": False, "llm_include_images": True,
+            "llm_temperature": 0.3}
 
 
 def test_validate_normalizes_types():
@@ -69,11 +71,23 @@ def test_port_below_1024_rejected_but_1024_allowed():
     ("llm_api_key", "k" * 301, "太长"),
     ("llm_thinking", "maybe", "思考模式只能是开或关"),
     ("llm_include_images", 7, "图片喂给模型只能是开或关"),
+    ("llm_temperature", "热", "温度要填数字"),
+    ("llm_temperature", 2.5, "温度要在 0 到 2 之间"),
+    ("llm_temperature", -0.1, "温度要在 0 到 2 之间"),
 ])
 def test_validate_rejects_bad_llm_values_with_plain_words(key, bad, phrase):
     with pytest.raises(ValueError) as caught:
         validate({**GOOD, key: bad})
     assert phrase in str(caught.value)
+
+
+def test_blank_temperature_means_dont_send_the_field_but_zero_does_not():
+    """这格空着的意思是"请求里不带 temperature"，而 0 是"我要 0 度"——两回事。"""
+    assert validate({**GOOD, "llm_temperature": ""})["llm_temperature"] is None
+    assert validate({**GOOD, "llm_temperature": "   "})["llm_temperature"] is None
+    assert validate({**GOOD, "llm_temperature": None})["llm_temperature"] is None
+    assert validate({**GOOD, "llm_temperature": 0})["llm_temperature"] == 0.0
+    assert validate({**GOOD, "llm_temperature": 2})["llm_temperature"] == 2.0
 
 
 def test_llm_api_key_may_be_empty_at_save_time():
@@ -127,6 +141,17 @@ def test_load_config_clamps_extract_numbers_instead_of_refusing_to_start(tmp_pat
     assert settings["extract_prompt"] == ""                           # 非字符串当没填
 
 
+def test_load_config_treats_an_unreadable_temperature_as_not_filled(tmp_path):
+    """温度读不出来的宽容回落是"不发这个字段"，越界照样夹边界——服务不能起不来。"""
+    (tmp_path / "config.json").write_text(json.dumps({"llm_temperature": "abc"}),
+                                          encoding="utf-8")
+    assert load_config(tmp_path)["llm_temperature"] is None
+
+    (tmp_path / "config.json").write_text(json.dumps({"llm_temperature": 9}),
+                                          encoding="utf-8")
+    assert load_config(tmp_path)["llm_temperature"] == 2.0
+
+
 @pytest.mark.parametrize("value,want", [
     (True, True), (False, False), (1, True), (0, False),
     ("true", True), ("ON", True), (" yes ", True),
@@ -171,6 +196,7 @@ def test_save_creates_file_and_load_reads_it_back(tmp_path):
     assert settings["llm_model"] == "Qwen/Qwen3-8B"
     assert settings["llm_api_key"] == "sk-good"
     assert settings["llm_thinking"] is False
+    assert settings["llm_temperature"] == 0.3
 
 
 def test_save_preserves_keys_the_page_does_not_expose(tmp_path):
@@ -221,6 +247,7 @@ def test_llm_defaults_ship_pointing_at_the_documented_provider():
     assert DEFAULTS["llm_api_key"] == ""
     assert DEFAULTS["llm_thinking"] is False
     assert DEFAULTS["llm_include_images"] is False
+    assert DEFAULTS["llm_temperature"] is None    # 默认不发 temperature
 
 
 def test_only_port_needs_restart():
@@ -228,7 +255,7 @@ def test_only_port_needs_restart():
     assert set(EDITABLE_KEYS) - set(RESTART_KEYS) == {
         "history_limit", "poll_seconds",
         "llm_base_url", "llm_model", "llm_api_key",
-        "llm_thinking", "llm_include_images",
+        "llm_thinking", "llm_include_images", "llm_temperature",
         "extract_round_limit", "extract_batch_limit",
         "extract_history_limit", "extract_prompt"}
 

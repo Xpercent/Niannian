@@ -104,6 +104,26 @@ def test_a_googleapis_lookalike_host_is_not_treated_as_google(provider):
     assert provider.calls[0]["extra_body"] == {"enable_thinking": False}
 
 
+def test_temperature_stays_out_of_the_request_body_when_not_filled(provider):
+    """没填温度 = **不发这个字段**：各家默认值不一样，我们不替服务商决定。
+
+    与 ``max_tokens`` 那一条同一个道理，而且少数推理模型压根不接受 temperature，
+    替用户塞一个默认值就是给它们一条 400。
+    """
+    llm.test_connection(CFG)
+    assert "temperature" not in provider.calls[0]
+    llm.test_connection({**CFG, "llm_temperature": None})
+    assert "temperature" not in provider.calls[1]
+
+
+def test_a_filled_temperature_reaches_the_request_body(provider):
+    llm.test_connection({**CFG, "llm_temperature": 0.2})
+    assert provider.calls[0]["temperature"] == 0.2
+    # 0 度是合法要求（只想照字面办），不能和"没填"混成一回事
+    llm.test_connection({**CFG, "llm_temperature": 0})
+    assert provider.calls[1]["temperature"] == 0
+
+
 def test_thinking_on_widens_the_wait_and_never_sends_a_ceiling(provider):
     """开思考的单次能跑到 20 秒以上（真机踩过），所以只放宽等待。
 

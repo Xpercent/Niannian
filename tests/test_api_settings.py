@@ -92,6 +92,31 @@ def test_put_settings_rejects_bad_llm_values_in_plain_words(tmp_path, monkeypatc
     assert read_config(tmp_path)["llm_base_url"] == BASE["llm_base_url"]  # 没落盘
 
 
+def test_put_settings_stores_a_temperature_and_blank_stops_sending_it(tmp_path, monkeypatch):
+    """填了才发、清空就不发：库里那格跟着变成数字或 null，界面读回来才对得上。"""
+    app = make_app(tmp_path, monkeypatch)
+    put = endpoint(app, "/api/settings", "PUT")
+
+    got = put({**BASE, "llm_temperature": 0.4})
+    assert read_config(tmp_path)["llm_temperature"] == 0.4
+    assert got["values"]["llm_temperature"] == 0.4
+
+    back = put({**BASE, "llm_temperature": None})
+    assert read_config(tmp_path)["llm_temperature"] is None
+    assert back["values"]["llm_temperature"] is None
+
+    with pytest.raises(HTTPException) as caught:
+        put({**BASE, "llm_temperature": 2.5})
+    assert "温度要在 0 到 2 之间" in caught.value.detail
+
+
+def test_get_settings_reports_no_temperature_as_null(tmp_path, monkeypatch):
+    """库里没填过 → values 里那格是 null，界面才知道该空着而不是显示 0。"""
+    got = endpoint(make_app(tmp_path, monkeypatch), "/api/settings", "GET")()
+    assert got["values"]["llm_temperature"] is None
+    assert got["labels"]["llm_temperature"] == "温度"
+
+
 def test_get_settings_shows_the_prompt_that_actually_runs(tmp_path, monkeypatch):
     """配置里存空串的意思是"用内置"，界面得看到**真正生效的那段**才谈得上改它。"""
     app = make_app(tmp_path, monkeypatch)
@@ -157,6 +182,17 @@ def test_test_connection_uses_the_draft_and_the_stored_key(tmp_path, monkeypatch
     assert seen["llm_api_key"] == "sk-saved-key-0001"     # 没重填 → 用库里那把
     # 测连**不该**把草稿写进配置：不保存就再点一次也得照样能测
     assert read_config(tmp_path)["llm_model"] == BASE["llm_model"]
+
+
+def test_test_connection_a_cleared_temperature_is_not_taken_from_the_library(
+        tmp_path, monkeypatch):
+    """界面上那格被清空 → 草稿里是 null → 这一试也不发，不能悄悄沿用库里那个旧的。"""
+    seen = {}
+    monkeypatch.setattr("niannian.api.test_connection",
+                        lambda settings: seen.update(settings) or {"ok": True})
+    app = make_app(tmp_path, monkeypatch, {**BASE, "llm_temperature": 0.8})
+    endpoint(app, "/api/settings/test-connection", "POST")({"llm_temperature": None})
+    assert seen["llm_temperature"] is None
 
 
 def test_test_connection_does_not_go_out_for_an_unparsable_draft(tmp_path, monkeypatch):

@@ -54,6 +54,8 @@ type Form = {
   llm_api_key: string;
   llm_thinking: boolean;
   llm_include_images: boolean;
+  /** 文本框里原样存着用户正在敲的东西：空串 = 不发 temperature，"0" 才是要 0 度。 */
+  llm_temperature: string;
   extract_round_limit: string;
   extract_batch_limit: string;
   extract_history_limit: string;
@@ -69,6 +71,7 @@ const EMPTY: Form = {
   llm_api_key: "",
   llm_thinking: false,
   llm_include_images: false,
+  llm_temperature: "",
   extract_round_limit: "200",
   extract_batch_limit: "20",
   extract_history_limit: "15",
@@ -241,6 +244,7 @@ export function SettingsPage({ notify }: Props) {
           llm_api_key: "",
           llm_thinking: data.values.llm_thinking,
           llm_include_images: data.values.llm_include_images,
+          llm_temperature: String(data.values.llm_temperature ?? ""),
           extract_round_limit: String(data.values.extract_round_limit),
           extract_batch_limit: String(data.values.extract_batch_limit),
           extract_history_limit: String(data.values.extract_history_limit),
@@ -267,6 +271,8 @@ export function SettingsPage({ notify }: Props) {
       clear_llm_api_key: clearKey,
       llm_thinking: form.llm_thinking,
       llm_include_images: form.llm_include_images,
+      // 空 → null → 后端那一份的意思是"请求里不发 temperature"
+      llm_temperature: numberOrNull(form.llm_temperature),
       extract_round_limit: numberOrNull(form.extract_round_limit),
       extract_batch_limit: numberOrNull(form.extract_batch_limit),
       extract_history_limit: numberOrNull(form.extract_history_limit),
@@ -320,6 +326,8 @@ export function SettingsPage({ notify }: Props) {
       // 框里没重填就沿用库里那把；"清除"只影响保存，不影响这一次试
       llm_api_key: form.llm_api_key.trim(),
       llm_thinking: form.llm_thinking,
+      // 温度这格空着就是"这一试也不发"，与保存后的语义保持一致
+      llm_temperature: numberOrNull(form.llm_temperature),
     };
     try {
       setTest(await api<LlmTestResult>("/api/settings/test-connection", postJson(body),
@@ -431,6 +439,29 @@ export function SettingsPage({ notify }: Props) {
               />
               <span className="mt-1 block text-xs leading-5 text-stone-500">
                 写服务商那边的完整模型 ID，带组织前缀的那种。
+              </span>
+            </label>
+            <label className="block">
+              <span className="flex flex-wrap items-center gap-2 text-sm font-medium text-stone-700">
+                温度
+                <Badge>即时生效</Badge>
+              </span>
+              <Input
+                type="number"
+                min={0}
+                max={2}
+                step={0.1}
+                className="mt-2"
+                placeholder="留空：交回服务商"
+                value={form.llm_temperature}
+                onChange={(event) =>
+                  setForm((old) => ({ ...old, llm_temperature: event.target.value }))
+                }
+              />
+              <span className="mt-1 block text-xs leading-5 text-stone-500">
+                越小越照字面办、越大越发散。
+                <strong className="font-medium">留空就是请求里不带 temperature</strong>
+                ，各家默认值不一样；要 0 度得真的填一个 0，空着不等于 0。
               </span>
             </label>
           </div>

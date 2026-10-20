@@ -26,6 +26,8 @@ DEFAULTS: dict = {
     "llm_api_key": "",
     "llm_thinking": False,         # 思考模式：服务商侧对 Qwen3 **默认是开的**，见 llm.py
     "llm_include_images": False,   # 图片喂不喂模型，默认关（用户 2026-10-16 定）
+    # 采样温度：**空 = 请求体里不发这个字段**（用户 2026-10-20 定），默认值交回服务商。
+    "llm_temperature": None,
     # 第一轮提炼的三个数与提示词：默认值**直接引 extract.py 那三个常量**，这一层不抄第二份。
     # 提示词留空的意思就是"用内置那段"（extract.DEFAULT_SYSTEM_PROMPT）。
     "extract_round_limit": DEFAULT_ROUND_LIMIT,
@@ -39,12 +41,15 @@ DEFAULTS: dict = {
 # 都留给你手工编辑 config.json。
 EDITABLE_KEYS = ("history_limit", "poll_seconds", "port",
                  "llm_base_url", "llm_model", "llm_api_key",
-                 "llm_thinking", "llm_include_images",
+                 "llm_thinking", "llm_include_images", "llm_temperature",
                  "extract_round_limit", "extract_batch_limit",
                  "extract_history_limit", "extract_prompt")
 # 这些键改了必须重启才生效，界面上要如实标出来，不能假装已应用。
 RESTART_KEYS = ("port",)
 BOOL_KEYS = ("llm_thinking", "llm_include_images")
+# 温度的边界取 OpenAI 兼容层的通行范围。下界是 0 而不是"必须给个值"：
+# 0（不随机）是合法要求，与"留空 = 不发"是两回事。
+TEMPERATURE_BOUNDS = (0.0, 2.0)
 # 提炼那三个数的边界：上界是"这一轮还跑得完、一批还读得懂"的实用边界，不是数学边界。
 # 一轮 1000 条 ÷ 一批 20 条 = 50 次请求，最坏按开思考那档等，够人受的了。
 EXTRACT_BOUNDS = {"extract_round_limit": (1, 1000),
@@ -62,6 +67,7 @@ KEY_LABELS = {
     "llm_api_key": "API Key",
     "llm_thinking": "思考模式",
     "llm_include_images": "图片喂给模型",
+    "llm_temperature": "温度",
     "extract_round_limit": "一轮提炼条数",
     "extract_batch_limit": "一批请求条数",
     "extract_history_limit": "上文条数",
@@ -133,6 +139,17 @@ def clamp_extract(value, key: str) -> int:
     return max(low, min(number, high))
 
 
+def clamp_temperature(value):
+    """读文件时同样**宽容**：认不出来就当"没填"（不发这个字段），越界夹到边界。"""
+    if value is None or (isinstance(value, str) and not value.strip()):
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return max(TEMPERATURE_BOUNDS[0], min(number, TEMPERATURE_BOUNDS[1]))
+
+
 def validate(values: dict) -> dict:
     """校验设置页提交的键，返回规范化后的值；不合法抛 ValueError。
 
@@ -190,6 +207,20 @@ def validate(values: dict) -> dict:
             out[field] = to_bool(values[field])
         except (KeyError, ValueError):
             raise ValueError(f"{KEY_LABELS[field]}只能是开或关") from None
+
+    # 温度：留空**不是**"我要 0 度"，而是"这个字段别发"，所以空与 0 是两种值。
+    raw = values.get("llm_temperature")
+    if raw is None or (isinstance(raw, str) and not raw.strip()):
+        out["llm_temperature"] = None
+    else:
+        try:
+            number = float(raw)
+        except (TypeError, ValueError):
+            raise ValueError(f"{KEY_LABELS['llm_temperature']}要填数字") from None
+        low, high = TEMPERATURE_BOUNDS
+        if not low <= number <= high:
+            raise ValueError(f"{KEY_LABELS['llm_temperature']}要在 {low:g} 到 {high:g} 之间")
+        out["llm_temperature"] = number
 
     # 提炼那三个数：界面上留空就是"用默认"，填了才校验（一轮 1000 条 ÷ 一批 20 条
     # 已经够一轮跑十几分钟，再大只会让"这轮到底跑完没跑完"变得没法说）。
@@ -260,6 +291,7 @@ def load_config(root: Path) -> dict:
         settings[field] = to_bool(settings.get(field), default=DEFAULTS[field])
     for field in EXTRACT_BOUNDS:
         settings[field] = clamp_extract(settings.get(field), field)
+    settings["llm_temperature"] = clamp_temperature(settings.get("llm_temperature"))
     if not isinstance(settings.get("extract_prompt"), str):
         settings["extract_prompt"] = ""
     return settings

@@ -71,14 +71,19 @@ def chat(settings: dict, messages: list[dict], *,
     """发一次对话请求，回 ``{text, reasoning, model}``。
 
     请求体里**不带** ``max_tokens``：长度上限由服务商自己定（用户 2026-10-20 定）。
+    ``llm_temperature`` 同一条思路——**填了才发**，空的意思就是不发这个字段（用户
+    2026-10-20 定）：各家默认值不一样，而我们替它决定就是给不接受温度的模型塞坏参数。
     ``max_retries=0``：SDK 默认失败重试两次，那会把界面上的等待时间乘三，
     而"测试连接"要的是立刻告诉用户通不通。
     """
     base, model, key = split_config(settings)
     client = OpenAI(api_key=key, base_url=base, timeout=timeout, max_retries=0)
-    completion = client.chat.completions.create(
-        model=model, messages=messages,
-        extra_body=thinking_body(settings.get("llm_thinking"), base))
+    payload: dict = {"model": model, "messages": messages,
+                     "extra_body": thinking_body(settings.get("llm_thinking"), base)}
+    temperature = settings.get("llm_temperature")
+    if temperature is not None:
+        payload["temperature"] = temperature
+    completion = client.chat.completions.create(**payload)
     if not getattr(completion, "choices", None):
         raise ValueError("服务商回了空响应")
     message = completion.choices[0].message

@@ -228,10 +228,10 @@ cd web && npm run dev                   # 前端热更新，/api 代理到 8765
   必须清库重采才对存量生效。
 
 ## 设置页与配置（`config.py` / `api.py`）
-- 设置页开放**十二项**：采集侧 `history_limit`、`poll_seconds`、`port`，模型侧
-  `llm_base_url`、`llm_model`、`llm_api_key`、`llm_thinking`、`llm_include_images`，
-  提炼侧 `extract_round_limit`、`extract_batch_limit`、`extract_history_limit`、
-  `extract_prompt`（2026-10-20 上）。
+- 设置页开放**十三项**：采集侧 `history_limit`、`poll_seconds`、`port`，模型侧
+  `llm_base_url`、`llm_model`、`llm_api_key`、`llm_thinking`、`llm_include_images`、
+  `llm_temperature`，提炼侧 `extract_round_limit`、`extract_batch_limit`、
+  `extract_history_limit`、`extract_prompt`（2026-10-20 上）。
   提炼那三个数**写在这四个键里而不是写回 `extract.py`**：`extract.DEFAULT_*` 仍是
   唯一的默认值来源，`config.DEFAULTS` 直接引它，两处不各存一份。
   `host` 刻意不放（改成非 127.0.0.1 会把本机微信数据暴露到局域网，且改错会把自己关在门外）；
@@ -297,6 +297,13 @@ cd web && npm run dev                   # 前端热更新，/api 代理到 8765
   `test_connection` 那句"链路本身是通的"说明。
   前端 `LLM_TEST_REQUEST_MS`（60 秒）必须比后端最长等待更久，否则用户看到的是"请求超时"
   而不是服务商的答复。
+- **`llm_temperature` 填了才发**（用户 2026-10-20 定，与上一条"不发 `max_tokens`"同一个思路）：
+  界面上那格**留空 = 请求体里不带 `temperature`**，默认值交回服务商（各家不一样，而少数
+  推理模型根本不接受这个字段，替用户塞一个默认值就是整条 400）。要 0 度必须**真填 0**——
+  `0` 与"没填"是两种值，所以 `llm.py:chat()` 判的是 `is not None` 而不是真假。
+  边界只有 `config.TEMPERATURE_BOUNDS`（0~2）一份：`validate()` 严格（越界与"热"这种
+  都抛中文错），`load_config()` 宽容（读不出来当没填、越界夹边界）。
+  Google 那家**实测吃这个字段**（草稿带 0.5 测连，2.6 秒回了「好的」）。
 - **服务商的错误一律翻成中文再出接口**（`error_text`），并且**回显前先抹掉密钥**；
   判断顺序必须先具体后笼统（`AuthenticationError`/`BadRequestError` 都是
   `APIStatusError` 子类，`APITimeoutError` 是 `APIConnectionError` 子类，反了就把 401

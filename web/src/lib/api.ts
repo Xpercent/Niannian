@@ -311,6 +311,8 @@ export type SettingsValues = {
   llm_api_key: string;
   llm_thinking: boolean;
   llm_include_images: boolean;
+  /** null 的意思是**请求体里不发 temperature**（交回服务商默认），不是"0 度"。 */
+  llm_temperature: number | null;
   extract_round_limit: number;
   extract_batch_limit: number;
   extract_history_limit: number;
