@@ -9,7 +9,10 @@
 - 遇到问题**先汇报，不要自己替用户做决定**（含技术选型、语义取舍）。
 - **涉及入库解析/库结构的改动，直接删库重建（清库重采）让改动对存量生效，不用再问**
   （用户 2026-10-14 明确授权；重建前把关注清单与每会话导入条数存下来，旧库留一份备份）。
-- 每轮自行 `git` 提交，并同步维护 `docs/REFACTOR-LOG.md`、`HANDOFF.md`。
+- 每轮自行 `git` 提交。四份文档**各管一件事，同一句话不要抄第二份**：
+  `AGENTS.md` 只放**有约束力的规则与实测事实**，`HANDOFF.md` 只放**当下状态 / 下一步 /
+  待用户决定**，`docs/REFACTOR-LOG.md` 是**逐轮历史归档**（追加，不回改），
+  `README.md` 是**对外的功能说明与接口清单**。
 - Web UI 需与原项目**基本一致**（配色 token、布局、交互流）。
 - 服务可由 agent 自行启停（`python -m niannian`，端口 8765）。
 
@@ -35,12 +38,12 @@ cd web && npm run dev                   # 前端热更新，/api 代理到 8765
   `api`（FastAPI）。
 - 切分的判据是"谁有权碰什么"：只有 `wechat_db` 里的东西读微信的解密缓存，
   且必须经 `Collector` 的命令队列进采集线程；`normalize`/`ids`/`describe` 是纯函数，
-  阶段二的提炼要直接复用它们，不需要起服务。
+  提炼要直接复用它们，不需要起服务。
 - `web/`：React + Vite + Tailwind，手写 UI 组件（无 shadcn/radix）；
   `pages/` 下三页：`tasks`（待办事项，**默认页**）、`sessions`（微信会话）、`settings`（设置）。
 - `tests/test_upstream_contract.py`：**认接口不认版本号**地守住上游私有成员
-  （`MediaDownloader` 那 7 个 + `WeChatDB` 我们调到的那些）。其余用例全打在替身上，
-  上游改名时它们照样全绿而生产立刻瞎，所以 bump pin 前这条必须先看。
+  （`MediaDownloader` 那一组：定位/解密/落盘/钥匙/wxgf 转码，加 `WeChatDB` 我们调到的那些）。
+  其余用例全打在替身上，上游改名时它们照样全绿而生产立刻瞎，所以 bump pin 前这条必须先看。
 - `scripts/capture_fixtures.py`：把关注会话的**原始正文**（未解析的 XML 也在内）导成
   `data/fixtures/capture.db`，供 `tests/test_capture_replay.py` 离线回放。跑它要**先停服务**
   （同一份解密缓存不该被两个读取方同时开）；产物是真实聊天，落在 `data/`（已 gitignore）。
@@ -58,8 +61,8 @@ cd web && npm run dev                   # 前端热更新，/api 代理到 8765
   上游 1.2.5.1 及更早拿 `message_resource.db` 的全局 `SenderName2Id` 去查，
   会解析出毫不相干的人（甚至群外成员）。正文无 `wxid_x:` 前缀的行（自己发的消息、
   emoji、图片、系统消息）全部会错。**这条现在由上游承担**：1.2.6.1（issue #34）
-  起按消息所在分片解析，全局 `_sender_id_index()` 已删除，我们曾经兜过底的
-  `sender_alias_map` + `IsolatedDB._fix_senders` 已随之删掉（2026-10-14，用户定）。
+  起按消息所在分片解析，全局 `_sender_id_index()` 已删除，我们兜过底的
+  `sender_alias_map` + `IsolatedDB._fix_senders` 也随之删掉（**不要再加回本地兜底**）。
   **所以 pin 不能往回退** —— 退回 1.2.5.1 气泡上就是错的人，
   `tests/test_wechat.py:test_upstream_pin_resolves_senders_per_shard` 认接口守住这件事
   （接口面整体由 `tests/test_upstream_contract.py` 兜），
@@ -161,9 +164,11 @@ cd web && npm run dev                   # 前端热更新，/api 代理到 8765
   「明文+PKCS7」严丝合缝，但 `emoticon.db::kNonStoreEmoticonTable.aes_key` 与正文
   `aeskey` 的 12 种取法 × ECB/CBC/CTR/CFB/OFB × 4 种 IV × 偏移 0/16 **全部对不上首块**，
   图片那把 AES 密钥与单字节 XOR 也否掉。这轮结论仍然成立：没破。
-- 采集因此回到**纯本地读**：表情行不发任何网络请求（`约定` 里那条"唯一例外"已作废）。
-- 媒体目录 `data/wechat/media/<账号指纹>/emoji_*`（16 个）是上一轮取回的，现在没有
-  任何行引用它，用户定**保留不动**，不是待清理项。
+- 采集因此回到**纯本地读**：表情行不发任何网络请求。
+- 媒体目录里**不该再出现 `emoji_*`**：上一轮取回的那 16 个曾按用户意思想"保留不动"，
+  2026-10-20 核对已经不在了（`data/wechat/media/<指纹>/` 只剩 12 个图片文件）。
+  没有任何代码路径会删它们（`discard()` 只删升级时被替下来的同一条那个档位），
+  所以是人为清理过的；本来也没有任何行引用它们，功能上无影响。
 
 
 ## 发送者显示名（`niannian/contacts.py`）
@@ -213,6 +218,7 @@ cd web && npm run dev                   # 前端热更新，/api 代理到 8765
   游标是 `(before_seq, before_id)` 复合，索引 `(session_id, sort_seq, id)`。
 - 同 `sort_seq` 并列用 id 稳定破并列（跨分片 `local_id` 本身重复，没有更可靠的列），
   即"同秒内按入库先后"——这是已知且接受的行为，`test_storage` 里固定住了。
+  **并列是真会发生的**，不是理论：本机有一例名片与图片同秒（见「引用消息与跳转」）。
 - 重新导入 = 记下该会话条数 → `clear_watermark` → 复用 `_import_recent`。
   **不删消息**，重复行靠 `source_id` UNIQUE 跳过；水位取 `max`，所以回填更旧的
   消息不会把增量轮询游标拉回去。
@@ -305,8 +311,9 @@ cd web && npm run dev                   # 前端热更新，/api 代理到 8765
 - **同时只跑一轮**：`Extractor.start()` 在上一轮没结束时回 `accepted=false`，不排队第二轮。
   立刻回的那份状态里 `total` 就得是积压条数（真机踩过：先回 0 看着像"这轮啥也没找到"）——
   这一头读的是自己的库，毫秒级纯读，与"请求线程一律纯读"不冲突。
-- **模型给的编号只在那次请求里有意义**：落库的依据是 `sort_seq`（会话内唯一、也正是翻页游标），
-  界面点依据跳原文照消息列表那条路走，**不要再为任务加接口**。
+- **模型给的编号只在那次请求里有意义**：落库的依据是 `sort_seq`（也正是翻页游标），
+  界面点依据跳原文照消息列表那条路走，**不要再为任务加接口**。同秒并列时会把并列的
+  两条都当依据取回来，见「引用消息与跳转」那条。
 - **时间进出都是上海本地**：进模型 `time="2026-10-11T15:34"`（**不带偏移**，时区在系统指令里
   说一次），库里 `created_at` 仍是 UTC，换算只在渲染这一头；落库的 `deadline` 统一带 `+08:00`。
   `parse_deadline` 必须自己拆形状——用户契约里那个 `2026-10-13T0:00` 是个位小时，
@@ -323,7 +330,7 @@ cd web && npm run dev                   # 前端热更新，/api 代理到 8765
   （一次请求带几条，编号就是 0..N-1）、`HISTORY_LIMIT=15`（上文几条，**不带编号、不能据它建任务**）。
 - 额度与超时**分两档**（关 1200/60s、开 2400/180s），理由跟"测试连接"那条实测一样。
 - **429 不做退避重试**：连续 13 批之后智谱会限流（实测），那批不标记、等人再点。
-- 图片这一轮**只喂 `[图片]` 那几个字**，`llm_include_images` 仍然没有任何代码读它。
+- 图片这一轮**只喂 `[图片]` 那几个字**（`llm_include_images` 那个开关的事见「模型接入」）。
 
 ## 待办事项页（`web/src/pages/tasks.tsx` + `components/task-drawer.tsx`，2026-10-17 上）
 - **默认页是待办事项**（`#tasks`），导航第一项挂 `pending` 角标。原项目那套里的变更记录
@@ -355,17 +362,22 @@ cd web && npm run dev                   # 前端热更新，/api 代理到 8765
   `metadata.attachment` 的字段展开成第二份文本——那会让同一句话有两个真源。
 - **引用不回填原文**：引用行的 `content` 只有回复那句（与微信一致），被引那条
   **只当定位**用（`quoted={sort_seq, label, …}`）。做提炼时不要把原文查出来拼进去。
-- **图片可选喂给模型，但必须带开关、默认关**，而且不是刚需：现在 `metadata.local_file`
-  已经指到工程媒体目录里那份解好码的图，将来要喂就是"开关 + 读这个字段"，
-  **不需要再动存储或采集**。开关属于设置页要新增的项，跟着 `config` 的边界校验走。
+- 图片喂不喂模型由 `llm_include_images` 管，形状见「模型接入」；这一层要记的是
+  **要喂就读 `metadata.local_file`**（库里已经指到解好码那份），不需要再动存储与采集。
 
 ## 引用消息与跳转（`describe.py` + `wechat_db.py` + `api.py`）
 - **不存被引全文，只存定位**（用户定的、与微信一致）：`quoted={svrid, author, name,
   at, type, label, sort_seq}`。`label` 是那行小字，实测被引原文最长 2311 字，全文一律
   不入库。引用行的**正文只放回复那句话**——引用是上下文，不该冒充本句（将来喂模型同理）。
-- **定位键是 `sort_seq`，不是 svrid**：`sort_seq` 在会话内唯一（实测）且正是翻页游标，
-  前端 `before_seq = 目标+1, before_id = 1` 就能取到包含目标的那一屏，**不需要新接口**。
+- **定位键是 `sort_seq`，不是 svrid**：`sort_seq` 正是翻页游标，前端
+  `before_seq = 目标+1, before_id = 1` 就能取到包含目标的那一屏，**不需要新接口**。
   `before_id` 不能给 0（API 校验 `ge=1`）。
+- **`sort_seq` 不是"会话内唯一"（2026-10-20 实测推翻这句旧结论）**：同一秒到的两条消息会
+  并列，本机就有一例——名片（`local_id` 290）与紧跟的图片（291）同为 `1792373309001`。
+  翻页没事（`(sort_seq, id)` 复合游标本来就破并列，跳转那一屏两条都带上、描边认的是行 id）；
+  受影响的是**手里只有 `sort_seq`** 的那两处：`storage.quoted_targets()` 的
+  `{sort_seq: id}` 并列时后一行赢（跳引用可能描错气泡，内容仍在同一屏），
+  `tasks.sources` 按 sort_seq 取依据原文会把并列的两条都算进来。要不要改成带行 id，等用户定。
 - `quoted.sort_seq` 由采集线程按 `svrid` 反查**微信分片库**得到（`wechat_db.py:server_seq_map`），
   不是反查我们自己的库：原文还在导入窗口外时也查得到，等它被导入后同一个 sort_seq
   自然对上。查不到留 0 → 前端显示成不可点 + 「原文未导入」。

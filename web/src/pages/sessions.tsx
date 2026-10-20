@@ -276,9 +276,9 @@ export function SessionsPage({
   /**
    * 跳到某条消息并描边：点引用的原文、点搜索结果，走同一条路。
    *
-   * 目标不在当前这一屏时，用**现有**游标参数取"包含它的那一屏"就够了：`sort_seq`
-   * 在会话内唯一，`before_seq = 目标 + 1, before_id = 1` 会把目标本身带进来
-   * （它是这一屏最新的一条），不需要为跳转再加一个新接口。
+   * 目标不在当前这一屏时，用**现有**游标参数取"包含它的那一屏"就够了：
+   * `before_seq = 目标 + 1, before_id = 1` 会把目标本身带进来（它是这一屏最新的一条），
+   * 不需要为跳转再加一个新接口。同秒并列的两条也一起带进来，描边认的是行 id。
    * `before_id` 不能给 0 —— 接口的校验是 `ge=1`。
    */
   async function jumpToMessage(target: QuoteTarget, fromSearch = false) {

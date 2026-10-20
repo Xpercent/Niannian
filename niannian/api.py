@@ -296,8 +296,9 @@ def create_app(root: Path | None = None) -> FastAPI:
     def _attach_quote_targets(session_id: str, items: list[dict]) -> None:
         """给引用行挂 ``quote_target``：被引那条在本库里存在才给，否则为 None。
 
-        跳转用的是 ``quoted.sort_seq``（会话内唯一，也是翻页游标），所以前端拿到
-        target 就滚过去、拿不到就把引用行显示成不可点。
+        跳转用的是 ``quoted.sort_seq``（也是翻页游标），所以前端拿到
+        target 就滚过去、拿不到就把引用行显示成不可点。同秒并列时 ``{sort_seq: id}``
+        是后一行赢，描边可能落在并列的另一条上——内容仍在同一屏里（AGENTS.md 有这条）。
         """
         seqs = {int(quoted_of(item).get("sort_seq") or 0) for item in items}
         found = store.quoted_targets(session_id, seqs)

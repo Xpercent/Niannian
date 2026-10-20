@@ -498,8 +498,9 @@ class Database:
                    limit: int = 200) -> list[dict]:
         """任务清单，**按优先级再按截止时间**排；``status='all'`` 不过滤状态。
 
-        ``sources`` 存的是**依据消息的 sort_seq**（会话内唯一、也正是翻页游标），
-        前端点依据跳原文要照消息列表那条路走，不需要新接口。
+        ``sources`` 存的是**依据消息的 sort_seq**（也正是翻页游标；同秒可并列，
+        见 AGENTS.md「引用消息与跳转」），前端点依据跳原文要照消息列表那条路走，
+        不需要新接口。
         ``due`` 认 today/overdue/upcoming，比较的是 `shanghai_bounds()` 那三个同形状
         字符串——定宽东八区 ISO 的字典序就是时间序。
         """
