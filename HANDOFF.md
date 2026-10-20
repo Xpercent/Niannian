@@ -1,6 +1,14 @@
 # HANDOFF.md — 交接
 
 ## 当前状态
+**换服务商：思考参数按域名出形状**（2026-10-20）：设置页指向 Google 后「测试连接」400
+（`Unknown name "enable_thinking"`）。假 key 探同一 URL 报同一句 → **400 出在 body 解析、
+在鉴权之前**，与地址和 key 都无关：那家严格 proto-JSON，OpenAI 规范外的顶层字段一律拒收。
+`llm.py:thinking_body` 因此按 `base_url` 域名出形状（`*.googleapis.com` 用
+`reasoning_effort`，其余照旧 `enable_thinking`；域名判断容忍不带协议头的地址）。
+**没验证的一半**：`reasoning_effort` 三档都被收，但 `reasoning_content` 始终为空，
+看不出它真的改变了思考——这一家的开关只算"把意图发出去"。用户那侧还剩一栏要自己改：
+模型名 `gemini3.6-falsh` 的合法 id 是 `gemini-3.6-flash`。`pytest` 243 passed / 6 skipped。
 **待办事项页已上**（2026-10-17）：默认页与导航第一项都是待办事项（角标挂 `pending`），
 四张指标卡（进行中/今天截止/已逾期/累计完成）、状态 tabs、搜索、优先级/截止/来源会话三个筛选、
 按"先优先级再期限"排的列表，点一行开**右侧整高抽屉**：徽标、期限、说明、**依据消息原文**

@@ -1197,3 +1197,45 @@ master 回到 `da016d9`，**跳过**取图那一轮（`15b0080`），再把升�
   编辑期限保存成 `2026-10-08T09:00+08:00` 再改回 `2026-10-07T10:00+08:00` 都对；
   429 那一轮顶部是红条 + "没成功的那几批**没有**被标记"。
   **进度条那一档没抓到**：429 秒回，跑不出"在跑"的轮询窗口，`running` 分支只由代码与用例保证。
+
+## 换服务商：思考参数按域名出形状（2026-10-20）
+
+用户把设置页指向 Google（`https://generativelanguage.googleapis.com/v1beta` + 一个
+Gemini 模型名），「测试连接」回的是这样一句：
+
+```
+服务商不接受这个请求（400）：Invalid JSON payload received.
+Unknown name "enable_thinking": Cannot find field.
+```
+
+界面文案没错——问题既不在地址也不在 key，但要说清是哪一头，得先分清两件事。
+
+### 先定位：400 出在 body 解析，而且**在鉴权之前**
+
+拿**假 key** 探同一个 URL，报的是一模一样的 `Unknown name "enable_thinking"`；换成不带
+这个字段，同一条 URL 报的才是"Missing or invalid Authorization header"。所以那一句 400
+跟密钥无关：Google 先把 JSON 塞进 proto 解析器，**认不出的顶层字段直接拒绝整个请求体**，
+连模型名都还没轮到校验（这也是为什么它没同时报"模型找不到"）。
+顺带确认 `/v1beta/chat/completions` 与官方文档那条 `/v1beta/openai/chat/completions`
+两条都收 OpenAI 形状，`llm_base_url` 不改也不算错。
+
+第二个坑在这后面：用户填的模型名 `gemini3.6-falsh` 拿这把 key 列出来的清单里
+真实 id 是 `gemini-3.6-flash`（少两处连字符、flash 拼成 falsh）。这条属于设置页那一栏，
+代码不管——修好参数形状后它变成一句干净的"服务商找不到这个模型或地址（404）"。
+
+### 落成代码
+
+- `llm.py:thinking_body(enabled, base_url)`：**参数形状按服务商给**。
+  `*.googleapis.com` 这一家走 OpenAI 标准的 `reasoning_effort`（开 `high`／关 `none`），
+  其余照旧 `enable_thinking`。判域名用 `urlparse(...).netloc` 并对**不带协议头**的
+  地址补 `//` 再读（配置就是这么读进来的），且只认 `googleapis.com` 这个域或它的子域
+  ——`endswith("googleapis.com")` 会把 `notgoogleapis.com` 也认进来，用例钉住了。
+- **诚实记下测不出来的那一半**：`reasoning_effort` 的 `high`/`none`/`minimal` 三档
+  Google 都收（不再 400），但 `reasoning_content` 一直是空、completion_tokens 也没按
+  档位分级（118/176/14），**所以看不出它有没有真的改变思考行为**。这一家的思考开关
+  只是把意图表达出去，不能当已生效；`test_connection` 原有的那句
+  "开了思考但服务商没回思考内容"正好把这件事说给用户听。
+- 测试四条（`tests/test_llm.py`）：两档形状、缺协议头、look-alike 域名。
+  真服务商端到端复跑：`gemini-3.6-flash` 关思考 4.3 秒通、开思考 2.9 秒通带那句 note；
+  模型名不改则回 404 那句中文。`pytest` **243 passed / 6 skipped**（上一轮 239 + 这 4 条）。
+

@@ -77,6 +77,33 @@ def test_thinking_on_reaches_the_request_body(provider):
     assert provider.calls[0]["extra_body"] == {"enable_thinking": True}
 
 
+GOOGLE_BASE = "https://generativelanguage.googleapis.com/v1beta"
+
+
+@pytest.mark.parametrize("thinking,shape", [
+    (False, {"reasoning_effort": "none"}),
+    (True, {"reasoning_effort": "high"}),
+])
+def test_google_gets_the_openai_standard_field(provider, thinking, shape):
+    """Google 的兼容层严格解析请求体：``enable_thinking`` 会让**整条**请求 400（实测）。
+
+    它只认 OpenAI 规范里的字段，思考这一档只能用 ``reasoning_effort`` 表达。
+    """
+    llm.test_connection({**CFG, "llm_base_url": GOOGLE_BASE, "llm_thinking": thinking})
+    assert provider.calls[0]["extra_body"] == shape
+
+
+def test_host_recognition_tolerates_a_missing_scheme(provider):
+    """地址可以不带协议头（配置就是这么读进来的），认服务商不能因此认错形状。"""
+    llm.test_connection({**CFG, "llm_base_url": "generativelanguage.googleapis.com/v1beta"})
+    assert provider.calls[0]["extra_body"] == {"reasoning_effort": "none"}
+
+
+def test_a_googleapis_lookalike_host_is_not_treated_as_google(provider):
+    llm.test_connection({**CFG, "llm_base_url": "https://notgoogleapis.com/v1"})
+    assert provider.calls[0]["extra_body"] == {"enable_thinking": False}
+
+
 def test_thinking_on_gets_a_bigger_token_ceiling_and_wait(provider):
     """开思考时 64 的上限会被思考吃光、单次能跑到 20 秒以上（真机踩过），两档分开。"""
     llm.test_connection({**CFG, "llm_thinking": True})

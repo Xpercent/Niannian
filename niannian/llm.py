@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import time
+from urllib.parse import urlparse
 
 from openai import (APIConnectionError, APIStatusError, APITimeoutError,
                     AuthenticationError, BadRequestError, NotFoundError,
@@ -25,17 +26,30 @@ TEST_TIMEOUT_THINKING_SECONDS = 45.0
 TEST_PROMPT = "只回两个字：好的"
 
 
-def thinking_body(enabled) -> dict:
-    """思考模式在请求体里的写法（2026-10-17 拿真服务商实测定的）。
+def thinking_body(enabled, base_url: str = "") -> dict:
+    """思考模式在请求体里的写法：**形状按服务商给**（2026-10-20 定的）。
 
-    Qwen3 在 SiliconFlow 上**默认就是开的**：什么参数都不带时回了
-    ``reasoning_content`` 并花掉 334 token，显式关掉只剩 19 token。所以"关"必须
-    **显式发过去**，省略参数等于替用户开着。
+    SiliconFlow/Qwen3 认 ``enable_thinking``，而且**默认就是开的**：什么参数都不带
+    时回了 ``reasoning_content`` 并花掉 334 token，显式关掉只剩 19 token。所以
+    "关"必须**显式发过去**，省略参数等于替用户开着。
 
-    服务商同时也认 ``thinking={"type": "enabled"|"disabled"}``（实测两种都吃），
-    但官方 API 参考里列的是 ``enable_thinking``，我们按文档那个走。
+    Google 的 OpenAI 兼容层用严格的 proto-JSON 解析，OpenAI 规范之外的顶层字段
+    一律 400（实测 ``Unknown name "enable_thinking": Cannot find field``；
+    ``google.thinking_config`` 与 ``thinking_level`` 同样被拒）。它只吃标准的
+    ``reasoning_effort``——``high``/``none``/``minimal`` 三档都收，但有没有真的改变
+    思考行为看不出来（``reasoning_content`` 一直是空），所以这一头只是把意图表达出去。
     """
+    if _is_google(base_url):
+        return {"reasoning_effort": "high" if enabled else "none"}
     return {"enable_thinking": bool(enabled)}
+
+
+def _is_google(base_url: str) -> bool:
+    """地址是不是 Google 那家（AI Studio 的 generativelanguage 与 Vertex 的 aiplatform 同域）。"""
+    base = str(base_url or "").strip()
+    # 用户可能不带协议头就填进来，那样 urlparse 读不出 netloc
+    host = urlparse(base if "//" in base else f"//{base}").netloc.lower()
+    return host == "googleapis.com" or host.endswith(".googleapis.com")
 
 
 def split_config(settings: dict) -> tuple[str, str, str]:
@@ -66,7 +80,7 @@ def chat(settings: dict, messages: list[dict], *,
     base, model, key = split_config(settings)
     client = OpenAI(api_key=key, base_url=base, timeout=timeout, max_retries=0)
     kwargs: dict = {"model": model, "messages": messages,
-                    "extra_body": thinking_body(settings.get("llm_thinking"))}
+                    "extra_body": thinking_body(settings.get("llm_thinking"), base)}
     if max_tokens:
         kwargs["max_tokens"] = int(max_tokens)
     completion = client.chat.completions.create(**kwargs)

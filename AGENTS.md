@@ -258,11 +258,19 @@ cd web && npm run dev                   # 前端热更新，/api 代理到 8765
 - 这一层**只管"怎么跟服务商说话"**：`chat(settings, messages)` 发一次 OpenAI 兼容
   请求，`test_connection(settings)` 是设置页那颗按钮的后端。提炼的提示词、批次、
   结果落库都不在这层——下一轮直接复用 `chat`，不需要起服务也不需要再包一层。
-- **思考模式的参数是实测定的**：SiliconFlow 对 `extra_body={"enable_thinking": bool}`
-  与 `thinking={"type": "enabled"|"disabled"}` **两种形状都吃**，我们按官方 API 参考
-  里那个 `enable_thinking` 走。关键是 **Qwen3 在服务商侧默认就是开的**
-  （不带任何参数时回了 `reasoning_content`、334 token；显式关掉 19 token），
-  所以"关"必须**显式发过去**，省略参数等于替用户开着。
+- **思考模式的参数形状按服务商给**（`llm.py:thinking_body`，2026-10-20 定的）：
+  SiliconFlow 对 `extra_body={"enable_thinking": bool}` 与 `thinking={"type": …}`
+  **两种形状都吃**，我们按官方 API 参考里那个 `enable_thinking` 走。关键是
+  **Qwen3 在服务商侧默认就是开的**（不带任何参数时回了 `reasoning_content`、
+  334 token；显式关掉 19 token），所以"关"必须**显式发过去**，省略参数等于替用户开着。
+- **`enable_thinking` 不是通用字段，别把它发给所有服务商**：Google 的 OpenAI 兼容层
+  用严格的 proto-JSON 解析，规范外的顶层字段一律 400 而且**发生在鉴权之前**
+  （实测 `Unknown name "enable_thinking": Cannot find field`，`google.thinking_config`
+  与 `thinking_level` 同样被拒）——症状是"地址看着对、key 也没错，就是 400"。
+  那一家的域名（`*.googleapis.com`）走 OpenAI 标准的 `reasoning_effort`
+  （`high`/`none`/`minimal` 三档都收），**但看不出它有没有真的改变思考行为**
+  （`reasoning_content` 一直是空），所以思考开关在这家只是把意图表达出去、不能当已生效。
+  新服务商撞同样的 400 时先分清是"这家不吃这个字段"还是"参数真的写错了"。
 - **测试连接的两档额度与超时是分开的，别合成一档**（真机踩过）：关思考 64 token / 20 秒；
   开思考 512 token / 45 秒。开着思考时 64 的上限会被思考内容全吃光（正文一个字都不剩，
   界面看着像坏了），而单次耗时实测在 **0.9 秒～29.9 秒**之间晃过 20 秒那道线。
