@@ -168,12 +168,15 @@ export type ExtractCallRow = {
 
 export type ExtractRunDetail = { run: ExtractRun; calls: ExtractCallRow[] };
 
-/** 一次调用的完整正文：`request` 就是发出去的那两条 message，逐字。 */
+/** 一次调用的完整正文：`request` 是发出去的那几条 message，`body` 是请求体里除
+ * messages 之外的字段（模型名与设置页那一框「请求体参数」）。旧轮次没有后一份，
+ * 后端回空对象。 */
 export type ExtractCallDetail = Omit<
   ExtractCallRow,
   "request_chars" | "response_chars"
 > & {
   request: { role: string; content: string }[];
+  body: Record<string, unknown>;
   response: string;
   reasoning: string;
 };
@@ -210,8 +213,9 @@ export const CATALOG_REQUEST_MS = 100000;
 export const LONG_REQUEST_MS = 310000;
 
 /**
- * 测试连接在后端最多等服务商 20 秒；开着思考实测能到 21 秒，后端为此放宽到 45 秒。
- * 前端要等得比它久，否则用户看到的是"请求超时"而不是服务商的答复。
+ * 测试连接在后端最多等服务商 45 秒（只有一档：思考开关没了，这一层读不出这一条
+ * 会不会思考，只能按实测最慢的那档等）。前端要等得比它久，否则用户看到的是
+ * "请求超时"而不是服务商的答复。
  */
 export const LLM_TEST_REQUEST_MS = 60000;
 
@@ -309,10 +313,9 @@ export type SettingsValues = {
   llm_model: string;
   /** 后端**永远**回空串：真密钥只待在 config.json，界面靠 api_key_masked 显示存了哪一把。 */
   llm_api_key: string;
-  llm_thinking: boolean;
   llm_include_images: boolean;
-  /** null 的意思是**请求体里不发 temperature**（交回服务商默认），不是"0 度"。 */
-  llm_temperature: number | null;
+  /** 「请求体参数」那一框的**原文**：存什么就发什么，空串意思是一个额外字段都不带。 */
+  llm_extra_body: string;
   extract_round_limit: number;
   extract_batch_limit: number;
   extract_history_limit: number;
@@ -352,8 +355,9 @@ export type LlmTestResult = {
   elapsed_ms: number;
   model?: string;
   reply?: string;
-  thinking?: boolean;
-  /** 开关与服务商实际表现不一致时的提醒（例如开了思考却没回思考内容）。 */
+  /** 这一次**实际发出去的请求体**（格式化好、密钥已抹）：通了失败都给，出网前的校验错没有。 */
+  request?: string;
+  /** 开关与服务商实际表现不一致时的提醒（例如回了空正文、或回了思考内容）。 */
   note?: string;
   error?: string;
 };

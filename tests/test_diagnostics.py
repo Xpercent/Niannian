@@ -15,7 +15,7 @@ from niannian.storage import EXTRACT_RUNS_KEPT, Database
 
 ACCOUNT = "wxid_me"
 CFG = {"llm_base_url": "https://api.siliconflow.cn/v1", "llm_model": "Qwen/Qwen3-8B",
-       "llm_api_key": "sk-test-value", "llm_thinking": False}
+       "llm_api_key": "sk-test-value", "llm_extra_body": ""}
 ONE_TASK = '{"tasks":[{"title":"完成问卷","description":"全班填写","' \
            'deadline":"2026-10-13T0:00","priority":"high","id":[0]}]}'
 
@@ -104,17 +104,49 @@ def test_the_run_list_carries_char_counts_not_the_bodies(db, fake):
 
     call = db.extract_run(db.extract_runs()[0]["id"])["calls"][0]
     assert "request" not in call and "response" not in call
-    assert call["request_chars"] == len(json.dumps(fake.sent[0], ensure_ascii=False))
+    # 留档的是**整份请求体**（模型名 + 那两条 message + 「请求体参数」那一框），
+    # 所以字符数是这一份的长度，不是只有 messages 那一份
+    assert call["request_chars"] == len(json.dumps(
+        {"model": CFG["llm_model"], "messages": fake.sent[0]}, ensure_ascii=False))
     assert call["response_chars"] == len(ONE_TASK)
 
     full = db.model_call(call["id"])
     assert [item["role"] for item in full["request"]] == ["system", "user"]
     assert full["request"][0]["content"] == extract.DEFAULT_SYSTEM_PROMPT
     assert '<msg id="0" sender="老王"' in full["request"][1]["content"]
+    assert full["body"] == {"model": "Qwen/Qwen3-8B"}     # 那一框空着 → 只剩模型名
     assert full["response"] == ONE_TASK
     assert full["reasoning"] == "先想了一遍全班"
     assert full["model"] == "fake-model"
     assert full["status"] == "ok" and full["error"] == ""
+
+
+def test_the_box_that_was_sent_sits_in_the_record(db, fake):
+    """参数形状归用户写之后，这一页能回答"那次到底发了什么"里的**参数**那一半。
+
+    撞 400 时只看正文是查不出谁写坏哪一项的（服务商那句还常常不点名字段，实测）。
+    """
+    seed(db, session_key(ACCOUNT, "room_a"))
+    run(db, settings={**CFG, "llm_extra_body": '{"reasoning_effort": "minimal"}'})
+
+    full = db.model_call(db.extract_run(db.extract_runs()[0]["id"])["calls"][0]["id"])
+    assert full["body"] == {"model": "Qwen/Qwen3-8B", "reasoning_effort": "minimal"}
+
+
+def test_an_old_round_that_only_stored_messages_still_reads_back(db):
+    """旧行存的是裸 messages 数组：那一框还没上的那些轮次也要打得开，`body` 给空对象。"""
+    seed(db, session_key(ACCOUNT, "room_a"))
+    run(db)
+    call_id = db.extract_run(db.extract_runs()[0]["id"])["calls"][0]["id"]
+    with db.connect() as conn:
+        conn.execute("UPDATE model_calls SET request=? WHERE id=?",
+                     (json.dumps([{"role": "system", "content": "旧的那一份"},
+                                  {"role": "user", "content": "<messages/>"}],
+                                 ensure_ascii=False), call_id))
+
+    full = db.model_call(call_id)
+    assert [item["content"] for item in full["request"]] == ["旧的那一份", "<messages/>"]
+    assert full["body"] == {}
 
 
 def test_a_failed_request_is_recorded_with_the_translated_error(db, fake):

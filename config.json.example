@@ -8,6 +8,6 @@
   "llm_base_url": "https://api.siliconflow.cn/v1",
   "llm_model": "Qwen/Qwen3-8B",
   "llm_api_key": "",
-  "llm_thinking": false,
-  "llm_include_images": false
+  "llm_include_images": false,
+  "llm_extra_body": ""
 }

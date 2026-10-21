@@ -3,7 +3,7 @@
 本机微信只读采集 + 个人工作空间看板。
 已完成：**待办事项页**（默认页：指标卡、筛选、右侧抽屉看依据原文并跳回会话、改状态与期限）、
 微信会话页（关注、看消息与图片、会话内搜索、引用跳转、重新导入）、设置页、
-**模型接入**（OpenAI 兼容服务商 + 思考模式开关 + 设置页"测试连接"），以及**第一轮消息提炼**
+**模型接入**（OpenAI 兼容服务商 + 设置页"测试连接"，请求体参数就是界面上一框原样 JSON），以及**第一轮消息提炼**
 （关注会话的消息 → 模型 → `tasks` 表，手动点「立即提炼」起一轮、后台线程跑）、
 **提炼诊断页**（一轮一批一条：回看每一次请求发出去的原文与模型的原样回复）。
 下一步是第二轮对齐（同一件事被不同批次重复建出来，要靠合并收掉）。阶段编号不再写在界面与
@@ -44,9 +44,8 @@ cd ..
 | `llm_base_url` | `https://api.siliconflow.cn/v1` | 模型服务商地址（任何 OpenAI 兼容的都能用，末尾带 `/v1`） |
 | `llm_model` | `Qwen/Qwen3-8B` | 服务商那边的完整模型 ID |
 | `llm_api_key` | 空 | 密钥。**只有这一份是敏感内容**：接口只回掩码（`sk-…xgme`），设置页那格读回来永远是空的，留空保存 = 不改 |
-| `llm_thinking` | false | 思考模式。注意 Qwen3 这类模型在服务商侧**默认是开的**，要快与省必须显式关掉 |
 | `llm_include_images` | false | 提炼时喂不喂图片。**第一轮提炼没读它**（图片只喂 `[图片]` 那几个字），等要喂真图的那一轮再接 |
-| `llm_temperature` | 空 = 不发 | 采样温度（0–2）。**留空就是请求体里不带 `temperature`**，默认值交回服务商；要 0 度得真填 0，空着不等于 0 |
+| `llm_extra_body` | 空 = 不带额外字段 | **一框原样 JSON**（温度、思考、输出上限……）。里面的键原样并进请求体顶层，各家字段名按那家的文档写；空着就只发模型名与正文，默认值全交回服务商。`model`/`messages`/`stream` 与密钥不许写在这里，坏 JSON 保存当场就拦 |
 | `extract_round_limit` | 200 | 一轮最多处理多少条（1–1000），攒多了分几轮跑 |
 | `extract_batch_limit` | 20 | 一次请求带几条（1–50），模型看到的依据编号就是 0..条数-1；越长越容易整批读不懂 JSON |
 | `extract_history_limit` | 15 | 每批附带几条旧消息当上文（0–100），**不带编号、不能据它建任务**；0 就是不给上文 |
@@ -110,9 +109,9 @@ cd ..
 | GET | `/api/extract/status` | 这一轮跑到哪儿了（`total/done/batches/created/failed_batches/error`，另带本轮那一行的 `run_id`） |
 | GET | `/api/diagnostics/runs?limit=` | 最近的提炼轮次（新→旧，每轮带请求数与失败数） |
 | GET | `/api/diagnostics/runs/{run_id}` | 一轮的请求序列（概要 + 字符数，**不带正文**） |
-| GET | `/api/diagnostics/calls/{call_id}` | 一次请求的原始内容：发出去的 system/user 正文、模型原样回复与思考内容 |
-| GET / PUT | `/api/settings` | 读 / 存设置页的十四项（返回哪些已生效、哪些需重启；密钥只回掩码，`extract_prompt` 那格回的是**正在生效的那段**提示词，顶层另给 `extract_prompt_default` 供「恢复默认」；`extract_profile` 那格回的就是库里那份原话，它没有内置默认） |
-| POST | `/api/settings/test-connection` | 用界面上当前那份参数试一次服务商，**不需要先保存**；通不通都回 200，结果在 `ok`/`error` 里 |
+| GET | `/api/diagnostics/calls/{call_id}` | 一次请求的原始内容：发出去的 system/user 正文、请求体里除 messages 之外的那些字段（`body`）、模型原样回复与思考内容 |
+| GET / PUT | `/api/settings` | 读 / 存设置页的十三项（返回哪些已生效、哪些需重启；密钥只回掩码，`extract_prompt` 那格回的是**正在生效的那段**提示词，顶层另给 `extract_prompt_default` 供「恢复默认」；`extract_profile` 与 `llm_extra_body` 那两格回的就是库里那份原话，它们没有内置默认） |
+| POST | `/api/settings/test-connection` | 用界面上当前那份参数试一次服务商，**不需要先保存**；通不通都回 200，结果在 `ok`/`error` 里，并带 `request`——**这一次实际发出去的请求体**（格式化好、密钥已抹） |
 
 ## 目录结构
 

@@ -4,23 +4,24 @@ import pytest
 
 from niannian.config import (BOOL_KEYS, DEFAULTS, EDITABLE_KEYS, KEY_LABELS,
                              RESTART_KEYS, load_config, mask_api_key,
-                             merge_api_key, save_config, to_bool, validate)
+                             merge_api_key, parse_body, save_config, to_bool,
+                             validate)
 from niannian.extract import (DEFAULT_BATCH_LIMIT, DEFAULT_HISTORY_LIMIT,
                               DEFAULT_ROUND_LIMIT, DEFAULT_SYSTEM_PROMPT)
 
 GOOD = {"history_limit": "250", "poll_seconds": "5", "port": "9000",
         "llm_base_url": "https://api.siliconflow.cn/v1",
         "llm_model": "Qwen/Qwen3-8B", "llm_api_key": "sk-good",
-        "llm_thinking": "false", "llm_include_images": True,
-        "llm_temperature": "0.3",
+        "llm_include_images": True,
+        "llm_extra_body": '{"temperature": 0.3}',
         "extract_round_limit": "80", "extract_batch_limit": "10",
         "extract_history_limit": "5", "extract_prompt": "只要学习相关的"}
 
 # validate 严格：GOOD 得把设置页开放的键**全**带上，缺一个就是没提交。
 LLM_GOOD = {"llm_base_url": "https://api.siliconflow.cn/v1",
             "llm_model": "Qwen/Qwen3-8B", "llm_api_key": "sk-good",
-            "llm_thinking": False, "llm_include_images": True,
-            "llm_temperature": 0.3}
+            "llm_include_images": True,
+            "llm_extra_body": '{"temperature": 0.3}'}
 
 
 def test_validate_normalizes_types():
@@ -70,11 +71,12 @@ def test_port_below_1024_rejected_but_1024_allowed():
     ("llm_model", "x" * 121, "太长"),
     ("llm_api_key", "sk good", "空格"),
     ("llm_api_key", "k" * 301, "太长"),
-    ("llm_thinking", "maybe", "思考模式只能是开或关"),
     ("llm_include_images", 7, "图片喂给模型只能是开或关"),
-    ("llm_temperature", "热", "温度要填数字"),
-    ("llm_temperature", 2.5, "温度要在 0 到 2 之间"),
-    ("llm_temperature", -0.1, "温度要在 0 到 2 之间"),
+    ("llm_extra_body", "{not json}", "读不懂 JSON"),
+    ("llm_extra_body", '[{"temperature": 1}]', "要写成 JSON 对象"),
+    ("llm_extra_body", '{"model": "other"}', "model 不能写在请求体参数里"),
+    ("llm_extra_body", '{"api_key": "sk-x"}', "api_key 不能写在请求体参数里"),
+    ("llm_extra_body", "x" * 2001, "请求体参数太长"),
 ])
 def test_validate_rejects_bad_llm_values_with_plain_words(key, bad, phrase):
     with pytest.raises(ValueError) as caught:
@@ -82,13 +84,18 @@ def test_validate_rejects_bad_llm_values_with_plain_words(key, bad, phrase):
     assert phrase in str(caught.value)
 
 
-def test_blank_temperature_means_dont_send_the_field_but_zero_does_not():
-    """这格空着的意思是"请求里不带 temperature"，而 0 是"我要 0 度"——两回事。"""
-    assert validate({**GOOD, "llm_temperature": ""})["llm_temperature"] is None
-    assert validate({**GOOD, "llm_temperature": "   "})["llm_temperature"] is None
-    assert validate({**GOOD, "llm_temperature": None})["llm_temperature"] is None
-    assert validate({**GOOD, "llm_temperature": 0})["llm_temperature"] == 0.0
-    assert validate({**GOOD, "llm_temperature": 2})["llm_temperature"] == 2.0
+def test_the_box_is_stored_as_written_and_blank_means_nothing_extra():
+    """那一框存**原文**（排好版才改得动），空着的意思是一个额外字段都不带。
+
+    与旧的 `llm_temperature` 同一思路：`0` 与"没填"是两种值，而现在这个区别归 JSON 自己
+    ——`{"temperature": 0}` 原样留着，空串不会变成 `{}` 之外任何东西。
+    """
+    assert validate({**GOOD, "llm_extra_body": ""})["llm_extra_body"] == ""
+    assert validate({**GOOD, "llm_extra_body": "   \n "})["llm_extra_body"] == ""
+    assert parse_body(validate({**GOOD, "llm_extra_body": ""})["llm_extra_body"]) == {}
+    got = validate({**GOOD, "llm_extra_body": '\n  {"temperature": 0}  \n'})
+    assert got["llm_extra_body"] == '{"temperature": 0}'
+    assert parse_body(got["llm_extra_body"]) == {"temperature": 0}
 
 
 def test_llm_api_key_may_be_empty_at_save_time():
@@ -151,15 +158,19 @@ def test_load_config_clamps_extract_numbers_instead_of_refusing_to_start(tmp_pat
     assert settings["extract_profile"] == ""                          # 同上：不把数字当身份
 
 
-def test_load_config_treats_an_unreadable_temperature_as_not_filled(tmp_path):
-    """温度读不出来的宽容回落是"不发这个字段"，越界照样夹边界——服务不能起不来。"""
-    (tmp_path / "config.json").write_text(json.dumps({"llm_temperature": "abc"}),
-                                          encoding="utf-8")
-    assert load_config(tmp_path)["llm_temperature"] is None
+def test_load_config_does_not_parse_the_box_so_the_service_still_starts(tmp_path):
+    """读文件这头**只当字符串**：手改坏的那一框不该把服务关在门外。
 
-    (tmp_path / "config.json").write_text(json.dumps({"llm_temperature": 9}),
+    写侧严格、读侧宽容这条在这里的形状是：坏 JSON 原样留着，到出网前才由
+    `llm.extra_body` 说清是哪一项写坏（用例打在 test_llm 那边）。
+    """
+    (tmp_path / "config.json").write_text(json.dumps({"llm_extra_body": "{oops"}),
                                           encoding="utf-8")
-    assert load_config(tmp_path)["llm_temperature"] == 2.0
+    assert load_config(tmp_path)["llm_extra_body"] == "{oops"
+
+    (tmp_path / "config.json").write_text(json.dumps({"llm_extra_body": 42}),
+                                          encoding="utf-8")
+    assert load_config(tmp_path)["llm_extra_body"] == ""      # 非字符串当没填
 
 
 @pytest.mark.parametrize("value,want", [
@@ -205,8 +216,7 @@ def test_save_creates_file_and_load_reads_it_back(tmp_path):
         == (250, 5.0, 9000)
     assert settings["llm_model"] == "Qwen/Qwen3-8B"
     assert settings["llm_api_key"] == "sk-good"
-    assert settings["llm_thinking"] is False
-    assert settings["llm_temperature"] == 0.3
+    assert settings["llm_extra_body"] == '{"temperature": 0.3}'
 
 
 def test_save_preserves_keys_the_page_does_not_expose(tmp_path):
@@ -238,26 +248,28 @@ def test_load_config_stays_tolerant_on_bad_values(tmp_path):
     """读文件要宽容（服务得起得来），与写文件严格是两回事。"""
     (tmp_path / "config.json").write_text(
         json.dumps({"history_limit": "abc", "poll_seconds": -5,
-                    "llm_base_url": 123, "llm_thinking": "maybe",
-                    "llm_include_images": "on", "llm_model": "  DeepSeek/DeepSeek-V3  "}),
+                    "llm_base_url": 123, "llm_include_images": "on",
+                    "llm_extra_body": 42,
+                    "llm_model": "  DeepSeek/DeepSeek-V3  "}),
         encoding="utf-8")
     settings = load_config(tmp_path)
     assert settings["history_limit"] == DEFAULTS["history_limit"]
     assert settings["poll_seconds"] == 1.0        # 下限夹住，不退回默认
     assert settings["llm_base_url"] == DEFAULTS["llm_base_url"]
-    assert settings["llm_thinking"] is False      # 认不出来退回默认（关）
     assert settings["llm_include_images"] is True  # "on" 是认得出的开
+    assert settings["llm_extra_body"] == ""        # 非字符串当没填，不猜它想发什么
     assert settings["llm_model"] == "  DeepSeek/DeepSeek-V3  "   # 读侧不加工，严格在写侧
 
 
 def test_llm_defaults_ship_pointing_at_the_documented_provider():
-    """默认值是"填个 Key 就能试"的形状：地址与模型名给全，密钥与开关留关。"""
+    """默认值是"填个 Key 就能试"的形状：地址与模型名给全，密钥与那一框都留空。"""
     assert DEFAULTS["llm_base_url"] == "https://api.siliconflow.cn/v1"
     assert DEFAULTS["llm_model"]
     assert DEFAULTS["llm_api_key"] == ""
-    assert DEFAULTS["llm_thinking"] is False
     assert DEFAULTS["llm_include_images"] is False
-    assert DEFAULTS["llm_temperature"] is None    # 默认不发 temperature
+    # 那一框默认空 = 请求体里只带模型名与正文，默认值全交回服务商
+    assert DEFAULTS["llm_extra_body"] == ""
+    assert parse_body(DEFAULTS["llm_extra_body"]) == {}
 
 
 def test_only_port_needs_restart():
@@ -265,7 +277,7 @@ def test_only_port_needs_restart():
     assert set(EDITABLE_KEYS) - set(RESTART_KEYS) == {
         "history_limit", "poll_seconds",
         "llm_base_url", "llm_model", "llm_api_key",
-        "llm_thinking", "llm_include_images", "llm_temperature",
+        "llm_include_images", "llm_extra_body",
         "extract_round_limit", "extract_batch_limit",
         "extract_history_limit", "extract_prompt", "extract_profile"}
 

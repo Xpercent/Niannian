@@ -27,10 +27,12 @@ DEFAULTS: dict = {
     "llm_base_url": "https://api.siliconflow.cn/v1",
     "llm_model": "Qwen/Qwen3-8B",
     "llm_api_key": "",
-    "llm_thinking": False,         # 思考模式：服务商侧对 Qwen3 **默认是开的**，见 llm.py
     "llm_include_images": False,   # 图片喂不喂模型，默认关（用户 2026-10-16 定）
-    # 采样温度：**空 = 请求体里不发这个字段**（用户 2026-10-20 定），默认值交回服务商。
-    "llm_temperature": None,
+    # 请求体参数：一框**原样 JSON**（用户 2026-10-21 定，替掉 llm_thinking 与 llm_temperature
+    # 那两个键）。各家把同一件事挂在不同字段上——SiliconFlow 认 `enable_thinking`，Google 的
+    # 兼容层只认标准的 `reasoning_effort`，而它家有些模型连 `"none"` 都不吃（实测 400）。
+    # 我们不再替服务商猜形状：框里写什么就往请求体顶层发什么，空着就一个额外字段都不带。
+    "llm_extra_body": "",
     # 第一轮提炼的三个数与提示词：默认值**直接引 extract.py 那三个常量**，这一层不抄第二份。
     # 提示词留空的意思就是"用内置那段"（extract.DEFAULT_SYSTEM_PROMPT）。
     "extract_round_limit": DEFAULT_ROUND_LIMIT,
@@ -47,15 +49,14 @@ DEFAULTS: dict = {
 # 都留给你手工编辑 config.json。
 EDITABLE_KEYS = ("history_limit", "poll_seconds", "port",
                  "llm_base_url", "llm_model", "llm_api_key",
-                 "llm_thinking", "llm_include_images", "llm_temperature",
+                 "llm_include_images", "llm_extra_body",
                  "extract_round_limit", "extract_batch_limit",
                  "extract_history_limit", "extract_prompt", "extract_profile")
 # 这些键改了必须重启才生效，界面上要如实标出来，不能假装已应用。
 RESTART_KEYS = ("port",)
-BOOL_KEYS = ("llm_thinking", "llm_include_images")
-# 温度的边界取 OpenAI 兼容层的通行范围。下界是 0 而不是"必须给个值"：
-# 0（不随机）是合法要求，与"留空 = 不发"是两回事。
-TEMPERATURE_BOUNDS = (0.0, 2.0)
+BOOL_KEYS = ("llm_include_images",)
+# 请求体那一框的上界：它整块随每次请求走，写几千字通常意味着把文档粘进来了。
+EXTRA_BODY_LIMIT = 2000
 # 提炼那三个数的边界：上界是"这一轮还跑得完、一批还读得懂"的实用边界，不是数学边界。
 # 一轮 1000 条 ÷ 一批 20 条 = 50 次请求，最坏按开思考那档等，够人受的了。
 EXTRACT_BOUNDS = {"extract_round_limit": (1, 1000),
@@ -71,9 +72,8 @@ KEY_LABELS = {
     "llm_base_url": "服务商地址",
     "llm_model": "模型名",
     "llm_api_key": "API Key",
-    "llm_thinking": "思考模式",
     "llm_include_images": "图片喂给模型",
-    "llm_temperature": "温度",
+    "llm_extra_body": "请求体参数",
     "extract_round_limit": "一轮提炼条数",
     "extract_batch_limit": "一批请求条数",
     "extract_history_limit": "上文条数",
@@ -89,8 +89,8 @@ def to_bool(value, default: bool | None = None) -> bool:
     """把开关值认成布尔。
 
     ``default`` 给了就用它兜底（读文件时宽容），没给就抛 :class:`ValueError`
-    （写文件时严格）——认不出来的东西不能悄悄变成"关"，那样用户以为开了思考
-    而实际没开。
+    （写文件时严格）——认不出来的东西不能悄悄变成"关"，那样用户以为开了
+    图片喂模型而实际没开。
     """
     if isinstance(value, bool):
         return value
@@ -146,15 +146,40 @@ def clamp_extract(value, key: str) -> int:
     return max(low, min(number, high))
 
 
-def clamp_temperature(value):
-    """读文件时同样**宽容**：认不出来就当"没填"（不发这个字段），越界夹到边界。"""
-    if value is None or (isinstance(value, str) and not value.strip()):
-        return None
+# 那一框里不许出现的键：`model`/`messages` 是我们的契约（界面上另有两格，正文由
+# 提炼那层拼），`stream` 会让这一层只读到半截回复，其余几个是密钥外流的口子
+# （"API Key 不出网关"那条：写进请求体就等于写进 config.json 与诊断表）。
+FORBIDDEN_BODY_KEYS = ("model", "messages", "stream", "api_key", "apikey",
+                       "authorization", "x-api-key")
+
+
+def parse_body(value):
+    """把「请求体参数」那一框读成要发出去的顶层字段，读不懂就抛中文错。
+
+    保存时（:func:`validate`）与每次出网前（`llm.extra_body`）过的是**同一个**函数：
+    界面上写对的东西不该在发的时候又被判成另一份，反之手改的 config.json 也不能
+    绕过检查直接出网。空着的意思是一个额外字段都不带。
+    """
+    text = str(value or "").strip()
+    if not text:
+        return {}
+    if len(text) > EXTRA_BODY_LIMIT:
+        raise ValueError(f"{KEY_LABELS['llm_extra_body']}太长了"
+                         f"（{len(text)} 字，上限 {EXTRA_BODY_LIMIT} 字）")
     try:
-        number = float(value)
-    except (TypeError, ValueError):
-        return None
-    return max(TEMPERATURE_BOUNDS[0], min(number, TEMPERATURE_BOUNDS[1]))
+        parsed = json.loads(text)
+    except ValueError as exc:
+        raise ValueError(f"{KEY_LABELS['llm_extra_body']}读不懂 JSON：{exc}") from None
+    if not isinstance(parsed, dict):
+        raise ValueError(f'{KEY_LABELS["llm_extra_body"]}要写成 JSON 对象，'
+                         '例如 {"temperature": 0.2}')
+    blocked = sorted(str(key) for key in parsed
+                     if str(key).lower() in FORBIDDEN_BODY_KEYS)
+    if blocked:
+        raise ValueError("、".join(blocked) +
+                         " 不能写在请求体参数里：模型名在界面上那格填，"
+                         "正文由程序拼，密钥与流式不进请求体")
+    return parsed
 
 
 def validate(values: dict) -> dict:
@@ -215,19 +240,10 @@ def validate(values: dict) -> dict:
         except (KeyError, ValueError):
             raise ValueError(f"{KEY_LABELS[field]}只能是开或关") from None
 
-    # 温度：留空**不是**"我要 0 度"，而是"这个字段别发"，所以空与 0 是两种值。
-    raw = values.get("llm_temperature")
-    if raw is None or (isinstance(raw, str) and not raw.strip()):
-        out["llm_temperature"] = None
-    else:
-        try:
-            number = float(raw)
-        except (TypeError, ValueError):
-            raise ValueError(f"{KEY_LABELS['llm_temperature']}要填数字") from None
-        low, high = TEMPERATURE_BOUNDS
-        if not low <= number <= high:
-            raise ValueError(f"{KEY_LABELS['llm_temperature']}要在 {low:g} 到 {high:g} 之间")
-        out["llm_temperature"] = number
+    # 那一框存**原文**（用户排好的版式留着才改得动），但先过一次出网前那套规则：
+    # 坏 JSON 要在保存这一刻就说，而不是等点「测试连接」撞一句服务商 400。
+    parse_body(values.get("llm_extra_body"))
+    out["llm_extra_body"] = str(values.get("llm_extra_body") or "").strip()
 
     # 提炼那三个数：界面上留空就是"用默认"，填了才校验（一轮 1000 条 ÷ 一批 20 条
     # 已经够一轮跑十几分钟，再大只会让"这轮到底跑完没跑完"变得没法说）。
@@ -297,14 +313,16 @@ def load_config(root: Path) -> dict:
         settings["poll_seconds"] = max(1.0, float(settings.get("poll_seconds", 3.0)))
     except (TypeError, ValueError):
         settings["poll_seconds"] = DEFAULTS["poll_seconds"]
-    for field in ("llm_base_url", "llm_model", "llm_api_key", "extract_profile"):
+    # 那一框在读取这头**只当字符串**：写坏了不该让服务起不来，出网前由 parse_body
+    # 说清是哪一项写错（与"读宽容、写严格"那条分工一致）。
+    for field in ("llm_base_url", "llm_model", "llm_api_key", "llm_extra_body",
+                  "extract_profile"):
         if not isinstance(settings.get(field), str):
             settings[field] = DEFAULTS[field]
     for field in BOOL_KEYS:
         settings[field] = to_bool(settings.get(field), default=DEFAULTS[field])
     for field in EXTRACT_BOUNDS:
         settings[field] = clamp_extract(settings.get(field), field)
-    settings["llm_temperature"] = clamp_temperature(settings.get("llm_temperature"))
     if not isinstance(settings.get("extract_prompt"), str):
         settings["extract_prompt"] = ""
     return settings

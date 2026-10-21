@@ -745,7 +745,12 @@ class Database:
         return {"run": dict(run), "calls": [dict(row) for row in rows]}
 
     def model_call(self, call_id: int) -> dict | None:
-        """一次调用的完整正文：``request`` 交回发出去的那几条 message。"""
+        """一次调用的完整正文：``request`` 是发出去的那几条 message，``body`` 是
+        请求体里**除 messages 之外**的那些字段（模型名与「请求体参数」那一框）。
+
+        旧行存的是裸 messages 数组（那一框还没上的时候），那样 ``body`` 给空对象——
+        读历史轮次不该因为形状换过一次就报错，也不该为此清库。
+        """
         with self.connect() as conn:
             row = conn.execute("SELECT * FROM model_calls WHERE id=?",
                                (int(call_id),)).fetchone()
@@ -756,5 +761,11 @@ class Database:
             parsed = json.loads(call["request"] or "[]")
         except json.JSONDecodeError:
             parsed = []
-        call["request"] = parsed if isinstance(parsed, list) else []
+        if isinstance(parsed, dict):
+            call["request"] = parsed.get("messages") or []
+            call["body"] = {key: value for key, value in parsed.items()
+                            if key != "messages"}
+        else:
+            call["request"] = parsed if isinstance(parsed, list) else []
+            call["body"] = {}
         return call

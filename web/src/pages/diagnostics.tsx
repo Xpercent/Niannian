@@ -398,6 +398,10 @@ function CallInspector({
   const failed = call.status === "error";
   const system = call.request.find((item) => item.role === "system")?.content ?? "";
   const user = call.request.find((item) => item.role === "user")?.content ?? "";
+  // 请求体里除 messages 之外的那些字段：模型名 + 设置页「请求体参数」那一框。
+  // 旧轮次没有这一份（那时只存 messages），后端回空对象，这里就照实说"没带"。
+  const extras = Object.keys(call.body ?? {}).filter((key) => key !== "model");
+  const fullRequest = { ...call.body, messages: call.request };
   const pretty = prettyJson(call.response);
 
   return (
@@ -448,7 +452,7 @@ function CallInspector({
           }
           hint={`system ${system.length.toLocaleString()} + user ${user.length.toLocaleString()} 字符`}
           action={
-            <Button variant="ghost" size="sm" onClick={() => onCopy(JSON.stringify(call.request, null, 2))}>
+            <Button variant="ghost" size="sm" onClick={() => onCopy(JSON.stringify(fullRequest, null, 2))}>
               <Copy className="size-3.5" />
               复制完整请求
             </Button>
@@ -460,8 +464,11 @@ function CallInspector({
           <Fold label="系统提示词" hint="这一轮所有批共用那一份">
             <Code text={system} />
           </Fold>
-          <Fold label="原始请求体（JSON）" hint="逐字">
-            <Code text={JSON.stringify(call.request, null, 2)} />
+          <Fold label="请求体里除正文之外的字段" hint={extras.length ? `${extras.length} 项` : "那一批没带额外字段"}>
+            <Code text={JSON.stringify(call.body ?? {}, null, 2)} />
+          </Fold>
+          <Fold label="完整请求体（JSON）" hint="model + messages + 上面那些字段">
+            <Code text={JSON.stringify(fullRequest, null, 2)} />
           </Fold>
         </Panel>
 

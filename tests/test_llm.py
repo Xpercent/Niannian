@@ -16,8 +16,8 @@ from niannian import llm
 CFG = {"llm_base_url": "https://api.siliconflow.cn/v1",
        "llm_model": "Qwen/Qwen3-8B",
        "llm_api_key": "sk-secret-value",
-       "llm_thinking": False,
-       "llm_include_images": False}
+       "llm_include_images": False,
+       "llm_extra_body": ""}
 
 
 def completion(text="好的", model="Qwen/Qwen3-8B", reasoning=None):
@@ -62,86 +62,84 @@ def install(monkeypatch, **kwargs) -> FakeProvider:
     return fake
 
 
-def test_thinking_off_is_sent_explicitly(provider):
-    """Qwen3 在服务商那边**默认就是开的**：省略参数等于替用户开着。
+def test_an_empty_box_sends_nothing_but_the_model_and_the_text(provider):
+    """那一框空着 = **一个额外字段都不带**：默认值全交回服务商。
 
-    实测（2026-10-17）不带参数回了 reasoning_content 并花 334 token，显式
-    ``enable_thinking=false`` 才降到 19 token，所以"关"必须出现在请求体里。
+    这一条同时钉住两件旧事：我们不再自己发 `enable_thinking`/`reasoning_effort`
+    （2026-10-21 起形状由用户写），也从来不发 `max_tokens`（2026-10-20 定）。
     """
     llm.test_connection(CFG)
-    assert provider.calls[0]["extra_body"] == {"enable_thinking": False}
+    assert provider.calls[0] == {
+        "model": "Qwen/Qwen3-8B",
+        "messages": [{"role": "user", "content": llm.TEST_PROMPT}],
+        "extra_body": {}}
 
 
-def test_thinking_on_reaches_the_request_body(provider):
-    llm.test_connection({**CFG, "llm_thinking": True})
-    assert provider.calls[0]["extra_body"] == {"enable_thinking": True}
+def test_whatever_the_box_says_reaches_the_top_level_of_the_body(provider):
+    """框里写什么就发什么：键并进请求体顶层，我们不看它像哪一家的字段。
+
+    这正是这一版换掉 `thinking_body()` 的理由——各家把同一件事挂在不同名字上，
+    而猜形状的代码每猜一次就多一个盲区（实测 Google 有些模型连
+    ``reasoning_effort: "none"`` 都不吃，整条 400）。
+    """
+    box = '{"temperature": 0, "reasoning_effort": "minimal", "max_tokens": 512}'
+    llm.test_connection({**CFG, "llm_extra_body": box})
+    assert provider.calls[0]["extra_body"] == {"temperature": 0,
+                                               "reasoning_effort": "minimal",
+                                               "max_tokens": 512}
 
 
-GOOGLE_BASE = "https://generativelanguage.googleapis.com/v1beta"
+def test_the_body_the_page_shows_is_the_body_that_goes_out(provider):
+    """`request_body()` 与 `chat()` 组的是同一份：回显不是按别的方式重画的对照表。"""
+    box = '{"response_format": {"type": "json_object"}}'
+    settings = {**CFG, "llm_extra_body": box}
+    built = llm.request_body(settings, [{"role": "user", "content": "hi"}])
+    llm.chat(settings, [{"role": "user", "content": "hi"}])
+    sent = provider.calls[0]
+    assert built["model"] == sent["model"]
+    assert built["messages"] == sent["messages"]
+    assert {key: value for key, value in built.items()
+            if key not in ("model", "messages")} == sent["extra_body"]
 
 
-@pytest.mark.parametrize("thinking,shape", [
-    (False, {"reasoning_effort": "none"}),
-    (True, {"reasoning_effort": "high"}),
+@pytest.mark.parametrize("box,phrase", [
+    ("{not json}", "读不懂 JSON"),
+    ('"temperature": 0.2', "读不懂 JSON"),
+    ("[1, 2]", "要写成 JSON 对象"),
+    ('{"model": "other"}', "model 不能写在请求体参数里"),
+    ('{"messages": []}', "messages 不能写在请求体参数里"),
+    ('{"stream": true}', "stream 不能写在请求体参数里"),
+    ('{"api_key": "sk-x"}', "api_key 不能写在请求体参数里"),
 ])
-def test_google_gets_the_openai_standard_field(provider, thinking, shape):
-    """Google 的兼容层严格解析请求体：``enable_thinking`` 会让**整条**请求 400（实测）。
-
-    它只认 OpenAI 规范里的字段，思考这一档只能用 ``reasoning_effort`` 表达。
-    """
-    llm.test_connection({**CFG, "llm_base_url": GOOGLE_BASE, "llm_thinking": thinking})
-    assert provider.calls[0]["extra_body"] == shape
-
-
-def test_host_recognition_tolerates_a_missing_scheme(provider):
-    """地址可以不带协议头（配置就是这么读进来的），认服务商不能因此认错形状。"""
-    llm.test_connection({**CFG, "llm_base_url": "generativelanguage.googleapis.com/v1beta"})
-    assert provider.calls[0]["extra_body"] == {"reasoning_effort": "none"}
+def test_a_broken_box_is_called_out_before_the_network(monkeypatch, box, phrase):
+    """坏 JSON 与越界字段在**出网之前**就说，不拿去撞服务商那句读不懂的 400。"""
+    fake = install(monkeypatch)
+    got = llm.test_connection({**CFG, "llm_extra_body": box})
+    assert got["ok"] is False and phrase in got["error"]
+    assert fake.constructed == []           # 一次都没出网
+    assert "request" not in got             # 还没组出请求体，没有"发出去的那一份"可看
 
 
-def test_a_googleapis_lookalike_host_is_not_treated_as_google(provider):
-    llm.test_connection({**CFG, "llm_base_url": "https://notgoogleapis.com/v1"})
-    assert provider.calls[0]["extra_body"] == {"enable_thinking": False}
+def test_the_reply_still_decodes_when_the_box_is_right(provider):
+    """服务商回了正文就照收：那一框里的字段我们不解释、也不检查回包形状。"""
+    provider.response = completion(text="收到")
+    got = llm.test_connection({**CFG, "llm_extra_body": '{"temperature": 0.2}'})
+    assert got["ok"] is True and got["reply"] == "收到"
 
 
-def test_temperature_stays_out_of_the_request_body_when_not_filled(provider):
-    """没填温度 = **不发这个字段**：各家默认值不一样，我们不替服务商决定。
+def test_a_thinking_provider_says_so_instead_of_us_guessing(provider):
+    """这一层不再判断"开关与服务商表现不一致"（开关没了），只报看到的：回了思考内容就说。"""
+    provider.response = completion(reasoning="先想想用户要什么")
+    assert "回了思考内容" in llm.test_connection(CFG)["note"]
 
-    与 ``max_tokens`` 那一条同一个道理，而且少数推理模型压根不接受 temperature，
-    替用户塞一个默认值就是给它们一条 400。
-    """
-    llm.test_connection(CFG)
-    assert "temperature" not in provider.calls[0]
-    llm.test_connection({**CFG, "llm_temperature": None})
-    assert "temperature" not in provider.calls[1]
-
-
-def test_a_filled_temperature_reaches_the_request_body(provider):
-    llm.test_connection({**CFG, "llm_temperature": 0.2})
-    assert provider.calls[0]["temperature"] == 0.2
-    # 0 度是合法要求（只想照字面办），不能和"没填"混成一回事
-    llm.test_connection({**CFG, "llm_temperature": 0})
-    assert provider.calls[1]["temperature"] == 0
-
-
-def test_thinking_on_widens_the_wait_and_never_sends_a_ceiling(provider):
-    """开思考的单次能跑到 20 秒以上（真机踩过），所以只放宽等待。
-
-    回复长度不设上限（用户 2026-10-20 定）：请求体里出现 ``max_tokens`` 就是回归。
-    """
-    llm.test_connection({**CFG, "llm_thinking": True})
-    assert "max_tokens" not in provider.calls[0]
-    assert provider.constructed[0]["timeout"] == llm.TEST_TIMEOUT_THINKING_SECONDS
-
-    llm.test_connection(CFG)
-    assert "max_tokens" not in provider.calls[1]
-    assert provider.constructed[1]["timeout"] == llm.TEST_TIMEOUT_SECONDS
+    provider.response = completion(reasoning=None)
+    assert llm.test_connection(CFG)["note"] == ""
 
 
 def test_empty_reply_is_explained_instead_of_looking_broken(monkeypatch):
     """通了却没回话要在 note 里说清楚，不能让用户以为连接坏了。"""
-    install(monkeypatch, response=completion(text="", reasoning="用户在要我回两个字"))
-    got = llm.test_connection({**CFG, "llm_thinking": True})
+    install(monkeypatch, response=completion(text="", reasoning=""))
+    got = llm.test_connection(CFG)
     assert got["ok"] is True
     assert got["reply"] == ""
     assert "链路本身是通的" in got["note"]
@@ -157,27 +155,44 @@ def test_client_is_built_from_config_with_a_bounded_timeout(provider):
     assert built["max_retries"] == 0
 
 
-def test_test_connection_reports_reply_and_latency(provider):
-    got = llm.test_connection(CFG)
+def test_the_wait_is_one_wide_band_because_we_cannot_tell(provider):
+    """思考开关没了，这一层读不出这一条会不会想 → 只有一档，按实测最慢的那档等。
+
+    2026-10-21 起请求体形状归用户，`llm_thinking` 那两档（20/45 秒）没有依据了；
+    留一档就得留**宽**的那一档：开思考的单次实测跑到过 29.9 秒。
+    """
+    assert llm.TEST_TIMEOUT_SECONDS >= 30.0
+    llm.test_connection({**CFG, "llm_extra_body": '{"reasoning_effort": "high"}'})
+    assert provider.constructed[0]["timeout"] == llm.TEST_TIMEOUT_SECONDS
+
+
+def test_test_connection_reports_reply_and_the_body_it_sent(provider):
+    got = llm.test_connection({**CFG, "llm_extra_body": '{"temperature": 0}'})
     assert got["ok"] is True
     assert got["reply"] == "好的"
     assert got["model"] == "Qwen/Qwen3-8B"
-    assert got["thinking"] is False
     assert got["note"] == ""
     assert isinstance(got["elapsed_ms"], int) and got["elapsed_ms"] >= 0
-    # 一条最短请求而已：不带 max_tokens，也不该带别的服务商字段
-    assert "max_tokens" not in provider.calls[0]
-    assert provider.calls[0]["messages"] == [
-        {"role": "user", "content": llm.TEST_PROMPT}]
+    # 看得见发出去的是什么，才算得清 400 是谁写坏的
+    assert '"temperature": 0' in got["request"]
+    assert llm.TEST_PROMPT in got["request"]
 
 
-def test_thinking_switch_and_provider_disagreement_is_said_out_loud(provider):
-    """开了开关但服务商没回思考内容 → 要在结果里说出来，别让用户以为生效了。"""
-    provider.response = completion(reasoning=None)
-    assert "没回思考内容" in llm.test_connection({**CFG, "llm_thinking": True})["note"]
+def test_a_failed_test_also_shows_what_we_sent(monkeypatch):
+    """撞 400 那一次最需要看的正是"你发了什么"——失败路径也要带 request。"""
+    install(monkeypatch, error=status(BadRequestError, 400, "invalid argument"))
+    got = llm.test_connection({**CFG, "llm_extra_body": '{"reasoning_effort": "none"}'})
+    assert got["ok"] is False
+    assert "invalid argument" in got["error"]
+    assert '"reasoning_effort": "none"' in got["request"]
 
-    provider.response = completion(reasoning="先想想用户要什么")
-    assert "可能忽略了这个参数" in llm.test_connection(CFG)["note"]
+
+def test_the_body_we_show_never_carries_the_key(provider):
+    """密钥不出网关：用户把密钥写进了那一框，回显里也得抹掉。"""
+    got = llm.test_connection({**CFG, "llm_extra_body": '{"note": "sk-secret-value"}'})
+    assert got["ok"] is True
+    assert "sk-secret-value" not in got["request"]
+    assert "（密钥）" in got["request"]
 
 
 @pytest.mark.parametrize("missing,phrase", [

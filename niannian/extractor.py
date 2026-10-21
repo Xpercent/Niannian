@@ -13,20 +13,14 @@ import threading
 import time
 
 from . import extract
-from .llm import chat, error_text, raw_reply, split_config
+from .llm import chat, error_text, raw_reply, request_body, split_config
 from .storage import now_utc
 
-# 一批最多 20 条消息要判，等待比"测试连接"长得多；开思考放宽到 180 秒
-# （真机实测：单次要跑到 30 秒）。回复长度不设上限（用户 2026-10-20 定：一个
-# ``max_tokens`` 都不发），所以超时是这一层唯一的护栏。
-TIMEOUT_SECONDS = 60.0
-TIMEOUT_THINKING_SECONDS = 180.0
-
-
-def request_timeout(settings: dict) -> float:
-    """这一批最多等多久（与 :func:`llm.test_timeout` 同一个道理）。"""
-    return TIMEOUT_THINKING_SECONDS if bool(settings.get("llm_thinking")) \
-        else TIMEOUT_SECONDS
+# 一批消息要判一整屏，等待比"测试连接"长得多；只有一档 180 秒（真机实测单批开思考
+# 能跑到 30 秒以上，而 2026-10-21 起请求会不会思考由用户那一框决定，这一层读不出来）。
+# 于是一轮的最坏耗时就是「批数 × 180 秒」——回复长度不设上限（用户 2026-10-20 定：
+# ``max_tokens`` 一个都不发），超时是仅剩的护栏。
+TIMEOUT_SECONDS = 180.0
 
 
 def batches(rows: list[dict], size: int) -> list[list[dict]]:
@@ -152,7 +146,6 @@ class Extractor:
         messages = [{"role": "system", "content": plan.prompt},
                     {"role": "user",
                      "content": extract.render(session_name, history, chunk, plan.profile)}]
-        timeout = request_timeout(self.settings)
         with self._lock:
             self.state["session"] = session_name or session_id
         started_at = now_utc()          # 记的是**发出去那一刻**，不是这一行写库那一刻
@@ -160,13 +153,17 @@ class Extractor:
         reply = {"text": "", "reasoning": "", "model": ""}
         error = ""
         secret = str(self.settings.get("llm_api_key") or "")
+        # 留档留的是**整份请求体**（模型名 + 正文 + 那一框里的字段），不是只有 messages：
+        # 参数形状现在由用户自己写，"这批为什么 400"要看得见他发出去的那几项。
+        body: dict = {"messages": messages}     # 连请求体都没组出来时的兜底：正文照样留档
         try:
-            reply = chat(self.settings, messages, timeout=timeout)
+            body = request_body(self.settings, messages)
+            reply = chat(self.settings, messages, timeout=TIMEOUT_SECONDS)
             tasks = extract.parse_tasks(reply["text"], len(chunk))
         except Exception as exc:
             # 契约层的问题（JSON 读不懂那类）直接说人话，服务商的错才翻成中文。
             error = (str(exc) if isinstance(exc, ValueError)
-                     else error_text(exc, secret, timeout))
+                     else error_text(exc, secret, TIMEOUT_SECONDS))
             # 失败那批也要把**服务商原样回的那一份**留在回复列里（界面要看的就是这个）；
             # 已经拿到正文的不动它——半截 JSON 正是这一页最该照原样看的东西。
             reply = {**reply, "text": reply["text"] or raw_reply(exc, secret)}
@@ -175,7 +172,7 @@ class Extractor:
             "started_at": started_at,
             "duration_ms": int((time.perf_counter() - started) * 1000),
             "status": "error" if error else "ok", "model": reply["model"],
-            "messages": len(chunk), "request": json.dumps(messages, ensure_ascii=False),
+            "messages": len(chunk), "request": json.dumps(body, ensure_ascii=False),
             "response": reply["text"], "reasoning": reply["reasoning"], "error": error})
         if error:
             self._fail(error)

@@ -228,9 +228,10 @@ cd web && npm run dev                   # 前端热更新，/api 代理到 8765
   必须清库重采才对存量生效。
 
 ## 设置页与配置（`config.py` / `api.py`）
-- 设置页开放**十四项**：采集侧 `history_limit`、`poll_seconds`、`port`，模型侧
-  `llm_base_url`、`llm_model`、`llm_api_key`、`llm_thinking`、`llm_include_images`、
-  `llm_temperature`，提炼侧 `extract_round_limit`、`extract_batch_limit`、
+- 设置页开放**十三项**：采集侧 `history_limit`、`poll_seconds`、`port`，模型侧
+  `llm_base_url`、`llm_model`、`llm_api_key`、`llm_include_images`、`llm_extra_body`
+  （2026-10-21：`llm_thinking` 与 `llm_temperature` 两个键**删了**，参数形状归那一框 JSON），
+  提炼侧 `extract_round_limit`、`extract_batch_limit`、
   `extract_history_limit`、`extract_prompt`、`extract_profile`（2026-10-20 上）。
   提炼那三个数**写在这四个键里而不是写回 `extract.py`**：`extract.DEFAULT_*` 仍是
   唯一的默认值来源，`config.DEFAULTS` 直接引它，两处不各存一份。
@@ -277,33 +278,38 @@ cd web && npm run dev                   # 前端热更新，/api 代理到 8765
 - 这一层**只管"怎么跟服务商说话"**：`chat(settings, messages)` 发一次 OpenAI 兼容
   请求，`test_connection(settings)` 是设置页那颗按钮的后端。提炼的提示词、批次、
   结果落库都不在这层——下一轮直接复用 `chat`，不需要起服务也不需要再包一层。
-- **思考模式的参数形状按服务商给**（`llm.py:thinking_body`，2026-10-20 定的）：
-  SiliconFlow 对 `extra_body={"enable_thinking": bool}` 与 `thinking={"type": …}`
-  **两种形状都吃**，我们按官方 API 参考里那个 `enable_thinking` 走。关键是
-  **Qwen3 在服务商侧默认就是开的**（不带任何参数时回了 `reasoning_content`、
-  334 token；显式关掉 19 token），所以"关"必须**显式发过去**，省略参数等于替用户开着。
-- **`enable_thinking` 不是通用字段，别把它发给所有服务商**：Google 的 OpenAI 兼容层
-  用严格的 proto-JSON 解析，规范外的顶层字段一律 400 而且**发生在鉴权之前**
-  （实测 `Unknown name "enable_thinking": Cannot find field`，`google.thinking_config`
-  与 `thinking_level` 同样被拒）——症状是"地址看着对、key 也没错，就是 400"。
-  那一家的域名（`*.googleapis.com`）走 OpenAI 标准的 `reasoning_effort`
-  （`high`/`none`/`minimal` 三档都收），**但看不出它有没有真的改变思考行为**
-  （`reasoning_content` 一直是空），所以思考开关在这家只是把意图表达出去、不能当已生效。
-  新服务商撞同样的 400 时先分清是"这家不吃这个字段"还是"参数真的写错了"。
-- **测试连接按思考开关分两档等待，别合成一档**（真机踩过）：关思考 20 秒、开思考 45 秒——
-  单次耗时实测在 **0.9 秒～29.9 秒**之间晃过 20 秒那道线。**请求体里不发 `max_tokens`**
-  （用户 2026-10-20 定，提炼同一不发）：长度上限交回服务商，**超时是唯一的护栏**。当年
-  "64 token 被思考内容吃光、正文一个字都不剩"那个坑随之消失，空正文现在只由
-  `test_connection` 那句"链路本身是通的"说明。
-  前端 `LLM_TEST_REQUEST_MS`（60 秒）必须比后端最长等待更久，否则用户看到的是"请求超时"
-  而不是服务商的答复。
-- **`llm_temperature` 填了才发**（用户 2026-10-20 定，与上一条"不发 `max_tokens`"同一个思路）：
-  界面上那格**留空 = 请求体里不带 `temperature`**，默认值交回服务商（各家不一样，而少数
-  推理模型根本不接受这个字段，替用户塞一个默认值就是整条 400）。要 0 度必须**真填 0**——
-  `0` 与"没填"是两种值，所以 `llm.py:chat()` 判的是 `is not None` 而不是真假。
-  边界只有 `config.TEMPERATURE_BOUNDS`（0~2）一份：`validate()` 严格（越界与"热"这种
-  都抛中文错），`load_config()` 宽容（读不出来当没填、越界夹边界）。
-  Google 那家**实测吃这个字段**（草稿带 0.5 测连，2.6 秒回了「好的」）。
+- **请求体参数就是一框原样 JSON**（`llm_extra_body`，用户 2026-10-21 定，同时删掉
+  `llm_thinking` 与 `llm_temperature` 两个键）：里面的键经 SDK 的 `extra_body` 并进请求体
+  顶层，**空着就只发 `model` 与 `messages`**。**不要回到"按域名猜服务商再决定字段形状"那套**
+  （原 `thinking_body()` / `_is_google()` 已删，别再按 `*.googleapis.com` 加分支）：各家把
+  同一件事挂在不同名字上，猜一次就多一个盲区。压垮旧方案的是这条实测——同一个地址、
+  同一把 key 下 `gemini-3.1-flash-lite` 三档 `reasoning_effort` 都收，而
+  **`gemini-3.5-flash-lite` 连 `"none"` 都不吃**，整条 400 只回一句
+  `Request contains an invalid argument.`（**不点名字段**）；`minimal`/`high` 与
+  `temperature` 它照收，也就是"这个模型不能关思考"我们替用户表达了一次意图、就把
+  测试连接打死了。旧结论仍然当真：SiliconFlow 对 Qwen3 **默认开着思考**（不带参数回了
+  `reasoning_content` 花 334 token，显式关 19 token），Google 的兼容层对规范外的顶层字段
+  一律 400 且**发生在鉴权之前**（`Unknown name "enable_thinking": Cannot find field`）。
+  现在这些都要用户自己按那家的文档写。
+- **规范外的字段必须走 `extra_body`，不能当关键字传**：`create()` 只认签名里那些参数，
+  规范外的关键字参数会被**静默丢掉**（等于没发，用户只会看见一句读不懂的 400）。
+  "我们不发 `max_tokens`"（用户 2026-10-20 定）仍然成立，只是发不发的主语从我们变成了用户。
+- **那一框的规则只有一处实现：`config.parse_body()`**——`validate()`（写严格，保存时就拦）
+  与 `llm.extra_body()`（每次出网前）调的是同一个函数，界面上写对的东西不该在发的时候
+  又被判成另一份。空串 = `{}`；读不懂 JSON、不是对象、撞禁传键、超 `EXTRA_BODY_LIMIT`
+  都抛中文错。**禁传 `model`/`messages`/`stream` 与任何密钥字段**（`api_key`、
+  `authorization` 那类）：写进那一框就等于写进 `config.json` 与 `model_calls`，
+  违反"密钥不出网关"；`stream` 会让这一层只读到半截回复。`load_config()` 那侧**只当字符串、
+  不解析**：手改坏了也要让服务起得来，错到出网前才说（与"读宽容、写严格"那条一致）。
+- **测试连接要回显"这一次实际发出去的请求体"**（`test_connection` 的 `request` 字段）：
+  通了和 400 都给，格式化好、出网前抹密钥；只有出网前的校验错给不出，那时还没组出请求体。
+  参数形状归用户写之后，这是唯一能算清"是谁写坏的"的东西——**不要**为了省事只回一句
+  我们翻译的中文，服务商那句常常不点名字段。
+- **等待只有一档**（`llm.TEST_TIMEOUT_SECONDS` = 45 秒、`extractor.TIMEOUT_SECONDS` = 180 秒）：
+  旧的 20/45 与 60/180 两档靠 `llm_thinking` 分，开关没了就**读不出这一条会不会思考**，
+  只能留宽的那一档——单次实测到过 29.9 秒、单批实测 30 秒以上，留窄档等于把正常请求
+  判成失败。前端 `LLM_TEST_REQUEST_MS`（60 秒）仍必须大于后端那一档，否则用户看到的是
+  "请求超时"而不是服务商的答复。一轮的最坏耗时就是「批数 × 180 秒」，没有额度那道闸帮着截。
 - **服务商的错误一律翻成中文再出接口**（`error_text`），并且**回显前先抹掉密钥**；
   判断顺序必须先具体后笼统（`AuthenticationError`/`BadRequestError` 都是
   `APIStatusError` 子类，`APITimeoutError` 是 `APIConnectionError` 子类，反了就把 401
@@ -384,9 +390,10 @@ cd web && npm run dev                   # 前端热更新，/api 代理到 8765
   周四课间、领团员档案、综测证明核对 22 日截止、信创课与心理课分组 PPT、版权大赛补材料、
   ENTAI 简历）是可能跟本人有关的。**代价是有意的**：重复与误报会变多（跨批合并归第二轮）。
   这一条只推翻"归属判不出就不建"，**不推翻**期限/优先级/依据那三处的"认不出就不猜"。
-- 等待**分两档**（关 60s、开 180s），理由跟"测试连接"那条实测一样；**不发 `max_tokens`**
-  （2026-10-20 起四道全去掉，长度上限交回服务商），所以一轮的最坏耗时就是
-  「批数 × 这一档」，没有额度那道闸帮着截。
+- 等待**只有一档** `extractor.TIMEOUT_SECONDS`（180 秒，理由见「模型接入」那条：
+  2026-10-21 起请求会不会思考读不出来了，只能留宽档）；**我们自己不发 `max_tokens`**
+  （2026-10-20 定，长度上限交回服务商；用户要限就在「请求体参数」那一框里自己写），
+  所以一轮的最坏耗时就是「批数 × 180 秒」，没有额度那道闸帮着截。
 - **429 不做退避重试**：连续 13 批之后智谱会限流（实测），那批不标记、等人再点。
 - 图片这一轮**只喂 `[图片]` 那几个字**（`llm_include_images` 那个开关的事见「模型接入」）。
 
@@ -419,8 +426,12 @@ cd web && npm run dev                   # 前端热更新，/api 代理到 8765
   回复**。原项目那页还有额度统计、校验对照、滞留队列、调用检索四个视图，**都不要搬**——
   我们没有那些东西，别为界面补一张空表或造一个没人读的字段。
 - 数据来自 `extract_runs` / `model_calls` 两张表：`Extractor._one_batch` 每批**逐字**写一行
-  （`request` 就是发出去的那两条 message 的 JSON，另存回复、思考内容与失败原因），
-  进度每批同步一次（`_sync_run`），所以一轮跑到一半诊断页就能看到已经发出的那几批。
+  （`request` 存的是**整份请求体**——`model` + 那两条 message + 「请求体参数」那一框并进
+  顶层的那些字段，2026-10-21 起参数形状归用户写，只看正文就查不出是谁写坏哪一项；
+  另存回复、思考内容与失败原因），`storage.model_call()` 把它拆成 `request`（messages 数组）
+  与 `body`（除 messages 之外的那些字段）两半给界面。**旧行存的是裸 messages 数组**，
+  读回来 `body` 是空对象 `{}`，这条兼容要留着——那一框还没上的轮次也得打得开，
+  **不为此清库**。进度每批同步一次（`_sync_run`），所以一轮跑到一半诊断页就能看到已经发出的那几批。
   **失败那批也要有行**：诊断要看的就是"那次到底发了什么、对方说了什么"。
   **失败那批的 `response` 列存服务商原样回的那一份**（`llm.raw_reply`，2026-10-21 用户定：
   我不要你翻译的原因，我要看对方说了什么）——状态错的响应体（429 的 quota 细节就在里面）

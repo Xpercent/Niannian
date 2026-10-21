@@ -238,7 +238,8 @@ def create_app(root: Path | None = None) -> FastAPI:
 
     @app.get("/api/diagnostics/calls/{call_id}")
     def api_diagnostics_call(call_id: int):
-        """一次请求的原始内容：发出去的 system/user 正文，与模型**逐字**回复。"""
+        """一次请求的原始内容：发出去的 system/user 正文、请求体里那些字段，
+        与模型**逐字**回复。"""
         call = store.model_call(call_id)
         if not call:
             raise HTTPException(404, "调用记录不存在")

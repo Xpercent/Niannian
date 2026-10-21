@@ -52,10 +52,9 @@ type Form = {
   llm_base_url: string;
   llm_model: string;
   llm_api_key: string;
-  llm_thinking: boolean;
   llm_include_images: boolean;
-  /** 文本框里原样存着用户正在敲的东西：空串 = 不发 temperature，"0" 才是要 0 度。 */
-  llm_temperature: string;
+  /** 「请求体参数」那一框：文本框里存**原文**，空串 = 请求体里只带模型名与正文。 */
+  llm_extra_body: string;
   extract_round_limit: string;
   extract_batch_limit: string;
   extract_history_limit: string;
@@ -70,9 +69,8 @@ const EMPTY: Form = {
   llm_base_url: "",
   llm_model: "",
   llm_api_key: "",
-  llm_thinking: false,
   llm_include_images: false,
-  llm_temperature: "",
+  llm_extra_body: "",
   extract_round_limit: "200",
   extract_batch_limit: "20",
   extract_history_limit: "15",
@@ -244,9 +242,8 @@ export function SettingsPage({ notify }: Props) {
           llm_model: data.values.llm_model,
           // 后端回的是空串（密钥不出网关），这里保持空 = 不改
           llm_api_key: "",
-          llm_thinking: data.values.llm_thinking,
           llm_include_images: data.values.llm_include_images,
-          llm_temperature: String(data.values.llm_temperature ?? ""),
+          llm_extra_body: data.values.llm_extra_body,
           extract_round_limit: String(data.values.extract_round_limit),
           extract_batch_limit: String(data.values.extract_batch_limit),
           extract_history_limit: String(data.values.extract_history_limit),
@@ -272,10 +269,9 @@ export function SettingsPage({ notify }: Props) {
       llm_model: form.llm_model.trim(),
       llm_api_key: clearKey ? "" : form.llm_api_key.trim(),
       clear_llm_api_key: clearKey,
-      llm_thinking: form.llm_thinking,
       llm_include_images: form.llm_include_images,
-      // 空 → null → 后端那一份的意思是"请求里不发 temperature"
-      llm_temperature: numberOrNull(form.llm_temperature),
+      // 那一框交**原文**：后端解析过一遍才落盘，写坏了会在保存这一下就说出是哪一项
+      llm_extra_body: form.llm_extra_body.trim(),
       extract_round_limit: numberOrNull(form.extract_round_limit),
       extract_batch_limit: numberOrNull(form.extract_batch_limit),
       extract_history_limit: numberOrNull(form.extract_history_limit),
@@ -329,9 +325,9 @@ export function SettingsPage({ notify }: Props) {
       llm_model: form.llm_model.trim(),
       // 框里没重填就沿用库里那把；"清除"只影响保存，不影响这一次试
       llm_api_key: form.llm_api_key.trim(),
-      llm_thinking: form.llm_thinking,
-      // 温度这格空着就是"这一试也不发"，与保存后的语义保持一致
-      llm_temperature: numberOrNull(form.llm_temperature),
+      llm_include_images: form.llm_include_images,
+      // 那一框也照界面上这份交：改了一半没保存，测的仍然是界面上看到的参数
+      llm_extra_body: form.llm_extra_body.trim(),
     };
     try {
       setTest(await api<LlmTestResult>("/api/settings/test-connection", postJson(body),
@@ -445,29 +441,6 @@ export function SettingsPage({ notify }: Props) {
                 写服务商那边的完整模型 ID，带组织前缀的那种。
               </span>
             </label>
-            <label className="block">
-              <span className="flex flex-wrap items-center gap-2 text-sm font-medium text-stone-700">
-                温度
-                <Badge>即时生效</Badge>
-              </span>
-              <Input
-                type="number"
-                min={0}
-                max={2}
-                step={0.1}
-                className="mt-2"
-                placeholder="留空：交回服务商"
-                value={form.llm_temperature}
-                onChange={(event) =>
-                  setForm((old) => ({ ...old, llm_temperature: event.target.value }))
-                }
-              />
-              <span className="mt-1 block text-xs leading-5 text-stone-500">
-                越小越照字面办、越大越发散。
-                <strong className="font-medium">留空就是请求里不带 temperature</strong>
-                ，各家默认值不一样；要 0 度得真的填一个 0，空着不等于 0。
-              </span>
-            </label>
           </div>
 
           <div>
@@ -516,26 +489,42 @@ export function SettingsPage({ notify }: Props) {
             </span>
           </div>
 
-          <div className="grid gap-4 sm:grid-cols-2">
-            <SwitchRow
-              title="思考模式"
-              checked={form.llm_thinking}
-              onChange={(next) => setForm((old) => ({ ...old, llm_thinking: next }))}
-              hint={
-                <>
-                  打开后模型先想再答，回复慢好几秒也更费额度。
-                  <strong className="font-medium">Qwen3 这类模型在服务商那边默认就是开的</strong>
-                  （实测），要快与省就得把它关掉。
-                </>
+          <label className="block">
+            <span className="flex flex-wrap items-center gap-2 text-sm font-medium text-stone-700">
+              请求体参数
+              <Badge>即时生效</Badge>
+            </span>
+            <Textarea
+              className="mt-2 font-mono text-xs leading-5"
+              rows={4}
+              aria-label="请求体参数"
+              placeholder={'例如：{"temperature": 0.2, "reasoning_effort": "high"}'}
+              value={form.llm_extra_body}
+              onChange={(event) =>
+                setForm((old) => ({ ...old, llm_extra_body: event.target.value }))
               }
             />
-            <SwitchRow
-              title="图片喂给模型"
-              checked={form.llm_include_images}
-              onChange={(next) => setForm((old) => ({ ...old, llm_include_images: next }))}
-              hint="开了才把图片一起给模型看。默认关：只喂气泡上那行文字。"
-            />
-          </div>
+            <span className="mt-1 block text-xs leading-5 text-stone-500">
+              一个 JSON 对象，里面的键原样并进请求体顶层：温度、思考、输出上限……
+              各家挂的字段名都不一样（SiliconFlow 认 <code className="rounded bg-stone-100 px-1">enable_thinking</code>，
+              Google 只认标准的 <code className="rounded bg-stone-100 px-1">reasoning_effort</code>，
+              而且它家有些模型<strong className="font-medium">连 <code className="rounded bg-stone-100 px-1">"none"</code> 都不吃</strong>，
+              写"关思考"就是整条 400），所以我们不再替服务商猜——<strong className="font-medium">照那家的文档写</strong>。
+              <strong className="font-medium">留空就是只发模型名与正文</strong>，一个额外字段都不带，
+              默认值全交回服务商；<code className="rounded bg-stone-100 px-1">model</code>、
+              <code className="rounded bg-stone-100 px-1">messages</code>、
+              <code className="rounded bg-stone-100 px-1">stream</code> 与密钥不能写在这里（前三样由程序拼，
+              密钥不出网关）。写坏了<strong className="font-medium">保存这一下就拦</strong>，
+              不会带着坏 JSON 去撞 400；发出去的到底是什么，看下面测试连接结果里那份原文。
+            </span>
+          </label>
+
+          <SwitchRow
+            title="图片喂给模型"
+            checked={form.llm_include_images}
+            onChange={(next) => setForm((old) => ({ ...old, llm_include_images: next }))}
+            hint="开了才把图片一起给模型看。默认关：只喂气泡上那行文字。"
+          />
 
           {testing && (
             <p className="text-sm text-stone-500" role="status">
@@ -559,9 +548,6 @@ export function SettingsPage({ notify }: Props) {
                   {" · 耗时 "}
                   {(test.elapsed_ms / 1000).toFixed(1)} 秒
                   {test.reply ? <span className="block break-words">回「{test.reply}」</span> : null}
-                  <span className="mt-1 block text-xs text-emerald-700">
-                    思考模式{test.thinking ? "开着" : "关着"}
-                  </span>
                   {test.note ? (
                     <span className="mt-1 block text-xs text-amber-700">{test.note}</span>
                   ) : null}
@@ -572,6 +558,18 @@ export function SettingsPage({ notify }: Props) {
                   {" · "}
                   {test.error}
                 </>
+              )}
+              {/* 参数形状由用户自己写了，"到底发出去了什么"就成了唯一能核对的东西：
+                  通不通都给这一份，撞 400 时才看得出是自己哪一项写坏的。 */}
+              {test.request && (
+                <details className="mt-2 rounded-lg border border-stone-100 bg-white/70">
+                  <summary className="cursor-pointer px-3 py-1.5 text-[11px] text-stone-600">
+                    这次实际发出去的请求体
+                  </summary>
+                  <pre className="overflow-x-auto border-t border-stone-100 px-3 py-2 font-mono text-[11px] leading-5 text-stone-700">
+                    {test.request}
+                  </pre>
+                </details>
               )}
             </div>
           )}

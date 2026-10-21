@@ -17,7 +17,7 @@ from niannian.ids import session_key
 from niannian.storage import Database
 
 CFG = {"llm_base_url": "https://api.siliconflow.cn/v1", "llm_model": "Qwen/Qwen3-8B",
-       "llm_api_key": "sk-test-value", "llm_thinking": False}
+       "llm_api_key": "sk-test-value", "llm_extra_body": ""}
 
 ACCOUNT = "wxid_me"
 ONE_TASK = ('{"tasks":[{"title":"完成问卷","description":"全班填写，明天截止",'
@@ -145,20 +145,42 @@ def test_request_carries_the_policy_and_no_token_ceiling(db, fake):
     assert "max_tokens" not in call
 
 
-def test_thinking_on_only_widens_the_wait(db, fake):
-    """两档分开只剩等待这一档：开思考的单次能跑到 30 秒以上（真机踩过）。"""
+def test_the_wait_is_one_band_because_the_box_is_opaque(db, fake):
+    """那一框写什么我们不看（形状归用户），所以等待只剩一档，取实测最慢的那一档。
+
+    旧的 60/180 两档靠 `llm_thinking` 分，2026-10-21 那个开关删了：开思考的单批实测
+    跑到 30 秒以上，留窄档就是把正常请求判成失败。
+    """
     first = session_key(ACCOUNT, "room_a")
     second = session_key(ACCOUNT, "room_b")
     seed(db, first)
     seed(db, second, name="另一个群", start_seq=900)
 
     run(db, session_id=first)
-    run(db, session_id=second, settings={**CFG, "llm_thinking": True})
+    run(db, session_id=second,
+        settings={**CFG, "llm_extra_body": '{"reasoning_effort": "high"}'})
 
     plain, thinking = fake.calls
-    assert plain["timeout"] == extractor.TIMEOUT_SECONDS
-    assert thinking["timeout"] == extractor.TIMEOUT_THINKING_SECONDS
+    assert plain["timeout"] == thinking["timeout"] == extractor.TIMEOUT_SECONDS
+    assert extractor.TIMEOUT_SECONDS >= 120.0
     assert "max_tokens" not in plain and "max_tokens" not in thinking
+
+
+def test_a_broken_box_fails_the_batch_without_eating_the_messages(db, fake):
+    """那一框写坏了：这批**不标记**、消息照旧留给下一轮，原因说人话且不拿去出网。
+
+    这是删掉思考开关换来的新失败形状——用户自己写的 JSON 会在起轮之后才暴露，
+    所以它必须与"服务商 400"走同一条失败语义，不能静默把消息判成处理过。
+    """
+    sid = session_key(ACCOUNT, "room_a")
+    seed(db, sid)
+
+    status = run(db, settings={**CFG, "llm_extra_body": "{oops"})
+
+    assert fake.calls == []                       # 一次都没出网
+    assert status["failed_batches"] == 1 and status["created"] == 0
+    assert "读不懂 JSON" in status["error"]
+    assert len(db.pending_extraction(sid, 200)) == 3   # 三条一条都没被吃掉
 
 
 def test_second_round_has_nothing_to_ask(db, fake):

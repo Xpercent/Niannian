@@ -14,7 +14,7 @@ from test_api import NoMediaCollector
 BASE = {"history_limit": 100, "poll_seconds": 3.0, "port": 8765,
         "llm_base_url": "https://api.siliconflow.cn/v1",
         "llm_model": "Qwen/Qwen3-8B", "llm_api_key": "sk-saved-key-0001",
-        "llm_thinking": False, "llm_include_images": False}
+        "llm_include_images": False, "llm_extra_body": ""}
 
 
 def endpoint(app, path, method):
@@ -50,9 +50,9 @@ def test_get_settings_tells_the_page_a_key_is_already_stored(tmp_path, monkeypat
     assert got["api_key_set"] is True
     assert got["api_key_masked"] == "sk-…0001"
     assert got["values"]["llm_model"] == "Qwen/Qwen3-8B"
-    assert got["values"]["llm_thinking"] is False
+    assert got["values"]["llm_extra_body"] == ""
     # 中文名由后端给一份，界面不再抄第二张表（保存后的提示就用它）
-    assert got["labels"]["llm_thinking"] == "思考模式"
+    assert got["labels"]["llm_extra_body"] == "请求体参数"
     assert set(got["labels"]) == set(EDITABLE_KEYS)
 
     blank = make_app(tmp_path, monkeypatch, {**BASE, "llm_api_key": ""})
@@ -87,34 +87,38 @@ def test_put_settings_rejects_bad_llm_values_in_plain_words(tmp_path, monkeypatc
         put({**BASE, "llm_base_url": "api.siliconflow.cn/v1"})
     assert "http:// 或 https://" in caught.value.detail
     with pytest.raises(HTTPException) as caught:
-        put({**BASE, "llm_thinking": "sometimes"})
-    assert "思考模式只能是开或关" in caught.value.detail
+        put({**BASE, "llm_extra_body": "{oops"})
+    assert "读不懂 JSON" in caught.value.detail
     assert read_config(tmp_path)["llm_base_url"] == BASE["llm_base_url"]  # 没落盘
 
 
-def test_put_settings_stores_a_temperature_and_blank_stops_sending_it(tmp_path, monkeypatch):
-    """填了才发、清空就不发：库里那格跟着变成数字或 null，界面读回来才对得上。"""
+def test_put_settings_stores_the_box_as_written_and_refuses_a_broken_one(
+        tmp_path, monkeypatch):
+    """那一框存原文（排好版才改得动），写坏了**不落盘**——界面当场就该知道。"""
     app = make_app(tmp_path, monkeypatch)
     put = endpoint(app, "/api/settings", "PUT")
 
-    got = put({**BASE, "llm_temperature": 0.4})
-    assert read_config(tmp_path)["llm_temperature"] == 0.4
-    assert got["values"]["llm_temperature"] == 0.4
+    got = put({**BASE, "llm_extra_body": '{"temperature": 0.4}'})
+    assert read_config(tmp_path)["llm_extra_body"] == '{"temperature": 0.4}'
+    assert got["values"]["llm_extra_body"] == '{"temperature": 0.4}'
 
-    back = put({**BASE, "llm_temperature": None})
-    assert read_config(tmp_path)["llm_temperature"] is None
-    assert back["values"]["llm_temperature"] is None
+    back = put({**BASE, "llm_extra_body": ""})
+    assert read_config(tmp_path)["llm_extra_body"] == ""
+    assert back["values"]["llm_extra_body"] == ""
 
     with pytest.raises(HTTPException) as caught:
-        put({**BASE, "llm_temperature": 2.5})
-    assert "温度要在 0 到 2 之间" in caught.value.detail
+        put({**BASE, "llm_extra_body": "[1, 2]"})
+    assert "要写成 JSON 对象" in caught.value.detail
+    assert read_config(tmp_path)["llm_extra_body"] == ""      # 坏的那份没落盘
 
 
-def test_get_settings_reports_no_temperature_as_null(tmp_path, monkeypatch):
-    """库里没填过 → values 里那格是 null，界面才知道该空着而不是显示 0。"""
-    got = endpoint(make_app(tmp_path, monkeypatch), "/api/settings", "GET")()
-    assert got["values"]["llm_temperature"] is None
-    assert got["labels"]["llm_temperature"] == "温度"
+def test_get_settings_reports_the_box_the_library_holds(tmp_path, monkeypatch):
+    """库里存着的那一框原样读回来：界面看到的与下一轮真正发的是同一份。"""
+    got = endpoint(make_app(tmp_path, monkeypatch,
+                            {**BASE, "llm_extra_body": '{"seed": 7}'}),
+                   "/api/settings", "GET")()
+    assert got["values"]["llm_extra_body"] == '{"seed": 7}'
+    assert got["labels"]["llm_extra_body"] == "请求体参数"
 
 
 def test_get_settings_shows_the_prompt_that_actually_runs(tmp_path, monkeypatch):
@@ -181,30 +185,31 @@ def test_test_connection_uses_the_draft_and_the_stored_key(tmp_path, monkeypatch
     def fake_test_connection(settings):
         seen.update(settings)
         return {"ok": True, "elapsed_ms": 12, "model": settings["llm_model"],
-                "reply": "好的", "thinking": settings["llm_thinking"], "note": ""}
+                "reply": "好的", "request": "{}", "note": ""}
 
     monkeypatch.setattr("niannian.api.test_connection", fake_test_connection)
     app = make_app(tmp_path, monkeypatch)
     got = endpoint(app, "/api/settings/test-connection", "POST")(
-        {"llm_model": "deepseek-ai/DeepSeek-V3", "llm_thinking": True,
+        {"llm_model": "deepseek-ai/DeepSeek-V3",
+         "llm_extra_body": '{"temperature": 0}',
          "llm_api_key": ""})
     assert got["ok"] is True and got["model"] == "deepseek-ai/DeepSeek-V3"
     assert seen["llm_model"] == "deepseek-ai/DeepSeek-V3"
-    assert seen["llm_thinking"] is True
+    assert seen["llm_extra_body"] == '{"temperature": 0}'
     assert seen["llm_api_key"] == "sk-saved-key-0001"     # 没重填 → 用库里那把
     # 测连**不该**把草稿写进配置：不保存就再点一次也得照样能测
     assert read_config(tmp_path)["llm_model"] == BASE["llm_model"]
 
 
-def test_test_connection_a_cleared_temperature_is_not_taken_from_the_library(
+def test_test_connection_a_cleared_box_is_not_taken_from_the_library(
         tmp_path, monkeypatch):
-    """界面上那格被清空 → 草稿里是 null → 这一试也不发，不能悄悄沿用库里那个旧的。"""
+    """界面上那一框被清空 → 草稿里是空串 → 这一试也不带，不能悄悄沿用库里那个旧的。"""
     seen = {}
     monkeypatch.setattr("niannian.api.test_connection",
                         lambda settings: seen.update(settings) or {"ok": True})
-    app = make_app(tmp_path, monkeypatch, {**BASE, "llm_temperature": 0.8})
-    endpoint(app, "/api/settings/test-connection", "POST")({"llm_temperature": None})
-    assert seen["llm_temperature"] is None
+    app = make_app(tmp_path, monkeypatch, {**BASE, "llm_extra_body": '{"seed": 7}'})
+    endpoint(app, "/api/settings/test-connection", "POST")({"llm_extra_body": ""})
+    assert seen["llm_extra_body"] == ""
 
 
 def test_test_connection_does_not_go_out_for_an_unparsable_draft(tmp_path, monkeypatch):
