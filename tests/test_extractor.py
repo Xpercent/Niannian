@@ -136,7 +136,7 @@ def test_request_carries_the_policy_and_no_token_ceiling(db, fake):
     run(db)
 
     call = fake.calls[0]
-    assert "只挑出**我本人**需要做的一件事" in call["system"]
+    assert call["system"] == extract.DEFAULT_SYSTEM_PROMPT   # 发出去的就是内置那一份
     assert call["timeout"] == extractor.TIMEOUT_SECONDS
     # 长度上限由服务商定（用户 2026-10-20 定），提炼这一层不许再发回去
     assert "max_tokens" not in call

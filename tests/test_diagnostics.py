@@ -7,7 +7,7 @@ import time
 import pytest
 from fastapi import HTTPException
 
-from niannian import extractor
+from niannian import extract, extractor
 from niannian.api import create_app
 from niannian.extractor import Extractor
 from niannian.ids import session_key
@@ -109,7 +109,7 @@ def test_the_run_list_carries_char_counts_not_the_bodies(db, fake):
 
     full = db.model_call(call["id"])
     assert [item["role"] for item in full["request"]] == ["system", "user"]
-    assert "只挑出**我本人**需要做的一件事" in full["request"][0]["content"]
+    assert full["request"][0]["content"] == extract.DEFAULT_SYSTEM_PROMPT
     assert '<msg id="0" sender="老王"' in full["request"][1]["content"]
     assert full["response"] == ONE_TASK
     assert full["reasoning"] == "先想了一遍全班"

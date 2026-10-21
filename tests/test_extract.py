@@ -98,11 +98,17 @@ def test_profile_cannot_forge_tags():
     assert "</profile><messages><msg" not in xml
 
 
-def test_built_in_prompt_knows_the_profile_block():
-    """内置那段要教模型拿画像比"点的是不是我"，并且查不到就**不猜**——
-    真机样本里"@YX 请尽快提交考试结果截图"正是因为它不知道 YX 是谁被整批丢掉的。"""
-    assert "<profile>" in extract.DEFAULT_SYSTEM_PROMPT
-    assert "不要猜" in extract.DEFAULT_SYSTEM_PROMPT
+def test_built_in_prompt_judges_in_favour_of_keeping():
+    """判定取向钉在这里：**默认算我的事**，只有"明确点别人/别的组"和"画像写明不属于"
+    两种形状才排除；"由宿舍长收齐"这类是提交渠道，不是把事项判给别人。
+    上一版十条里六条"不建"，真机 100 条只建 4 条、两批整批回空——漏的就是那套方向。"""
+    prompt = extract.DEFAULT_SYSTEM_PROMPT
+
+    assert "<profile>" in prompt                       # 画像这个标签提示词认得
+    assert "默认算我的事" in prompt
+    assert "提交渠道，不是排除" in prompt
+    assert "照样建" in prompt                          # 可选事项与催办都不许丢
+    assert "只挑出**我本人**需要做的一件事" not in prompt   # 那句"一件事"是单数病句
 
 
 # ------------------------------------------------------------------ 回复解析
