@@ -111,6 +111,12 @@ def test_built_in_prompt_judges_in_favour_of_keeping():
     assert "只挑出**我本人**需要做的一件事" not in prompt   # 那句"一件事"是单数病句
 
 
+def test_built_in_prompt_forces_the_deadline_into_its_own_field():
+    """真机有三条把期限只写进了 description（"10月22日12:00截止"就在描述里），
+    字段却是空的——待办页按期限筛的那两栏就永远看不见它们。"""
+    assert "必须填进这个字段" in extract.DEFAULT_SYSTEM_PROMPT
+
+
 # ------------------------------------------------------------------ 回复解析
 
 

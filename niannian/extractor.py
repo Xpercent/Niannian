@@ -13,7 +13,7 @@ import threading
 import time
 
 from . import extract
-from .llm import chat, error_text, split_config
+from .llm import chat, error_text, raw_reply, split_config
 from .storage import now_utc
 
 # 一批最多 20 条消息要判，等待比"测试连接"长得多；开思考放宽到 180 秒
@@ -159,14 +159,17 @@ class Extractor:
         started = time.perf_counter()
         reply = {"text": "", "reasoning": "", "model": ""}
         error = ""
+        secret = str(self.settings.get("llm_api_key") or "")
         try:
             reply = chat(self.settings, messages, timeout=timeout)
             tasks = extract.parse_tasks(reply["text"], len(chunk))
-        except ValueError as exc:                     # 契约层的问题，不用翻服务商话术
-            error = str(exc)
         except Exception as exc:
-            error = error_text(exc, str(self.settings.get("llm_api_key") or ""),
-                               timeout)
+            # 契约层的问题（JSON 读不懂那类）直接说人话，服务商的错才翻成中文。
+            error = (str(exc) if isinstance(exc, ValueError)
+                     else error_text(exc, secret, timeout))
+            # 失败那批也要把**服务商原样回的那一份**留在回复列里（界面要看的就是这个）；
+            # 已经拿到正文的不动它——半截 JSON 正是这一页最该照原样看的东西。
+            reply = {**reply, "text": reply["text"] or raw_reply(exc, secret)}
         self.db.add_extract_call(run_id, {
             "session_id": session_id, "session_name": session_name,
             "started_at": started_at,

@@ -1,11 +1,14 @@
 """提炼轮次：批次怎么切、失败怎么办、任务与标记怎么同事务落库。模型一律用替身。"""
 
+import json
 import sqlite3
 import threading
 import time
 
 import pytest
+import httpx
 from fastapi import HTTPException
+from openai import RateLimitError
 
 from niannian import extract, extractor
 from niannian.api import create_app
@@ -322,6 +325,24 @@ def test_failed_batch_leaves_the_messages_for_next_round(db, fake):
     fake.error = None
     again = run(db)
     assert again["created"] == 1 and again["error"] is None
+
+
+def test_a_failed_batch_still_keeps_what_the_provider_said(db, fake):
+    """失败那批最该看的正是"对方到底说了什么"：响应体原样进回复列，
+    我们翻译的那句中文另存 error 列（用户 2026-10-21 定）。"""
+    request = httpx.Request("POST", "https://api.siliconflow.cn/v1/chat/completions")
+    fake.error = RateLimitError("Error code: 429",
+                                response=httpx.Response(429, request=request),
+                                body={"error": {"code": 429, "status": "RESOURCE_EXHAUSTED"}})
+    seed(db, session_key(ACCOUNT, "room_a"))
+
+    state = run(db)
+
+    assert state["failed_batches"] == 1
+    call = db.model_call(db.extract_run(db.extract_runs()[0]["id"])["calls"][0]["id"])
+    assert "RESOURCE_EXHAUSTED" in call["response"]
+    assert "请求太频繁" in call["error"]
+    assert "sk-test-value" not in json.dumps(call, ensure_ascii=False)
 
 
 def test_unparsable_reply_is_a_failure_not_an_empty_round(db, fake):

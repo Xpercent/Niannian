@@ -241,3 +241,44 @@ def test_error_text_never_carries_the_key():
 
 def test_error_text_falls_back_to_exception_name():
     assert llm.error_text(RuntimeError("boom")) == "模型请求失败：RuntimeError"
+
+
+# ---------------------------------------------------------------- 服务商原样回的那一份
+
+
+def status_with_body(code, body):
+    request = httpx.Request("POST", "https://api.siliconflow.cn/v1/chat/completions")
+    return RateLimitError("Error code: 429", response=httpx.Response(code, request=request),
+                          body=body)
+
+
+def test_raw_reply_keeps_the_provider_json():
+    """失败那批用户要看的是**服务商原样回的那份**：429 正文里有 quota 与 retry 细节，
+    翻成"等一会儿再试"那一句就全丢了。"""
+    got = llm.raw_reply(status_with_body(429, {"error": {
+        "code": 429, "message": "Resource has been exhausted",
+        "status": "RESOURCE_EXHAUSTED"}}))
+
+    assert got.startswith("{")
+    assert '"status": "RESOURCE_EXHAUSTED"' in got
+
+
+def test_raw_reply_falls_back_to_the_message_when_body_is_not_json():
+    assert llm.raw_reply(status(APIStatusError, 503, "upstream said nope")) == "upstream said nope"
+
+
+def test_raw_reply_is_empty_when_there_was_no_response_at_all():
+    """连接错与超时**根本没有响应体**，留空比编一份出来强。"""
+    assert llm.raw_reply(APIConnectionError(request=request())) == ""
+    assert llm.raw_reply(APITimeoutError(request=request())) == ""
+
+
+def test_raw_reply_keeps_our_own_contract_errors():
+    assert llm.raw_reply(ValueError("服务商回了空响应")) == "服务商回了空响应"
+
+
+def test_raw_reply_never_carries_the_key():
+    text = llm.raw_reply(status_with_body(
+        429, {"error": {"message": "quota for key sk-secret-value exhausted"}}),
+        secret="sk-secret-value")
+    assert "sk-secret-value" not in text and "（密钥）" in text

@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import json
 import time
 from urllib.parse import urlparse
 
@@ -121,6 +122,25 @@ def error_text(exc: Exception, secret: str = "",
     if secret:
         text = text.replace(secret, "（密钥）")
     return text
+
+
+def raw_reply(exc: Exception, secret: str = "") -> str:
+    """服务商**原样回的那一份**，出错时也要留档（用户 2026-10-21 定：失败那批我要看的
+    就是对方到底说了什么，而不是我们替他翻译的那句中文）。
+
+    状态错（429/400/500）SDK 把响应体解析好挂在 ``body`` 上，读不成 JSON 的挂在
+    ``message`` 里；连接错与超时**根本没有响应**，那就留空，不编一份出来。
+    """
+    if isinstance(exc, APIStatusError):
+        text = (json.dumps(exc.body, ensure_ascii=False, indent=2)
+                if exc.body is not None else str(exc.message or ""))
+    elif isinstance(exc, ValueError):
+        text = str(exc)          # "服务商回了空响应"这类我们这层的判断也照原样留
+    else:
+        text = ""
+    if secret:
+        text = text.replace(secret, "（密钥）")
+    return text.strip()
 
 
 def test_timeout(settings: dict) -> float:
