@@ -647,3 +647,85 @@ def test_nothing_to_merge_means_no_extra_request(db, fake):
 
     assert state["merged"] == 0 and fake.merges == []
 
+
+
+def test_manual_merge_works_on_existing_tasks_without_a_new_round(db, fake):
+    """「合并重复」那颗按钮：**不再造一批消息**，直接拿现有待办合一次。
+
+    合并本来在每轮末尾自动跑，这个入口是给"刚改完合并提示词、想拿现有数据试"用的。
+    它照样记成一轮（0 条消息、一条 stage='merge' 的调用），诊断页能回看。
+    """
+    sid = session_key(ACCOUNT, "room_a")
+    seed(db, sid, count=3)
+    fake.reply = TWO_TASKS
+    fake.merge_reply = '{"merged":[]}'            # 第一轮故意不合，留下两条
+    run(db)
+    assert len(db.list_tasks(status="all")) == 2
+
+    fake.merge_reply = MERGE_FIRST_TWO          # 换一份"能合"的剧本再手动跑
+    ex = Extractor(db, CFG)
+    started = ex.start_merge()
+    assert ex._worker.join(timeout=20) is None    # noqa: 等合并跑完
+
+    assert started["accepted"] is True and started["mode"] == "merge"
+    assert started["targets"] == 1
+    assert ex.status()["merged"] == 1
+    assert len(db.list_tasks(status="all")) == 1
+    latest = db.extract_runs()[0]
+    assert latest["total"] == 0 and latest["merge_calls"] == 1 and latest["merged"] == 1
+    assert [call["stage"] for call in db.extract_run(latest["id"])["calls"]] == ["merge"]
+
+
+def test_manual_merge_does_not_call_the_model_when_nothing_can_be_merged(db, fake):
+    """只有一条待办凑不成组：不起线程、不出网、**也不建轮次**。
+
+    建一条"0 条消息 0 次请求"的空轮次只会挤占诊断页那 30 轮额度，还让人以为它跑过。
+    """
+    seed(db, session_key(ACCOUNT, "room_a"), count=1)
+    run(db)
+    fake.calls.clear()
+    rounds = len(db.extract_runs())
+
+    ex = Extractor(db, CFG)
+    got = ex.start_merge()
+
+    assert got["accepted"] is False and "没有可合并" in got["reason"]
+    assert ex._worker is None                     # 连线程都没起
+    assert fake.calls == [] and ex.status()["merged"] == 0
+    assert len(db.extract_runs()) == rounds       # 没多出空轮次
+
+
+def test_merge_endpoint_starts_a_merge_only_round(tmp_path, monkeypatch):
+    fake = FakeChat(merge_reply='{"merged":[]}')
+    app = build_app(tmp_path, monkeypatch, fake)
+    seed(app.state.store, session_key(ACCOUNT, "room_a"), count=3)
+    fake.reply = TWO_TASKS
+    app.state.extractor.start("")
+    app.state.extractor._worker.join(timeout=10)  # noqa: 先造出两条待办
+
+    fake.merge_reply = MERGE_FIRST_TWO
+    got = endpoint(app, "/api/merge")()
+    app.state.extractor._worker.join(timeout=10)  # noqa: 等合并跑完
+
+    assert got["accepted"] is True and got["mode"] == "merge"
+    assert [row["title"] for row in app.state.store.list_tasks(status="all")] == ["交数学作业"]
+
+
+def test_merge_endpoint_refuses_while_a_round_is_running(tmp_path, monkeypatch):
+    app = build_app(tmp_path, monkeypatch, FakeChat())
+    app.state.extractor.state["running"] = True
+
+    assert endpoint(app, "/api/merge")()["accepted"] is False
+
+
+def test_merge_endpoint_refuses_to_ask_the_provider_without_a_key(tmp_path, monkeypatch):
+    fake = FakeChat()
+    app = build_app(tmp_path, monkeypatch, fake, api_key="")
+
+    with pytest.raises(HTTPException) as got:
+        endpoint(app, "/api/merge")()
+
+    assert got.value.status_code == 400
+    assert fake.calls == []
+
+

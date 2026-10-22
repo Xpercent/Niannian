@@ -221,6 +221,18 @@ def create_app(root: Path | None = None) -> FastAPI:
     def api_extract_status():
         return extractor.status()
 
+    @app.post("/api/merge")
+    def api_merge_start():
+        """**只合并、不提炼**：在已有待办上试合并（待办页那颗「合并重复」）。
+
+        合并本来在每轮末尾自动跑，这个入口只是省掉"再造一批消息"。它记成新的一轮
+        （0 条消息、一条 `stage='merge'` 的调用），诊断页照常回看。已经在跑就不排队。
+        """
+        try:
+            return extractor.start_merge()
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+
     # 诊断这三条全是**纯读自己的库**：正文一轮十几批、每批几 KB，所以列表不带正文，
     # 点开哪一条才取那一条。不碰微信缓存，也不碰图片钥匙。
     @app.get("/api/diagnostics/runs")

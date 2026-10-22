@@ -133,6 +133,12 @@ export type ExtractStatus = {
   accepted?: boolean;
   /** 本轮在 `extract_runs` 里的那一行；诊断页据此知道哪一轮是当下这轮。 */
   run_id: number | null;
+  /** `extract` 提炼消息；`merge` 只合并已有待办（手动那颗「合并重复」）。 */
+  mode: "extract" | "merge";
+  /** 只有 `POST /api/merge` 的即时回应里有：这次要跑几个会话。 */
+  targets?: number;
+  /** `accepted=false` 时的一句人话（没有可合并的会话 / 上一轮还在跑）。 */
+  reason?: string;
 };
 
 /** 诊断页左侧的轮次：每轮一行，`calls`/`failures` 是那轮记下来的请求数与失败数。 */

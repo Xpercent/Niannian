@@ -111,6 +111,7 @@ cd ..
 | GET | `/api/tasks/{id}` | 一条待办 + **依据消息原文**（按 sort_seq 升序，形状与消息列表一致） |
 | PATCH | `/api/tasks/{id}` | 改标题/说明/优先级/期限/状态；认不出来的中文报错，期限与模型那份过同一个解析器 |
 | POST | `/api/extract` | 起一轮提炼（body 可带 `session_id`，空=所有关注会话）。**立刻回状态**，不等模型；已经在跑就 `accepted=false`，不排队第二轮；配置没填齐直接 400，不出网 |
+| POST | `/api/merge` | **只合并、不提炼**：拿现有待办跑一次合并（待办页那颗「合并重复」）。同样立刻回状态；`mode="merge"`、`targets` 是这次要跑几个会话。只挑挂着两条以上待办的会话，凑不成组就不出网 |
 | GET | `/api/extract/status` | 这一轮跑到哪儿了（`total/done/batches/created/failed_batches/error`，另带本轮那一行的 `run_id`） |
 | GET | `/api/diagnostics/runs?limit=` | 最近的提炼轮次（新→旧，每轮带请求数与失败数） |
 | GET | `/api/diagnostics/runs/{run_id}` | 一轮的请求序列（概要 + 字符数，**不带正文**） |

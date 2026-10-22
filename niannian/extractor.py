@@ -41,6 +41,19 @@ def group_by_session(rows: list[dict]) -> list[tuple[str, str, list[dict]]]:
     return out
 
 
+def _started_state(mode: str) -> dict:
+    """起一轮/起一次合并时的初始状态。
+
+    两处共用一份：字段少一个，``/api/extract/status`` 就会在"这一轮"和"下一次"之间
+    时有时无，前端读出来的形状跟着抖。``mode`` 让界面能说清这次在干什么
+    （``extract`` 提炼消息 / ``merge`` 只合并已有待办）。
+    """
+    return {"running": True, "started_at": now_utc(), "finished_at": None,
+            "total": 0, "done": 0, "batches": 0, "created": 0, "merged": 0,
+            "failed_batches": 0, "session": None, "error": None, "run_id": None,
+            "mode": mode}
+
+
 class Extractor:
     """跑一轮提炼：取未处理的消息 → 逐批发给模型 → 任务与标记同事务落库。
 
@@ -58,7 +71,7 @@ class Extractor:
         self.state: dict = {"running": False, "started_at": None, "finished_at": None,
                             "total": 0, "done": 0, "batches": 0, "created": 0,
                             "merged": 0, "failed_batches": 0, "session": None,
-                            "error": None, "run_id": None}
+                            "error": None, "run_id": None, "mode": "extract"}
 
     def status(self) -> dict:
         with self._lock:
@@ -82,13 +95,36 @@ class Extractor:
                 # "你要的这轮没起，因为上一轮还没结束"
                 return {**self.state, "accepted": False}
             self._stop.clear()
-            self.state = {"running": True, "started_at": now_utc(), "finished_at": None,
-                          "total": backlog, "done": 0, "batches": 0, "created": 0,
-                          "merged": 0, "failed_batches": 0, "session": None,
-                          "error": None, "run_id": None}
+            self.state = {**_started_state("extract"), "total": backlog}
             snapshot = {**self.state, "accepted": True}
         self._worker = threading.Thread(target=self._run, args=(session_id, plan),
                                         name="extractor", daemon=True)
+        self._worker.start()
+        return snapshot
+
+    def start_merge(self) -> dict:
+        """**只合并、不提炼**：在已有待办上试合并用（待办页那颗「合并重复」）。
+
+        合并本来就在每轮末尾自动跑，这个入口只是省掉"再造一批消息"的麻烦——比如刚改完
+        合并提示词，想看看它在现有 40 条待办上会怎么判。它记成**新的一轮**
+        （0 条消息、只有 `stage='merge'` 的调用），诊断页照常能回看发了什么、回了什么。
+        """
+        split_config(self.settings)
+        plan = extract.policy(self.settings)
+        targets = self.db.mergeable_sessions()
+        with self._lock:
+            if self.state["running"]:
+                return {**self.state, "accepted": False}
+            if not targets:
+                # 没有可合并的会话就**不起线程、也不建轮次**：建一条"0 条消息 0 次请求"
+                # 的空轮次只会挤占诊断页那 30 轮额度，还让人以为它跑过什么。
+                return {**self.state, "accepted": False,
+                        "reason": "没有可合并的会话（每个会话都只有一条待办）"}
+            self._stop.clear()
+            self.state = _started_state("merge")
+            snapshot = {**self.state, "accepted": True, "targets": len(targets)}
+        self._worker = threading.Thread(target=self._run_merge, args=(plan, targets),
+                                        name="merger", daemon=True)
         self._worker.start()
         return snapshot
 
@@ -132,6 +168,36 @@ class Extractor:
                 self.state["error"] = error
             # 批级失败（含合并失败）记在 state 里，收尾时一并写进轮次行：不然界面上
             # 只有内存状态那一句，翻诊断页看不见这一轮为什么是坏的。
+            final_error = self.state["error"]
+        if run_id:
+            self.db.finish_extract_run(run_id, self._progress() | {"error": final_error})
+
+    def _run_merge(self, plan: extract.Policy, targets: list[dict]) -> None:
+        """手动合并那一轮：逐个会话跑一次合并，不碰消息、不标记任何东西。
+
+        ``total`` 留 0：这一轮没有"要提炼的消息"，界面按 ``mode`` 换说法，不去凑一个
+        假的分母。取消停在会话之间——已经合完的组照常留着，没轮到的一个都没动。
+        """
+        error: str | None = None
+        run_id = 0
+        try:
+            run_id = self.db.start_extract_run("")
+            with self._lock:
+                self.state["run_id"] = run_id
+            self._sync_run(run_id)
+            for item in targets:
+                if self._stop.is_set():
+                    error = "已取消，没合完的那些任务原样留着"
+                    break
+                sid = str(item["id"])
+                self._merge_session(sid, str(item.get("name") or sid), plan, run_id)
+        except Exception as exc:                      # 查库崩了这类轮次级意外
+            error = f"{type(exc).__name__}: {str(exc)[:200]}"
+        with self._lock:
+            self.state["running"] = False
+            self.state["finished_at"] = now_utc()
+            if error:
+                self.state["error"] = error
             final_error = self.state["error"]
         if run_id:
             self.db.finish_extract_run(run_id, self._progress() | {"error": final_error})

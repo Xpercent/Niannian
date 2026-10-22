@@ -4,6 +4,7 @@ import {
   CheckCheck,
   ChevronRight,
   Flag,
+  GitMerge,
   Inbox,
   MessageCircle,
   Search,
@@ -29,6 +30,9 @@ type Props = {
   onOpen: (id: number) => void;
   onProcess: () => void;
   processDisabled: boolean;
+  /** 只合并、不提炼：在已有待办上试合并（合并本来在每轮末尾自动跑）。 */
+  onMerge: () => void;
+  mergeDisabled: boolean;
 };
 
 const STATUS_TABS: { value: TaskStatus | "all"; label: string }[] = [
@@ -54,6 +58,8 @@ export function TasksPage({
   onOpen,
   onProcess,
   processDisabled,
+  onMerge,
+  mergeDisabled,
 }: Props) {
   const [tasks, setTasks] = useState<TaskRow[]>([]);
   const [status, setStatus] = useState<TaskStatus | "all">("pending");
@@ -108,10 +114,16 @@ export function TasksPage({
           <h1 className="text-3xl font-semibold tracking-tight sm:text-4xl">待办事项</h1>
           <p className="mt-3 text-sm text-stone-400">从消息里拾起重要的事，一件件完成。</p>
         </div>
-        <Button onClick={onProcess} disabled={processDisabled}>
-          <Sparkles />
-          立即提炼
-        </Button>
+        <div className="flex flex-wrap items-center gap-2">
+          <Button variant="secondary" onClick={onMerge} disabled={mergeDisabled}>
+            <GitMerge />
+            合并重复
+          </Button>
+          <Button onClick={onProcess} disabled={processDisabled}>
+            <Sparkles />
+            立即提炼
+          </Button>
+        </div>
       </div>
 
       <div className="grid grid-cols-2 gap-3 xl:grid-cols-4">

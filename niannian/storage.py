@@ -544,6 +544,20 @@ class Database:
                     [stamp, *[int(i) for i in message_ids]])
         return len(tasks)
 
+    def mergeable_sessions(self) -> list[dict]:
+        """挂着**两条以上** pending 待办的会话——只有这些会话上合并才有事可做。
+
+        一条待办凑不成组，所以直接挡在查询里：手动点「合并重复」时不该为一个只有一条
+        待办的会话白发一次请求。
+        """
+        with self.connect() as conn:
+            rows = conn.execute(
+                """SELECT s.id, s.name, COUNT(t.id) AS pending
+                   FROM tasks t JOIN sessions s ON s.id=t.session_id
+                   WHERE t.status='pending'
+                   GROUP BY s.id HAVING pending > 1 ORDER BY s.id""").fetchall()
+        return [dict(row) for row in rows]
+
     def merge_candidates(self, session_id: str) -> list[dict]:
         """这个会话里还挂着的待办，**连依据消息的原文一起**——第二轮喂的就是这一份。
 

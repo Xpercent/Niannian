@@ -185,6 +185,30 @@ export function App() {
   };
 
   /**
+   * 只合并、不提炼：在已有待办上试合并。
+   *
+   * 合并本来在每轮末尾自动跑，这颗按钮只是省掉"再造一批消息"——比如刚改完合并提示词，
+   * 想看看它在现有几十条待办上会怎么判。它照样记成一轮，诊断页能回看。
+   */
+  const startMerge = async () => {
+    setBusyProcess(true);
+    try {
+      const got = await api<ExtractStatus>("/api/merge", postJson({}));
+      await refresh();
+      notify(
+        got.accepted
+          ? "正在合并重复的待办，跑完看诊断页那一条"
+          : got.reason ?? "上一轮还在跑，这次没排队",
+        got.accepted ? false : true,
+      );
+    } catch (error) {
+      notify((error as Error).message || "起合并失败", true);
+    } finally {
+      setBusyProcess(false);
+    }
+  };
+
+  /**
    * 待办抽屉里点"到会话里看这句"：切页 + 选会话 + 留一个待跳转。
    *
    * 落地不是这里做的——会话页取屏只有一个出口（`fetchPage`），由它消费 `pendingJump`；
@@ -205,8 +229,10 @@ export function App() {
 
   const running = Boolean(extract?.running);
   const extractFailed = !running && Boolean(extract?.error);
+  // 这一轮本来就只有合并（手动点了「合并重复」），没有消息要提炼。
+  const mergeOnly = Boolean(running && extract?.mode === "merge");
   // 消息都跑完了但这一轮还没结束，说明轮到轮末那次合并了（它自动接在第一轮后面）。
-  const merging = Boolean(running && extract && extract.total > 0
+  const merging = Boolean(running && !mergeOnly && extract && extract.total > 0
     && extract.done >= extract.total);
   return (
     <div className="min-h-screen">
@@ -321,14 +347,16 @@ export function App() {
               <div className="min-w-0 flex-1">
                 <p>
                   {running
-                    ? merging
-                      ? "消息都提炼完了，正在合并重复的待办"
-                      : extract?.session
-                        ? `正在提炼 · ${extract.session}`
-                        : "正在从消息里提炼待办"
+                    ? mergeOnly
+                      ? "正在合并重复的待办"
+                      : merging
+                        ? "消息都提炼完了，正在合并重复的待办"
+                        : extract?.session
+                          ? `正在提炼 · ${extract.session}`
+                          : "正在从消息里提炼待办"
                     : `上一轮有 ${extract?.failed_batches ?? 0} 批没成功：${extract?.error || "未知原因"}`}
                 </p>
-                {running && (
+                {running && !mergeOnly && (
                   <progress
                     className="mt-2 h-1 w-full accent-emerald-700"
                     value={extract?.done ?? 0}
@@ -342,7 +370,9 @@ export function App() {
                 )}
               </div>
               <span className="tabular-nums">
-                {extract?.done ?? 0} / {extract?.total ?? 0}
+                {mergeOnly
+                  ? `合 ${extract?.merged ?? 0} 组`
+                  : `${extract?.done ?? 0} / ${extract?.total ?? 0}`}
               </span>
             </div>
           )}
@@ -362,6 +392,8 @@ export function App() {
               onOpen={setTaskId}
               onProcess={() => void startRound()}
               processDisabled={busyProcess || running}
+              onMerge={() => void startMerge()}
+              mergeDisabled={busyProcess || running}
             />
           ) : page === "#settings" ? (
             <SettingsPage notify={notify} />
