@@ -81,6 +81,7 @@ CREATE TABLE IF NOT EXISTS extract_runs (
   done INTEGER NOT NULL DEFAULT 0,
   created INTEGER NOT NULL DEFAULT 0,
   failed_batches INTEGER NOT NULL DEFAULT 0,
+  merged INTEGER NOT NULL DEFAULT 0,
   error TEXT
 );
 CREATE TABLE IF NOT EXISTS model_calls (
@@ -91,6 +92,7 @@ CREATE TABLE IF NOT EXISTS model_calls (
   started_at TEXT NOT NULL,
   duration_ms INTEGER NOT NULL DEFAULT 0,
   status TEXT NOT NULL,
+  stage TEXT NOT NULL DEFAULT 'extract',
   model TEXT NOT NULL DEFAULT '',
   messages INTEGER NOT NULL DEFAULT 0,
   request TEXT NOT NULL DEFAULT '',
@@ -112,9 +114,17 @@ TASK_EDITABLE_FIELDS = ("title", "description", "deadline", "priority", "status"
 EXTRACT_RUNS_KEPT = 30
 # 一次调用能写的列：列名要拼进 SQL，这张白名单就是注入防线；`run_id` 由入参给。
 CALL_FIELDS = ("session_id", "session_name", "started_at", "duration_ms", "status",
-               "model", "messages", "request", "response", "reasoning", "error")
+               "stage", "model", "messages", "request", "response", "reasoning", "error")
 # 一轮的进度：诊断页不等轮次跑完，也要能看到已经发出的那几批。
-RUN_FIELDS = ("total", "done", "created", "failed_batches", "error")
+RUN_FIELDS = ("total", "done", "created", "failed_batches", "merged", "error")
+# 老库补列用的加法迁移（2026-10-22 第二轮合并接进同一轮）。与 messages 那几列不同，
+# 这两列只影响诊断页怎么显示，不影响入库语义，所以**补列即可，不必删库重采**。
+DIAGNOSTIC_ADDITIONS = (
+    ("extract_runs", "merged", "ALTER TABLE extract_runs "
+                               "ADD COLUMN merged INTEGER NOT NULL DEFAULT 0"),
+    ("model_calls", "stage", "ALTER TABLE model_calls "
+                             "ADD COLUMN stage TEXT NOT NULL DEFAULT 'extract'"),
+)
 
 
 def now_utc() -> str:
@@ -215,6 +225,11 @@ class Database:
                         f"数据库结构是旧版，缺 {'、'.join(missing)} 列："
                         f"删掉 {self.path} 重新采集即可（已入库的消息本来就要重采）。")
             conn.executescript(SCHEMA)
+            # CREATE TABLE IF NOT EXISTS 不给已有的表补列，所以老库要单独走这一趟加法迁移。
+            for table, column, statement in DIAGNOSTIC_ADDITIONS:
+                have = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
+                if column not in have:
+                    conn.execute(statement)
 
     # ------------------------------------------------------------------ 会话
     def sync_catalog(self, account: str, items: list[dict]) -> None:
@@ -529,6 +544,69 @@ class Database:
                     [stamp, *[int(i) for i in message_ids]])
         return len(tasks)
 
+    def merge_candidates(self, session_id: str) -> list[dict]:
+        """这个会话里还挂着的待办，**连依据消息的原文一起**——第二轮喂的就是这一份。
+
+        只取 ``pending``：已完成的、已取消的不参与合并，把它们并进新任务等于把做完的事
+        重新变回待办。顺序按 ``id`` 升序，也就是"先建的在前"，回执里的编号就是这个下标。
+        原文一次查回来按 ``sort_seq`` 归到各条任务上——一条消息被两条任务同时引用是常事，
+        所以存的是列表，不能按 ``sort_seq`` 去重。
+        """
+        with self.connect() as conn:
+            rows = conn.execute(
+                """SELECT id, title, description, deadline, priority, status, sources
+                   FROM tasks WHERE session_id=? AND status='pending' ORDER BY id""",
+                (session_id,)).fetchall()
+            tasks = []
+            for row in rows:
+                item = dict(row)
+                try:
+                    raw = json.loads(item["sources"] or "[]")
+                except json.JSONDecodeError:
+                    raw = []
+                item["sources"] = [int(s) for s in raw if isinstance(s, int)
+                                   or str(s).lstrip("-").isdigit()]
+                tasks.append(item)
+            wanted = sorted({seq for task in tasks for seq in task["sources"]})
+            by_seq: dict[int, list[dict]] = {}
+            if wanted:
+                marks = ",".join("?" * len(wanted))
+                for msg in conn.execute(
+                        f"""SELECT sender_name, content, created_at, sort_seq
+                            FROM messages WHERE session_id=? AND sort_seq IN ({marks})
+                            ORDER BY sort_seq, id""", [session_id, *wanted]):
+                    by_seq.setdefault(int(msg["sort_seq"]), []).append(dict(msg))
+        for task in tasks:
+            task["messages"] = [msg for seq in task["sources"]
+                                for msg in by_seq.get(seq, [])]
+        return tasks
+
+    def replace_tasks(self, session_id: str, old_ids: list[int], task: dict) -> int:
+        """把 ``old_ids`` 这些任务删掉、插一条新的，**同一事务**；返回新任务 id。
+
+        合并是"删旧的 + 建新的"，拆成两个事务的话崩在中间会既丢旧任务又没有新的。
+        删的时候**带上会话条件**：回执里的编号理论上都是这个会话的行，但模型给错编号时
+        不该把别的会话删掉；不在这个会话里的编号直接跳过，不报错。
+        """
+        stamp = now_utc()
+        ids = sorted({int(i) for i in old_ids})
+        with self._write_lock, self.connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            if ids:
+                marks = ",".join("?" * len(ids))
+                conn.execute(f"DELETE FROM tasks WHERE session_id=? AND id IN ({marks})",
+                             [session_id, *ids])
+            cur = conn.execute(
+                """INSERT INTO tasks(session_id, title, description, deadline, priority,
+                                     status, sources, created_at, updated_at)
+                   VALUES(?,?,?,?,?,?,?,?,?)""",
+                (session_id, task["title"], task.get("description") or "",
+                 task.get("deadline"), task.get("priority") or "medium",
+                 "pending",
+                 json.dumps(sorted({int(s) for s in task.get("sources") or []})),
+                 stamp, stamp))
+        return int(cur.lastrowid)
+
     def list_tasks(self, session_id: str = "", status: str = "pending",
                    priority: str = "", query: str = "", due: str = "all",
                    limit: int = 200) -> list[dict]:
@@ -682,10 +760,16 @@ class Database:
         """
         names = ",".join(CALL_FIELDS)
         marks = ",".join("?" * len(CALL_FIELDS))
+        payload = []
+        for key in CALL_FIELDS:
+            value = values.get(key)
+            # `stage` 是 NOT NULL：显式传 None 时默认值不生效，而只跑第一轮的调用方
+            # 不会带这个键，所以在这里补一次，别让一条诊断记录把整轮弄失败。
+            payload.append("extract" if key == "stage" and value is None else value)
         with self._write_lock, self.connect() as conn:
             cur = conn.execute(
                 f"INSERT INTO model_calls(run_id, {names}) VALUES(?, {marks})",
-                [int(run_id), *[values.get(key) for key in CALL_FIELDS]])
+                [int(run_id), *payload])
         return int(cur.lastrowid)
 
     def update_extract_run(self, run_id: int, values: dict) -> None:
@@ -712,15 +796,21 @@ class Database:
                          (EXTRACT_RUNS_KEPT,))
 
     def extract_runs(self, limit: int = 50) -> list[dict]:
-        """诊断页左侧那一列轮次，新→旧；带每轮记下来的请求数与失败数。"""
+        """诊断页左侧那一列轮次，新→旧；带每轮记下来的请求数与失败数。
+
+        ``calls`` 把合并那一次也算在内（它就是这一轮发出去的一次请求），
+        ``merge_calls`` 单独给一个数，界面才能把"8 批"与"1 次合并"分开说。
+        """
         with self.connect() as conn:
             rows = conn.execute(
                 """SELECT r.*, COUNT(c.id) AS calls,
+                          SUM(c.stage='merge') AS merge_calls,
                           SUM(c.status='error') AS failures
                    FROM extract_runs r LEFT JOIN model_calls c ON c.run_id=r.id
                    GROUP BY r.id ORDER BY r.id DESC LIMIT ?""",
                 (max(1, min(int(limit), 100)),)).fetchall()
         return [{**dict(row), "calls": int(row["calls"] or 0),
+                 "merge_calls": int(row["merge_calls"] or 0),
                  "failures": int(row["failures"] or 0)} for row in rows]
 
     def extract_run(self, run_id: int) -> dict | None:
@@ -737,7 +827,7 @@ class Database:
                 return None
             rows = conn.execute(
                 """SELECT id, session_id, session_name, started_at, duration_ms,
-                          status, model, messages, error,
+                          status, stage, model, messages, error,
                           LENGTH(request) AS request_chars,
                           LENGTH(response) AS response_chars
                    FROM model_calls WHERE run_id=? ORDER BY id""",

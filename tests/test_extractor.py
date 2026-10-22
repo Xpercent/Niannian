@@ -45,26 +45,43 @@ def ids_of(db):
 
 
 class FakeChat:
-    """替身服务商：记下每次收到的 user_content，按剧本回话或抛错。"""
+    """替身服务商：记下每次收到的 user_content，按剧本回话或抛错。
 
-    def __init__(self, reply=ONE_TASK, error=None):
+    **合并那一步走另一份剧本**（``merge_reply``，默认"没有重复"）：只关心第一轮的用例
+    不用为每条都写两套回复。要分辨是哪一步，看 ``batches`` / ``merges`` 两个属性
+    ——第二轮接在第一轮末尾之后，``calls`` 里本来就会多出一次请求。
+    """
+
+    def __init__(self, reply=ONE_TASK, error=None, merge_reply='{"merged":[]}'):
         self.calls = []
         self.reply = reply
+        self.merge_reply = merge_reply
         self.error = error
         self.after = None
         self.hold = None
 
+    @property
+    def batches(self):
+        """第一轮的批次调用（系统提示词不是合并那一份）。"""
+        return [call for call in self.calls if not call["merge"]]
+
+    @property
+    def merges(self):
+        return [call for call in self.calls if call["merge"]]
+
     def __call__(self, settings, messages, **kwargs):
         # 收 **kwargs 而不是写死形参：这样"又偷偷发 max_tokens"会被用例看见
+        merge = messages[0]["content"] == extract.MERGE_SYSTEM_PROMPT
         self.calls.append({"system": messages[0]["content"], "user": messages[1]["content"],
-                           **kwargs})
+                           "merge": merge, **kwargs})
         if self.hold is not None:
             self.hold.wait(10)            # 让用例能把线程按在这一批上
         if self.after is not None:
             self.after()
         if self.error is not None:
             raise self.error
-        return {"text": self.reply, "reasoning": "", "model": "fake"}
+        return {"text": self.merge_reply if merge else self.reply,
+                "reasoning": "", "model": "fake"}
 
 
 @pytest.fixture
@@ -138,7 +155,7 @@ def test_request_carries_the_policy_and_no_token_ceiling(db, fake):
 
     run(db)
 
-    call = fake.calls[0]
+    call = fake.batches[0]
     assert call["system"] == extract.DEFAULT_SYSTEM_PROMPT   # 发出去的就是内置那一份
     assert call["timeout"] == extractor.TIMEOUT_SECONDS
     # 长度上限由服务商定（用户 2026-10-20 定），提炼这一层不许再发回去
@@ -160,7 +177,7 @@ def test_the_wait_is_one_band_because_the_box_is_opaque(db, fake):
     run(db, session_id=second,
         settings={**CFG, "llm_extra_body": '{"reasoning_effort": "high"}'})
 
-    plain, thinking = fake.calls
+    plain, thinking = fake.batches
     assert plain["timeout"] == thinking["timeout"] == extractor.TIMEOUT_SECONDS
     assert extractor.TIMEOUT_SECONDS >= 120.0
     assert "max_tokens" not in plain and "max_tokens" not in thinking
@@ -190,7 +207,7 @@ def test_second_round_has_nothing_to_ask(db, fake):
     state = run(db)
 
     assert state["total"] == 0 and state["batches"] == 0
-    assert len(fake.calls) == 1
+    assert len(fake.batches) == 1
 
 
 def test_no_task_is_still_processed(db, fake):
@@ -211,8 +228,8 @@ def test_batch_size_caps_one_request_and_numbering_restarts(db, fake):
 
     state = run(db)
 
-    assert len(fake.calls) == 2 and state["batches"] == 2
-    first, second = fake.calls
+    assert len(fake.batches) == 2 and state["batches"] == 2
+    first, second = fake.batches
     assert first["user"].count('<msg id=') == extract.DEFAULT_BATCH_LIMIT
     assert '<msg id="0"' in second["user"]
     assert second["user"].count('<msg id=') == 5
@@ -226,10 +243,10 @@ def test_settings_decide_the_batch_the_history_and_the_prompt(db, fake):
     run(db, settings={**CFG, "extract_batch_limit": 2, "extract_history_limit": 0,
                       "extract_prompt": "只要学习相关的"})
 
-    assert len(fake.calls) == 3
-    assert all('<history />' in call["user"] for call in fake.calls)
-    assert all(call["system"] == "只要学习相关的" for call in fake.calls)
-    assert fake.calls[0]["user"].count("<msg id=") == 2
+    assert len(fake.batches) == 3
+    assert all('<history />' in call["user"] for call in fake.batches)
+    assert all(call["system"] == "只要学习相关的" for call in fake.batches)
+    assert fake.batches[0]["user"].count("<msg id=") == 2
 
 
 def test_the_profile_goes_out_with_every_batch(db, fake):
@@ -239,8 +256,8 @@ def test_the_profile_goes_out_with_every_batch(db, fake):
 
     run(db, settings={**CFG, "extract_batch_limit": 1, "extract_profile": "我叫 YX，心理课第 5 组"})
 
-    assert len(fake.calls) == 3
-    assert all("我叫 YX，心理课第 5 组" in call["user"] for call in fake.calls)
+    assert len(fake.batches) == 3
+    assert all("我叫 YX，心理课第 5 组" in call["user"] for call in fake.batches)
 
 
 def test_a_running_round_keeps_the_policy_it_started_with(db, fake):
@@ -254,7 +271,7 @@ def test_a_running_round_keeps_the_policy_it_started_with(db, fake):
     ex = Extractor(db, settings)
     ex.start("")
     for _ in range(2000):                           # 等第一批真的进到请求里（最多 10 秒）
-        if fake.calls:
+        if fake.batches:
             break
         time.sleep(0.005)
     settings["extract_batch_limit"] = 50
@@ -263,9 +280,9 @@ def test_a_running_round_keeps_the_policy_it_started_with(db, fake):
     hold.set()
     assert ex._worker.join(timeout=20) is None       # noqa: 只是等后台那一轮结束
 
-    assert len(fake.calls) == 2                      # 仍是按 2 条一切
-    assert all(call["system"] != "后半批改的这个不该被读到" for call in fake.calls)
-    assert all("后半批改的画像" not in call["user"] for call in fake.calls)
+    assert len(fake.batches) == 2                      # 仍是按 2 条一切
+    assert all(call["system"] != "后半批改的这个不该被读到" for call in fake.batches)
+    assert all("后半批改的画像" not in call["user"] for call in fake.batches)
 
 
 def test_only_monitored_sessions_are_read(db, fake):
@@ -277,7 +294,7 @@ def test_only_monitored_sessions_are_read(db, fake):
     state = run(db)
 
     assert state["total"] == 3
-    assert all("消息900" not in call["user"] for call in fake.calls)
+    assert all("消息900" not in call["user"] for call in fake.batches)
 
 
 def test_session_filter_keeps_one_session(db, fake):
@@ -289,7 +306,7 @@ def test_session_filter_keeps_one_session(db, fake):
     state = run(db, session_id=second)
 
     assert state["total"] == 3
-    assert "消息900" in fake.calls[0]["user"] and "消息100" not in fake.calls[0]["user"]
+    assert "消息900" in fake.batches[0]["user"] and "消息100" not in fake.batches[0]["user"]
     assert len(db.pending_extraction(session_id=first)) == 3
 
 
@@ -303,7 +320,7 @@ def test_extracted_history_is_context_without_index(db, fake):
 
     state = run(db)
 
-    user = fake.calls[0]["user"]
+    user = fake.batches[0]["user"]
     history, messages = user.split("<messages>")
     assert "消息50" in history and "消息60" in messages
     assert ' id="' not in history
@@ -323,7 +340,7 @@ def test_reimported_older_messages_still_get_extracted(db, fake):
     state = run(db)
 
     assert state["total"] == 1
-    assert "回填的旧消息" in fake.calls[1]["user"]
+    assert "回填的旧消息" in fake.batches[1]["user"]
     assert db.list_tasks(status="all")[0]["sources"] == [150]
 
 
@@ -390,7 +407,7 @@ def test_cancel_between_batches(db, fake):
     ex._worker.join(timeout=20)                     # noqa
 
     state = ex.status()
-    assert len(fake.calls) == 1
+    assert len(fake.batches) == 1
     assert state["done"] == extract.DEFAULT_BATCH_LIMIT
     assert "已取消" in state["error"]
     assert len(db.pending_extraction()) == 5
@@ -523,3 +540,110 @@ def test_extract_endpoint_rejects_unknown_session_and_refuses_a_second_round(
 
     app.state.extractor.state["running"] = True    # 上一轮还没结束
     assert app.state.extractor.start("")["accepted"] is False
+
+
+# ------------------------------------------------------------------ 第二轮：合并
+
+TWO_TASKS = ('{"tasks":['
+             '{"title":"交数学作业本","description":"周四课间交",'
+             '"deadline":"2026-10-22T23:59","priority":"medium","id":[0]},'
+             '{"title":"明天交数学作业","description":"明天交",'
+             '"deadline":"2026-10-22T0:00","priority":"high","id":[1]}]}')
+THREE_TASKS = ('{"tasks":['
+               '{"title":"交数学作业本","description":"周四课间交",'
+               '"deadline":"2026-10-22T23:59","priority":"medium","id":[0]},'
+               '{"title":"明天交数学作业","description":"明天交",'
+               '"deadline":"2026-10-22T0:00","priority":"high","id":[1]},'
+               '{"title":"核对综测信息","description":"在共享文档里反馈",'
+               '"deadline":"2026-10-22T12:00","priority":"medium","id":[2]}]}')
+MERGE_FIRST_TWO = ('{"merged":[{"title":"交数学作业","description":"周四课间交给学委",'
+                   '"id":[0,1]}]}')
+
+
+def test_merge_runs_after_the_batches_in_the_same_round(db, fake):
+    """第二轮**自动**接在第一轮末尾，并且挂在**同一个 run_id** 下（用户 2026-10-22 定：
+    合并是第一轮的附加，诊断页应该看成同一轮，不是另起一轮）。"""
+    sid = session_key(ACCOUNT, "room_a")
+    seed(db, sid, count=3)
+    fake.reply = TWO_TASKS
+    fake.merge_reply = MERGE_FIRST_TWO
+
+    state = run(db)
+
+    assert state["created"] == 2 and state["merged"] == 1
+    assert len(fake.batches) == 1 and len(fake.merges) == 1
+    detail = db.extract_run(state["run_id"])
+    assert [call["stage"] for call in detail["calls"]] == ["extract", "merge"]
+    assert detail["run"]["merged"] == 1
+    assert db.extract_runs()[0]["merge_calls"] == 1
+
+
+def test_merged_task_takes_the_fields_the_program_computes(db, fake):
+    """合并后那条的期限与优先级**由程序算**（取最晚 / 取最高），依据消息取并集——
+    第二轮的回执里根本没有这两个字段。"""
+    sid = session_key(ACCOUNT, "room_a")
+    seed(db, sid, count=3)
+    fake.reply = TWO_TASKS
+    fake.merge_reply = MERGE_FIRST_TWO
+
+    run(db)
+
+    tasks = db.list_tasks(status="all")
+    assert len(tasks) == 1
+    assert tasks[0]["title"] == "交数学作业"
+    assert tasks[0]["deadline"] == "2026-10-22T23:59+08:00"   # 取最晚的那个
+    assert tasks[0]["priority"] == "high"                     # 取最高的那档
+    assert tasks[0]["sources"] == [100, 101]                  # 两条依据都留着
+
+
+def test_tasks_outside_the_merge_group_are_left_alone(db, fake):
+    """**未合并的行一个字都不动**：id、说明、期限、优先级都不变——这是"只回合并组"
+    这条契约的落点，全量回传就会把它们删掉重建。
+
+    第一轮按顺序插进去的三条拿 id 1/2/3；合并只动前两条，所以被留下的那条**必须还是
+    id 3**（合并出来的新任务拿的是新 id）。id 变了就说明它被删了又建了一遍。
+    """
+    sid = session_key(ACCOUNT, "room_a")
+    seed(db, sid, count=3)
+    fake.reply = THREE_TASKS
+    fake.merge_reply = MERGE_FIRST_TWO
+
+    run(db)
+
+    after = {row["title"]: row for row in db.list_tasks(status="all")}
+    assert set(after) == {"交数学作业", "核对综测信息"}
+    kept = after["核对综测信息"]
+    assert kept["id"] == 3
+    assert kept["description"] == "在共享文档里反馈"
+    assert kept["deadline"] == "2026-10-22T12:00+08:00"
+    assert kept["priority"] == "medium"
+    assert after["交数学作业"]["id"] not in (1, 2)
+
+
+def test_a_broken_merge_reply_does_not_lose_the_first_round(db, fake):
+    """合并失败**不毁第一轮**：任务已经落库了，只记一次失败调用并把原因写进轮次，
+    下一轮还能再合。"""
+    sid = session_key(ACCOUNT, "room_a")
+    seed(db, sid, count=3)
+    fake.reply = TWO_TASKS
+    fake.merge_reply = "我觉得没有重复"
+
+    state = run(db)
+
+    assert state["created"] == 2 and state["merged"] == 0
+    assert "合并失败" in state["error"]
+    assert len(db.list_tasks(status="all")) == 2
+    detail = db.extract_run(state["run_id"])
+    assert [call["stage"] for call in detail["calls"]] == ["extract", "merge"]
+    assert detail["calls"][1]["status"] == "error"
+    assert "合并失败" in detail["run"]["error"]
+
+
+def test_nothing_to_merge_means_no_extra_request(db, fake):
+    """只剩一条任务时根本不出网：合并是"找出重复的组"，一条没有组可言。"""
+    seed(db, session_key(ACCOUNT, "room_a"), count=1)
+
+    state = run(db)
+
+    assert state["merged"] == 0 and fake.merges == []
+

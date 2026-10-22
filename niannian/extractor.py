@@ -57,8 +57,8 @@ class Extractor:
         self._worker: threading.Thread | None = None
         self.state: dict = {"running": False, "started_at": None, "finished_at": None,
                             "total": 0, "done": 0, "batches": 0, "created": 0,
-                            "failed_batches": 0, "session": None, "error": None,
-                            "run_id": None}
+                            "merged": 0, "failed_batches": 0, "session": None,
+                            "error": None, "run_id": None}
 
     def status(self) -> dict:
         with self._lock:
@@ -84,8 +84,8 @@ class Extractor:
             self._stop.clear()
             self.state = {"running": True, "started_at": now_utc(), "finished_at": None,
                           "total": backlog, "done": 0, "batches": 0, "created": 0,
-                          "failed_batches": 0, "session": None, "error": None,
-                          "run_id": None}
+                          "merged": 0, "failed_batches": 0, "session": None,
+                          "error": None, "run_id": None}
             snapshot = {**self.state, "accepted": True}
         self._worker = threading.Thread(target=self._run, args=(session_id, plan),
                                         name="extractor", daemon=True)
@@ -116,6 +116,11 @@ class Extractor:
                         error = "已取消，未发出的批次一条都没标记，下次照旧重试"
                         break
                     self._one_batch(sid, name, chunk, plan, run_id)
+                # 这个会话的批次都落库了，接着把重复的待办合掉。**同一个 run_id**：
+                # 合并是第一轮的附加，诊断页要看成同一轮（用户 2026-10-22 定）。
+                # 取消时不跑——半轮的消息还没提炼完，这时候合出来的清单是半截的。
+                if not self._stop.is_set():
+                    self._merge_session(sid, name, plan, run_id)
                 if self._stop.is_set():
                     break
         except Exception as exc:                      # 查库崩了这类轮次级意外
@@ -125,13 +130,16 @@ class Extractor:
             self.state["finished_at"] = now_utc()
             if error:
                 self.state["error"] = error
+            # 批级失败（含合并失败）记在 state 里，收尾时一并写进轮次行：不然界面上
+            # 只有内存状态那一句，翻诊断页看不见这一轮为什么是坏的。
+            final_error = self.state["error"]
         if run_id:
-            self.db.finish_extract_run(run_id, self._progress() | {"error": error})
+            self.db.finish_extract_run(run_id, self._progress() | {"error": final_error})
 
     def _progress(self) -> dict:
         with self._lock:
             return {key: self.state[key] for key in ("total", "done", "created",
-                                                     "failed_batches")}
+                                                     "failed_batches", "merged")}
 
     def _sync_run(self, run_id: int) -> None:
         """把进度写回轮次那一行：一轮跑到一半时诊断页也能看到已经发出的那几批。"""
@@ -171,8 +179,9 @@ class Extractor:
             "session_id": session_id, "session_name": session_name,
             "started_at": started_at,
             "duration_ms": int((time.perf_counter() - started) * 1000),
-            "status": "error" if error else "ok", "model": reply["model"],
-            "messages": len(chunk), "request": json.dumps(body, ensure_ascii=False),
+            "status": "error" if error else "ok", "stage": "extract",
+            "model": reply["model"], "messages": len(chunk),
+            "request": json.dumps(body, ensure_ascii=False),
             "response": reply["text"], "reasoning": reply["reasoning"], "error": error})
         if error:
             self._fail(error)
@@ -194,3 +203,59 @@ class Extractor:
         with self._lock:
             self.state["failed_batches"] += 1
             self.state["error"] = reason
+
+    def _merge_session(self, session_id: str, session_name: str,
+                       plan: extract.Policy, run_id: int) -> None:
+        """把这一轮之后仍然重复的待办合掉：一次请求，回执里只有要合并的组。
+
+        只喂 ``pending`` 任务（见 :meth:`Database.merge_candidates`），一条都不合并是
+        正常结果。**失败不毁第一轮**：任务已经落库了，这里只记一次失败调用并把原因写进
+        轮次，下一轮还能再合。
+
+        提示词不走设置页（那五项归第一轮），所以直接用常量；它跟第一轮那份一样在起进程
+        时读进来，一轮里不会变。
+        """
+        rows = self.db.merge_candidates(session_id)
+        if len(rows) < 2:
+            return
+        messages = [{"role": "system", "content": extract.MERGE_SYSTEM_PROMPT},
+                    {"role": "user",
+                     "content": extract.render_merge(session_name, rows, plan.profile)}]
+        started_at = now_utc()
+        started = time.perf_counter()
+        reply = {"text": "", "reasoning": "", "model": ""}
+        error = ""
+        body: dict = {"messages": messages}
+        groups: list[dict] = []
+        secret = str(self.settings.get("llm_api_key") or "")
+        try:
+            body = request_body(self.settings, messages)
+            reply = chat(self.settings, messages, timeout=TIMEOUT_SECONDS)
+            groups = extract.parse_merge(reply["text"], len(rows))
+        except Exception as exc:
+            error = (str(exc) if isinstance(exc, ValueError)
+                     else error_text(exc, secret, TIMEOUT_SECONDS))
+            reply = {**reply, "text": reply["text"] or raw_reply(exc, secret)}
+        # 与第一轮同一条表：`messages` 这一列在这边记的是**待办条数**，界面按 stage 换标签。
+        self.db.add_extract_call(run_id, {
+            "session_id": session_id, "session_name": session_name,
+            "started_at": started_at,
+            "duration_ms": int((time.perf_counter() - started) * 1000),
+            "status": "error" if error else "ok", "stage": "merge",
+            "model": reply["model"], "messages": len(rows),
+            "request": json.dumps(body, ensure_ascii=False),
+            "response": reply["text"], "reasoning": reply["reasoning"], "error": error})
+        if error:
+            self._fail(f"合并失败：{error}")
+            return
+        merged = 0
+        for group in groups:
+            picked = [rows[index] for index in group["ids"]]
+            fields = extract.merge_fields(picked)
+            self.db.replace_tasks(session_id, [row["id"] for row in picked],
+                                  {"title": group["title"],
+                                   "description": group["description"], **fields})
+            merged += 1
+        with self._lock:
+            self.state["merged"] += merged
+        self._sync_run(run_id)

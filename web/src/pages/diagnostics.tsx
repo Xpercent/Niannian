@@ -214,7 +214,8 @@ export function DiagnosticsPage({ liveRunId, revision, notify }: Props) {
           </p>
           <h1 className="text-3xl font-semibold tracking-tight sm:text-4xl">提炼诊断</h1>
           <p className="mt-3 max-w-2xl text-sm text-stone-400">
-            一轮一批一条：这里只看发出去的请求原文与模型的原样回复。
+            一轮一批一条：这里只看发出去的请求原文与模型的原样回复。轮末那次「合并」也记在
+            同一轮里，标着「合并」——它是第一轮的附加，不另起一轮。
           </p>
         </div>
         <Button
@@ -291,9 +292,18 @@ export function DiagnosticsPage({ liveRunId, revision, notify }: Props) {
                     <p className="mt-1.5 flex flex-wrap items-center gap-1.5 text-[11px] text-stone-500">
                       <span>{row.total} 条消息</span>
                       <span className="text-stone-300">·</span>
-                      <span>{row.calls} 次请求</span>
+                      <span>
+                        {row.calls - row.merge_calls} 批
+                        {row.merge_calls > 0 && ` + ${row.merge_calls} 次合并`}
+                      </span>
                       <span className="text-stone-300">·</span>
                       <span>建 {row.created} 条待办</span>
+                      {row.merged > 0 && (
+                        <>
+                          <span className="text-stone-300">·</span>
+                          <span>合 {row.merged} 组</span>
+                        </>
+                      )}
                       {!row.calls && <Pill>没发出请求</Pill>}
                     </p>
                     {row.error && (
@@ -339,6 +349,7 @@ export function DiagnosticsPage({ liveRunId, revision, notify }: Props) {
                         {dateText(row.started_at, true)}
                       </span>
                       <Pill tone={failed ? "rose" : "emerald"}>{failed ? "失败" : "成功"}</Pill>
+                      {row.stage === "merge" && <Pill tone="amber">合并</Pill>}
                       <span className="min-w-0 flex-1 truncate text-stone-600">
                         {row.session_name}
                       </span>
@@ -347,7 +358,9 @@ export function DiagnosticsPage({ liveRunId, revision, notify }: Props) {
                       </span>
                     </p>
                     <p className="mt-1.5 flex flex-wrap items-center gap-1.5 text-[11px] text-stone-500">
-                      <span>{row.messages} 条消息</span>
+                      <span>
+                        {row.messages} {row.stage === "merge" ? "条待办" : "条消息"}
+                      </span>
                       <span className="text-stone-300">·</span>
                       <span className="tabular-nums">
                         请求 {row.request_chars.toLocaleString()} 字符
@@ -396,6 +409,7 @@ function CallInspector({
   if (!call) return <p className="p-6 text-sm text-stone-400">这条调用记录读不到了。</p>;
 
   const failed = call.status === "error";
+  const merge = call.stage === "merge";
   const system = call.request.find((item) => item.role === "system")?.content ?? "";
   const user = call.request.find((item) => item.role === "user")?.content ?? "";
   // 请求体里除 messages 之外的那些字段：模型名 + 设置页「请求体参数」那一框。
@@ -430,7 +444,8 @@ function CallInspector({
       <Card>
         <CardContent className="flex flex-wrap items-center gap-x-6 gap-y-3 px-4 py-3.5 text-xs sm:px-5">
           <Head label="会话" value={call.session_name || call.session_id} />
-          <Head label="本批消息" value={`${call.messages} 条`} />
+          <Head label={merge ? "清单里的待办" : "本批消息"} value={`${call.messages} 条`} />
+          <Head label="这一步" value={merge ? "合并重复待办" : "从消息里提炼"} />
           <Head label="模型" value={call.model || "—"} />
           <Head label="耗时" value={durationText(call.duration_ms)} />
           <span>
@@ -458,10 +473,14 @@ function CallInspector({
             </Button>
           }
         >
-          <Fold label="本批正文（XML）" hint="发出去的那份，尖括号已实体转义" defaultOpen>
+          <Fold
+            label={merge ? "待办清单（XML）" : "本批正文（XML）"}
+            hint="发出去的那份，尖括号已实体转义"
+            defaultOpen
+          >
             <Code text={user} />
           </Fold>
-          <Fold label="系统提示词" hint="这一轮所有批共用那一份">
+          <Fold label="系统提示词" hint={merge ? "合并那一份，与第一轮不同" : "这一轮所有批共用那一份"}>
             <Code text={system} />
           </Fold>
           <Fold label="请求体里除正文之外的字段" hint={extras.length ? `${extras.length} 项` : "那一批没带额外字段"}>

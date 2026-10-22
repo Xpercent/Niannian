@@ -205,6 +205,9 @@ export function App() {
 
   const running = Boolean(extract?.running);
   const extractFailed = !running && Boolean(extract?.error);
+  // 消息都跑完了但这一轮还没结束，说明轮到轮末那次合并了（它自动接在第一轮后面）。
+  const merging = Boolean(running && extract && extract.total > 0
+    && extract.done >= extract.total);
   return (
     <div className="min-h-screen">
       {mobileNav && (
@@ -318,9 +321,11 @@ export function App() {
               <div className="min-w-0 flex-1">
                 <p>
                   {running
-                    ? extract?.session
-                      ? `正在提炼 · ${extract.session}`
-                      : "正在从消息里提炼待办"
+                    ? merging
+                      ? "消息都提炼完了，正在合并重复的待办"
+                      : extract?.session
+                        ? `正在提炼 · ${extract.session}`
+                        : "正在从消息里提炼待办"
                     : `上一轮有 ${extract?.failed_batches ?? 0} 批没成功：${extract?.error || "未知原因"}`}
                 </p>
                 {running && (

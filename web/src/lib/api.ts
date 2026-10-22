@@ -125,6 +125,8 @@ export type ExtractStatus = {
   done: number;
   batches: number;
   created: number;
+  /** 这一轮末尾那次合并合掉了几组（第二轮自动接在第一轮后面，同属一轮）。 */
+  merged: number;
   failed_batches: number;
   session: string | null;
   error: string | null;
@@ -143,10 +145,17 @@ export type ExtractRun = {
   done: number;
   created: number;
   failed_batches: number;
+  /** 这一轮合掉了几组重复（第二轮接在第一轮末尾，记在同一轮里）。 */
+  merged: number;
   error: string | null;
 };
 
-export type ExtractRunRow = ExtractRun & { calls: number; failures: number };
+export type ExtractRunRow = ExtractRun & {
+  calls: number;
+  /** `calls` 里属于合并那一步的次数，界面据此把"8 批"和"1 次合并"分开说。 */
+  merge_calls: number;
+  failures: number;
+};
 
 /**
  * 一轮里的某一次请求：列表**不带正文**（一轮十几批、每批几 KB），
@@ -159,7 +168,10 @@ export type ExtractCallRow = {
   started_at: string;
   duration_ms: number;
   status: "ok" | "error";
+  /** `extract` 是第一轮的一批消息；`merge` 是这一轮末尾那次合并。 */
+  stage: "extract" | "merge";
   model: string;
+  /** 第一轮是"这一批几条消息"，合并是"这一份清单里几条待办"。 */
   messages: number;
   error: string;
   request_chars: number;

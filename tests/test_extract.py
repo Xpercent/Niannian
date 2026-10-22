@@ -268,3 +268,96 @@ def test_policy_snapshots_the_profile_because_there_is_no_built_in_identity():
 
 def test_empty_batch_is_a_valid_answer():
     assert extract.parse_tasks('{"tasks":[]}', 3) == []
+
+
+# ------------------------------------------------------------------ 第二轮：合并
+
+
+def merge_task(title, deadline=None, priority="medium", sources=None):
+    """一条待办 + 它的依据消息原文（``render_merge`` 要的那份形状）。"""
+    return {"title": title, "description": f"{title}的说明", "deadline": deadline,
+            "priority": priority, "status": "pending", "sources": sources or [],
+            "messages": [{"sender_name": "学委", "content": f"{title}的原文",
+                          "created_at": "2026-10-19T12:00:00+00:00"}]}
+
+
+def test_merge_input_carries_the_source_text_of_every_task():
+    """第二轮**必须**看到依据消息的原文：真机那对重复（"交了但没拿到的找我"被建成了
+    "交团员档案"）光看标题完全看不出来，只有对着原文才知道是催办。"""
+    xml = extract.render_merge("三班", [
+        merge_task("交数学作业本", deadline="2026-10-22T23:59+08:00", sources=[11]),
+        merge_task("明天交数学作业", deadline="2026-10-22T23:59+08:00", sources=[21]),
+    ])
+
+    assert '<task id="0"' in xml and '<task id="1"' in xml
+    assert 'deadline="10-22 23:59"' in xml          # 年份只在 <context> 上给一次
+    assert "<title>交数学作业本</title>" in xml
+    assert "<sources>" in xml and "交数学作业本的原文" in xml
+
+
+def test_merge_input_has_no_deadline_attribute_when_there_is_none():
+    """没期限就不写这个属性：写 ``deadline=""`` 会让模型以为"期限是空字符串"。"""
+    assert "deadline=" not in extract.render_merge("三班", [merge_task("交表")])
+
+
+def test_merge_input_carries_the_profile_too():
+    xml = extract.render_merge("三班", [merge_task("交表")], profile="我叫 YX")
+    assert "<profile>" in xml and "我叫 YX" in xml
+
+
+def test_merge_reply_only_takes_groups_of_two_or_more():
+    """契约是"只回需要合并的组"：单条编号的组等于什么都不做，照收就会把它删掉重建
+    ——人工改过的期限与勾过的状态全丢。"""
+    got = extract.parse_merge('{"merged":[{"title":"合并的","id":[0,2]},'
+                              '{"title":"单条","id":[1]}]}', 3)
+
+    assert [(task["title"], task["ids"]) for task in got] == [("合并的", [0, 2])]
+
+
+def test_merge_reply_drops_numbers_outside_the_list():
+    assert extract.parse_merge('{"merged":[{"title":"x","id":[0,9]}]}', 2) == []
+    assert extract.parse_merge('{"merged":[]}', 5) == []
+
+
+def test_one_task_cannot_be_claimed_by_two_groups():
+    """两组都点同一个编号时，先到的那组拿走它；第二组只剩一条就不算合并。"""
+    got = extract.parse_merge('{"merged":[{"title":"A","id":[0,1]},'
+                              '{"title":"B","id":[1,2]}]}', 3)
+
+    assert [task["ids"] for task in got] == [[0, 1]]
+
+
+def test_merge_reply_without_the_key_is_a_broken_reply():
+    """回了一份 tasks 而不是 merged：读不懂要抛，不能当成"没有重复"糊过去。"""
+    with pytest.raises(ValueError):
+        extract.parse_merge('{"tasks":[]}', 3)
+
+
+def test_merged_task_keeps_the_latest_deadline_and_the_strongest_priority():
+    """期限取**最晚**的那个非空值（延期型更正更常见，"取晚"不会把还在做的事判成过期）；
+    优先级取**最高**（真机同一件数学作业在相邻两批被判了 high 与 medium，
+    不取最高就会因为"它排在哪一批"而随机丢掉紧急度）。"""
+    fields = extract.merge_fields([
+        {"deadline": "2026-10-22T00:00+08:00", "priority": "medium", "sources": [11]},
+        {"deadline": "2026-10-22T23:59+08:00", "priority": "high", "sources": [21, 11]},
+    ])
+
+    assert fields == {"deadline": "2026-10-22T23:59+08:00", "priority": "high",
+                      "sources": [11, 21]}
+
+
+def test_merged_task_survives_when_only_one_side_has_a_deadline():
+    fields = extract.merge_fields([{"deadline": None, "priority": "low", "sources": [1]},
+                                   {"deadline": "2026-10-18T23:59+08:00",
+                                    "priority": "medium", "sources": [2]}])
+
+    assert fields["deadline"] == "2026-10-18T23:59+08:00"
+    assert fields["priority"] == "medium"
+    assert fields["sources"] == [1, 2]
+
+
+def test_merged_task_without_any_deadline_stays_without_one():
+    fields = extract.merge_fields([{"deadline": None, "priority": "medium", "sources": []},
+                                   {"deadline": None, "priority": "low", "sources": [3]}])
+
+    assert fields["deadline"] is None and fields["priority"] == "medium"
