@@ -94,6 +94,12 @@ class Extractor:
                 # 已经在跑：不排队第二轮，把当前状态原样回过去，accepted=False 说明
                 # "你要的这轮没起，因为上一轮还没结束"
                 return {**self.state, "accepted": False}
+            if not backlog:
+                # 没有待提炼的消息就**不起线程、也不建轮次**：与 ``start_merge`` 同一个
+                # 理由——一条 ``total=0`` 的空轮次只会挤占诊断页那 30 轮额度，还让人以为
+                # 它跑过什么（真机 run 1 就是这么来的）。要合并重复有单独那颗按钮。
+                return {**self.state, "accepted": False,
+                        "reason": "没有待提炼的消息（都已提炼过；要合并重复请点「合并重复」）"}
             self._stop.clear()
             self.state = {**_started_state("extract"), "total": backlog}
             snapshot = {**self.state, "accepted": True}

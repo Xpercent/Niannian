@@ -150,6 +150,21 @@ def test_start_answers_with_the_backlog_before_the_first_reply(db, fake):
     ex._worker.join(timeout=20)                       # noqa
 
 
+def test_start_without_backlog_does_not_create_an_empty_round(db, fake):
+    """消息都提炼完再点「立即提炼」：不起线程、不建轮次（与合并那条同一个理由）。
+
+    真机 run 1 就是一条 ``total=0`` 的空轮次，占掉诊断页那 30 轮额度，还让人以为它跑过。
+    """
+    ex = Extractor(db, CFG)
+
+    got = ex.start("")
+
+    assert got["accepted"] is False and "没有待提炼" in got["reason"]
+    assert ex._worker is None                       # 连线程都没起
+    assert fake.calls == []
+    assert db.extract_runs() == []                  # 没多出空轮次
+
+
 def test_request_carries_the_policy_and_no_token_ceiling(db, fake):
     seed(db, session_key(ACCOUNT, "room_a"))
 

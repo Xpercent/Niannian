@@ -154,6 +154,22 @@ def test_built_in_prompt_forbids_using_the_message_clock_as_a_deadline():
     assert "可选优先于紧急" in prompt                # 报名类不许因为快截止被判 high
 
 
+def test_built_in_prompt_reads_a_submission_window_as_a_deadline():
+    """真机两条「周二晚上军事理论课课间交给我」「明天交数学作业」都落了 null：模型把
+    提交窗口当成了提交渠道。现在明说这类要写日期、时分不补；活动开始时间仍然不算期限。"""
+    prompt = extract.DEFAULT_SYSTEM_PROMPT
+
+    assert "提交窗口" in prompt
+    assert "周二晚上军事理论课课间交给我" in prompt
+    assert "开始时间不是期限" in prompt
+
+
+def test_built_in_prompt_keeps_judgements_out_of_the_description():
+    """真机 description 里出现过「原文提到的16日为过往时间」——把判断写进文字，
+    过期与否该由 deadline 字段表达，界面自己会算。"""
+    assert "不要把判断写进文字" in extract.DEFAULT_SYSTEM_PROMPT
+
+
 # ------------------------------------------------------------------ 回复解析
 
 

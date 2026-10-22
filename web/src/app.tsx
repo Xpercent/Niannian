@@ -174,7 +174,7 @@ export function App() {
       notify(
         got.accepted
           ? `已起一轮提炼：${got.total} 条待处理`
-          : "上一轮还在跑，这一轮没排队",
+          : got.reason ?? "上一轮还在跑，这一轮没排队",
         got.accepted ? false : true,
       );
     } catch (error) {

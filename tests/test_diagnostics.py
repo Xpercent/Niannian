@@ -188,9 +188,17 @@ def test_progress_is_written_before_the_round_finishes(db, fake):
 
 
 def test_only_the_newest_rounds_are_kept(db, fake):
-    """留档会长：只留最近 ``EXTRACT_RUNS_KEPT`` 轮，旧轮的正文跟着轮次一起删。"""
-    seed(db, session_key(ACCOUNT, "room_a"))
-    for _ in range(EXTRACT_RUNS_KEPT + 5):
+    """留档会长：只留最近 ``EXTRACT_RUNS_KEPT`` 轮，旧轮的正文跟着轮次一起删。
+
+    每轮补一条新消息：消息提炼完后再点「立即提炼」现在**不再建空轮次**（见
+    ``test_start_without_backlog_does_not_create_an_empty_round``），这里不能靠空轮次凑数。
+    """
+    sid = session_key(ACCOUNT, "room_a")
+    seed(db, sid)
+    fake.reply = json.dumps({**json.loads(ONE_TASK), "merged": []}, ensure_ascii=False)
+    for n in range(EXTRACT_RUNS_KEPT + 5):
+        if n:
+            db.ingest([message(sid, 200 + n)])
         run(db)
 
     runs = db.extract_runs(limit=100)
