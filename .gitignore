@@ -11,3 +11,4 @@ web/dist/
 web/tsconfig.tsbuildinfo
 wechatauto_logs/
 content.md
+.workbuddy-ai/
