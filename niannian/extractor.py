@@ -324,6 +324,11 @@ class Extractor:
         for group in groups:
             picked = [rows[index] for index in group["ids"]]
             fields = extract.merge_fields(picked)
+            # 回执里的 deadline 是"从原文重读"的那份（用户 2026-10-22 选 2A）；
+            # 对不上原文就退回旧值里最晚的那个，编的日期进不了库。
+            fields["deadline"] = extract.merge_deadline(
+                picked, group.get("deadline"),
+                [msg for row in picked for msg in row.get("messages") or []])
             self.db.replace_tasks(session_id, [row["id"] for row in picked],
                                   {"title": group["title"],
                                    "description": group["description"], **fields})

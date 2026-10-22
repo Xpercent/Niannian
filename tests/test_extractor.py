@@ -24,11 +24,11 @@ ONE_TASK = ('{"tasks":[{"title":"完成问卷","description":"全班填写，明
             '"deadline":"2026-10-13T0:00","priority":"high","id":[0,2]}]}')
 
 
-def message(sid, seq, text=None):
+def message(sid, seq, text=None, created_at="2026-10-11T12:00:00+00:00"):
     return {"session_id": sid, "source_id": f"wechat:{seq}", "sender_key": "wxid_other",
             "sender_name": "老王", "is_self": False,
             "content": text if text is not None else f"消息{seq}",
-            "message_type": "文本", "created_at": "2026-10-11T12:00:00+00:00",
+            "message_type": "文本", "created_at": created_at,
             "sort_seq": seq, "metadata": {}}
 
 
@@ -573,6 +573,14 @@ THREE_TASKS = ('{"tasks":['
                '"deadline":"2026-10-22T12:00","priority":"medium","id":[2]}]}')
 MERGE_FIRST_TWO = ('{"merged":[{"title":"交数学作业","description":"周四课间交给学委",'
                    '"id":[0,1]}]}')
+TWO_NULL_TASKS = ('{"tasks":['
+                  '{"title":"交数学作业本","description":"周四课间交",'
+                  '"deadline":null,"priority":"medium","id":[0]},'
+                  '{"title":"明天交数学作业","description":"明天交",'
+                  '"deadline":null,"priority":"high","id":[1]}]}')
+MERGE_WITH_REREAD_DEADLINE = (
+    '{"merged":[{"title":"交数学作业","description":"周四课间交给学委",'
+    '"deadline":"2026-10-22","id":[0,1]}]}')
 
 
 def test_merge_runs_after_the_batches_in_the_same_round(db, fake):
@@ -594,8 +602,8 @@ def test_merge_runs_after_the_batches_in_the_same_round(db, fake):
 
 
 def test_merged_task_takes_the_fields_the_program_computes(db, fake):
-    """合并后那条的期限与优先级**由程序算**（取最晚 / 取最高），依据消息取并集——
-    第二轮的回执里根本没有这两个字段。"""
+    """合并后那条的优先级**由程序算**（取最高）；期限回执没给就退回旧值里最晚的那个。
+    回执给了期限的走另一条用例（``test_merge_fills_a_deadline_both_tasks_missed``）。"""
     sid = session_key(ACCOUNT, "room_a")
     seed(db, sid, count=3)
     fake.reply = TWO_TASKS
@@ -609,6 +617,31 @@ def test_merged_task_takes_the_fields_the_program_computes(db, fake):
     assert tasks[0]["deadline"] == "2026-10-22T23:59+08:00"   # 取最晚的那个
     assert tasks[0]["priority"] == "high"                     # 取最高的那档
     assert tasks[0]["sources"] == [100, 101]                  # 两条依据都留着
+
+
+def test_merge_fills_a_deadline_both_tasks_missed(db, fake):
+    """2A 的真样本（T26）：第一轮两条都把期限漏成 null，但合并时两份原文分别写着
+    「周四早上心理课课间」和「明天交」——合并是最后一次同时看到两份原文的机会，
+    回执里重读出来的 10-22 要能落库，而不是继续从两个 null 里取 null。"""
+    sid = session_key(ACCOUNT, "room_a")
+    db.sync_catalog(ACCOUNT, [{"id": sid, "username": sid, "name": "三班",
+                               "unread": 0, "last_message_at": None}])
+    db.set_monitored(sid, True)
+    db.ingest([
+        message(sid, 100, "数学作业本以宿舍为单位 周四早上心理课课间由宿舍长收齐交给我",
+                created_at="2026-10-19T12:00:00+00:00"),      # 上海 10-19 20:00，周一
+        message(sid, 101, "明天交数学作业",
+                created_at="2026-10-21T12:00:00+00:00"),      # 上海 10-21 20:00，周三
+    ])
+    fake.reply = TWO_NULL_TASKS
+    fake.merge_reply = MERGE_WITH_REREAD_DEADLINE
+
+    run(db)
+
+    tasks = db.list_tasks(status="all")
+    assert len(tasks) == 1
+    assert tasks[0]["deadline"] == "2026-10-22T23:59+08:00"
+    assert tasks[0]["priority"] == "high"
 
 
 def test_tasks_outside_the_merge_group_are_left_alone(db, fake):

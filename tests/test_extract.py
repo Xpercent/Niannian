@@ -162,6 +162,9 @@ def test_built_in_prompt_reads_a_submission_window_as_a_deadline():
     assert "提交窗口" in prompt
     assert "周二晚上军事理论课课间交给我" in prompt
     assert "开始时间不是期限" in prompt
+    # 真机回归：新那句"时分不补"被模型推广到所有期限，16:30/21:00/12:00 全丢了。
+    # 现在必须明说"原文写了钟点就照写"，否则这条修一个洞又开一个洞。
+    assert "原文写了钟点" in prompt and "照写钟点" in prompt
 
 
 def test_built_in_prompt_keeps_judgements_out_of_the_description():
@@ -377,3 +380,55 @@ def test_merged_task_without_any_deadline_stays_without_one():
                                    {"deadline": None, "priority": "low", "sources": [3]}])
 
     assert fields["deadline"] is None and fields["priority"] == "medium"
+
+
+def test_merge_reply_keeps_the_deadline_it_reread():
+    """2A：第二轮允许对合并组回 deadline（第一轮两条都漏时，合并是最后一次机会）。"""
+    got = extract.parse_merge('{"merged":[{"title":"交数学作业","id":[0,1],'
+                              '"deadline":"2026-10-22"}]}', 2)
+
+    assert got[0]["deadline"] == "2026-10-22T23:59+08:00"
+
+
+def test_merged_deadline_is_reread_from_the_sources_not_the_old_values():
+    """T26 的真样本：两条旧值都是 null，原文分别写着「周四早上」「明天交」→ 10-22。"""
+    rows = [{"deadline": None, "priority": "medium", "sources": [1]},
+            {"deadline": None, "priority": "high", "sources": [2]}]
+    messages = [
+        {"content": "数学作业本以宿舍为单位 周四早上心理课课间由宿舍长收齐交给我",
+         "created_at": "2026-10-19T12:00:00+00:00"},          # 上海 10-19，周一
+        {"content": "明天交数学作业", "created_at": "2026-10-21T12:00:00+00:00"},
+    ]
+
+    assert extract.merge_deadline(rows, "2026-10-22", messages) == "2026-10-22T23:59+08:00"
+
+
+def test_merged_deadline_falls_back_when_the_date_is_not_in_the_sources():
+    """原文只有「周四」=10-22，回执却写 10-25：这是编的，不许进库，退回旧值最晚。"""
+    rows = [{"deadline": "2026-10-20T23:59+08:00", "priority": "medium", "sources": [1]},
+            {"deadline": None, "priority": "high", "sources": [2]}]
+    messages = [{"content": "周四早上交给我", "created_at": "2026-10-19T12:00:00+00:00"}]
+
+    assert extract.merge_deadline(rows, "2026-10-25", messages) == "2026-10-20T23:59+08:00"
+
+
+def test_merged_deadline_reads_literal_dates_and_next_week():
+    messages = [
+        {"content": "报名截止2026年10月29日18:00", "created_at": "2026-10-21T12:00:00+00:00"},
+        {"content": "下周五交", "created_at": "2026-10-21T12:00:00+00:00"},   # 周三 → 10-30
+    ]
+
+    assert extract.merge_deadline([], "2026-10-29", messages) == "2026-10-29T23:59+08:00"
+    assert extract.merge_deadline([], "2026-10-30", messages) == "2026-10-30T23:59+08:00"
+
+
+def test_merge_prompt_rereads_the_deadline_with_the_same_semantics():
+    """2A 钉在这里：合并组要重读原文补期限，但不许照抄旧值；提交窗口算期限、
+    活动开始时间不算——这两条与第一轮同一套语义，不能在合并提示词里漏掉。"""
+    prompt = extract.MERGE_SYSTEM_PROMPT
+
+    assert "必须从 <sources> 原文里重新读" in prompt
+    assert "不许照抄 <task> 上的旧值" in prompt
+    assert "提交窗口算期限" in prompt
+    assert "开始时间不是期限" in prompt
+    assert "照写钟点" in prompt

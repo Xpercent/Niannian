@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import json
 import re
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Any, NamedTuple
 
 from .storage import SHANGHAI
@@ -68,7 +68,7 @@ DEFAULT_SYSTEM_PROMPT = """你在读微信群消息，把里面**要求人做的
 - 同一件事被几条消息反复说（催办、补细节、更正期限、点名几个人的催办）合成一条，id 把这些编号都列上。本批某条如果只是在催上文里说过的旧事，**照样按本条建**，不要因为本条没写全要求就丢掉。
 - 只有期限、地点、座位号而没有动作的（"明天截至""第四排"）不单独建；能挂到本批某条要求上就把编号并进去。
 - 纯应答、寒暄、表情、撤回提示，以及转发来的链接标题里没有要求的，不建。
-- deadline：消息里给了期限就**必须填进这个字段**，不能只写在 description 里（填错格子等于界面按期限筛的那两栏看不见它）；消息**没给期限就写 null**，不要省略这个键、也不要拿消息的 time 凑一个；原文只给到日期（"10月25日前"）就只写日期、不补钟点（钟点由程序补）；相对说法（明天、周四、后天）按**支撑它的那条消息自己的 time** 换算，不用本批最后一条的时间。原文说「周几/哪天 + 课间、晚上、下课前 交给我/交到某处」这类**提交窗口**，把那一天写进 deadline、时分不补——例：「周二晚上军事理论课课间交给我」（消息是 10-19 周一）→ 2026-10-20；「明天交数学作业」（消息是 10-21）→ 2026-10-22。但活动、比赛、面试的**开始时间不是期限**，不要填。
+- deadline：消息里给了期限就**必须填进这个字段**，不能只写在 description 里（填错格子等于界面按期限筛的那两栏看不见它）；消息**没给期限就写 null**，不要省略这个键、也不要拿消息的 time 凑一个；原文只给到日期（"10月25日前"）就只写日期、不补钟点（钟点由程序补）；相对说法（明天、周四、后天）按**支撑它的那条消息自己的 time** 换算，不用本批最后一条的时间。原文说「周几/哪天 + 课间、晚上、下课前 交给我/交到某处」这类**提交窗口**，把那一天写进 deadline；**原文写了钟点（16:30、21点、12:00）就照写钟点，只有没写钟点时才只写日期**——例：「周二晚上军事理论课课间交给我」（消息是 10-19 周一，没写钟点）→ 2026-10-20；「10月21日晚上21点截止」→ 2026-10-21T21:00；「明天交数学作业」（消息是 10-21）→ 2026-10-22。但活动、比赛、面试的**开始时间不是期限**，不要填。
 - priority 只有三档：点名催办、影响成绩或学分、一两天内就截止是 high；全班每人都要做的常态事项是 medium；可选、加分性质、看个人意愿的是 low。**可选优先于紧急**：报名、征集、招新、问卷这类可做可不做的，就算明天就截止也还是 low。
 - description 一句话写清要求、对象、提交渠道或文件名格式，不要整段照抄原文；**不要把判断写进文字**（"原定16日截止，现已过期""原文提到的16日为过往时间"这类不要写），过期与否由 deadline 字段表达，界面自己会算。
 - 每条任务的 id 必须指到本批真实存在的编号；指不出依据的任务不要输出。
@@ -341,10 +341,14 @@ def parse_tasks(text: str, batch_len: int) -> list[dict]:
 
 # ---------------------------------------------------------------- 第二轮：合并
 #
-# 第二轮不判 deadline 与 priority（用户 2026-10-22 定）：这两个字段由程序从被合并的
-# 几条里算（见 :func:`merge_fields`）。所以它的回执只有 title / description / id，
-# 而**输入里仍然带着 deadline 与 priority**——不输出它们就没有"看见旧值就照抄"的锚定
-# 问题，反而能帮它判断两条是不是同一件事（同一个期限往往就是同一件事）。
+# 第二轮**不判 priority**（用户 2026-10-22 定）：由程序从被合并的几条里取最高的那档
+# （见 :func:`merge_fields`）。**deadline 只对合并组重读**（用户 2026-10-22 选 2A）：
+# 第一轮可能两条都漏了期限（真机 T26 两条原文都写着"周四早上""明天交"，库里都是 null），
+# 而合并是最后一次同时看到两份原文的机会。回执里的 deadline 必须能从 <sources> 原文
+# 找到依据，程序用 :func:`merge_deadline` 校验，认不出就退回旧值里最晚的那个——
+# 这样既补得上，也不会让模型随手编一个日期。
+#
+# 输入里仍然带着 deadline 与 priority：同一个期限往往就是同一件事，能帮它判重复。
 #
 # 形状上最要紧的一条是"**只回需要合并的组**"：未合并的任务不进输出、库里的行一个字
 # 都不动。全量回传会让第二轮变成重写几十条，输出越长越容易截断，而且第一轮算好的期限
@@ -359,10 +363,11 @@ MERGE_SYSTEM_PROMPT = """你在整理一份待办清单：里面有些条目其�
 - 每条 task 最多出现在一个组里；一组至少两条。**宁可少合，不要错合**——拿不准就不动它。
 - 合并后的 title 用"动词+具体对象"，取组内最准确的那个说法；description 把几条里**有用的细节并成一句话**（对象、提交渠道、文件名格式），不要写成两句话，也**不要把判断写进文字**（"原定16日截止现已过期"这类不要写）。
 - **只输出被合并的组**，没有合并的任务一条都不要回。确实没有任何重复时输出 {"merged":[]}。
-- deadline 与 priority **不要输出**：程序会从被合并的这几条里自己取（期限取最晚的那个非空值，优先级取最高的那档）。
+- deadline：**只对合并后的这一组**输出，**必须从 <sources> 原文里重新读**（合并让你第一次同时看到两份原文，第一轮漏掉的期限在这里补），写成完整的 2026-10-22 形状；**原文写了钟点（16:30、21点、12:00）就照写钟点，只有没写钟点时才只写日期**；**不许照抄 <task> 上的旧值**（旧值只用来帮你判断是不是同一件事）；原文确实没有期限就写 null。「周几/哪天 + 课间、晚上、下课前 交给我/交到某处」这类**提交窗口算期限**；活动、比赛、面试的**开始时间不是期限**。
+- priority **不要输出**：程序会从被合并的这几条里取最高的那档。
 
 只输出 JSON，不要 Markdown 代码块、不要解释、不要添加没有依据的字段：
-{"merged":[{"title":"提交宿舍公约作品","description":"宿舍长拍照发到指定邮箱，10月21日21点截止","id":[5,17]}]}
+{"merged":[{"title":"提交宿舍公约作品","description":"宿舍长拍照发到指定邮箱，10月21日21点截止","deadline":"2026-10-21","id":[5,17]}]}
 字符串值里不能出现英文双引号，引用原文里的说法请改用「」。
 """
 
@@ -446,6 +451,7 @@ def parse_merge(text: str, task_count: int) -> list[dict]:
         used.update(ids)
         out.append({"title": title,
                     "description": str(item.get("description") or "").strip(),
+                    "deadline": parse_deadline(item.get("deadline")),
                     "ids": ids})
     return out
 
@@ -472,3 +478,101 @@ def merge_fields(rows: list[dict]) -> dict:
             "priority": next((name for name, rank in PRIORITY_RANK.items() if rank == best),
                              "medium"),
             "sources": sorted(sources)}
+
+
+# 中文里的"周几/星期几"：0=周一，与 ``date.weekday()`` 同一套。
+_CN_WEEKDAY = {"一": 0, "二": 1, "三": 2, "四": 3, "五": 4, "六": 5, "日": 6, "天": 6}
+
+# 字面日期：2026年10月26日 / 2026-10-26 / 10月26日 / 10-26。
+_LITERAL_DATE = re.compile(r"(?:(\d{4})[-/年])?(\d{1,2})[-/月](\d{1,2})日?")
+# 只有"日"没有月：22号（真机「22号即明晚十二点之前」）。
+_DAY_ONLY = re.compile(r"(?<!\d)(\d{1,2})号")
+# 相对说法：**先长后短**，"大后天"必须排在"后天"前面，否则会被切成"后天"。
+_RELATIVE = re.compile(
+    r"(今天|今日|明天|明日|大后天|后天|下周([一二三四五六日天])|"
+    r"周([一二三四五六日天])|星期([一二三四五六日天])|礼拜([一二三四五六日天]))")
+
+
+def _message_date(value: Any) -> date | None:
+    """一条消息的发送日（上海本地）；认不出来给 None，不拿别的日期顶。"""
+    text = local_time(value)
+    try:
+        return datetime.strptime(text[:10], "%Y-%m-%d").date()
+    except (TypeError, ValueError):
+        return None
+
+
+def _dates_in(text: str, base: date) -> set[date]:
+    """一句话里**可能落到的日期**：字面日期 + 今天/明天/后天 + 周几/星期几。
+
+    只用来校验模型重读的期限有没有原文依据，不做"哪个才是期限"的判断——那是模型的事。
+    宁可多收几个候选（比如一句话里同时有"周四"和"10月22日"），也不要因为写得绕就
+    把对的日期判成编的。
+    """
+    found: set[date] = set()
+    for match in _LITERAL_DATE.finditer(text):
+        year, month, day = match.groups()
+        try:
+            month, day = int(month), int(day)
+            if not (1 <= month <= 12 and 1 <= day <= 31):
+                continue
+            candidate = date(int(year) if year else base.year, month, day)
+            if not year and candidate < base - timedelta(days=180):
+                # 没写年份的"1月5日"出现在 12 月：说的是明年
+                candidate = date(base.year + 1, month, day)
+        except ValueError:
+            continue
+        found.add(candidate)
+    for match in _DAY_ONLY.finditer(text):
+        day = int(match.group(1))
+        for offset in (0, 1):                      # 本月没有这一天就试下个月
+            month = base.month + offset
+            year = base.year + (month - 1) // 12
+            month = (month - 1) % 12 + 1
+            try:
+                candidate = date(year, month, day)
+            except ValueError:
+                continue
+            if candidate >= base:
+                found.add(candidate)
+                break
+    for match in _RELATIVE.finditer(text):
+        token = match.group(0)
+        if token in ("今天", "今日"):
+            days = 0
+        elif token in ("明天", "明日"):
+            days = 1
+        elif token == "后天":
+            days = 2
+        elif token == "大后天":
+            days = 3
+        elif token.startswith("下周"):
+            # 下周一是"下周一"，不是"本周一"：先走到下周一，再往后数
+            days = (7 - base.weekday()) + _CN_WEEKDAY[match.group(2)]
+        else:
+            char = match.group(3) or match.group(4) or match.group(5)
+            days = (_CN_WEEKDAY[char] - base.weekday()) % 7
+        found.add(base + timedelta(days=days))
+    return found
+
+
+def merge_deadline(rows: list[dict], proposed: Any,
+                   messages: list[dict] | None = None) -> str | None:
+    """合并后的期限：**回执里从原文重读的那份优先，但必须对得上原文**。
+
+    第一轮可能两条都漏了期限（真机 T26：一份原文"周四早上"、一份"明天交"，库里都是
+    null），合并是最后一次同时看到两份原文的机会。所以第二轮允许回 ``deadline``，
+    这里只做一件事：拿回执的日期去 ``messages`` 里找依据——字面日期、今天/明天/后天、
+    周几/星期几，任何一种能算出同一天就收；算不出来就**退回旧值里最晚的那个**，不让
+    模型随手编的日期进库。时分不参与校验：模型按"只写日期"给，``parse_deadline``
+    已经落 23:59。
+    """
+    candidate = parse_deadline(proposed)
+    if candidate and messages:
+        target = date.fromisoformat(candidate[:10])
+        for msg in messages:
+            base = _message_date(msg.get("created_at"))
+            if base and target in _dates_in(str(msg.get("content") or ""), base):
+                return candidate
+    stamps = [str(row.get("deadline")) for row in rows if row.get("deadline")]
+    return max(stamps) if stamps else None
